@@ -1,0 +1,478 @@
+import json
+import os
+import re
+import sys
+import time
+from calendar import monthrange
+from datetime import date, datetime
+
+from colorama import Fore, Style, init
+
+init()
+
+
+def _stdout_supports(text):
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+_USE_UNICODE_UI = _stdout_supports("╭╮╰╯│─⚠️")
+_BOX_TOP_LEFT = "╭" if _USE_UNICODE_UI else "+"
+_BOX_TOP_RIGHT = "╮" if _USE_UNICODE_UI else "+"
+_BOX_BOTTOM_LEFT = "╰" if _USE_UNICODE_UI else "+"
+_BOX_BOTTOM_RIGHT = "╯" if _USE_UNICODE_UI else "+"
+_BOX_VERTICAL = "│" if _USE_UNICODE_UI else "|"
+_BOX_HORIZONTAL = "─" if _USE_UNICODE_UI else "-"
+_WARNING_ICON = "⚠️" if _USE_UNICODE_UI else "[!]"
+_HEADER_LINES = (
+    "     _     ____ _   _ _____  __",
+    "    | |   / _//| \\ | |_ _\\ \\/ /",
+    "    | |  | |// |  \\| || | \\  / ",
+    "    | |__| //| | |\\  || | /  \\ ",
+    "    |_____//__/|_| \\_|___/_/\\_\\",
+)
+
+
+def ui_line(length):
+    return _BOX_HORIZONTAL * length
+
+
+def clear_terminal():
+    if os.name == "nt":
+        os.system("cls")
+    elif os.name == "posix":
+        os.system("clear")
+    else:
+        print("\033c", end="")
+
+
+def header(path: str = None, clear: bool = True, løn: list = None, invalid_choice: bool = False):
+    if clear:
+        clear_terminal()
+    print(Fore.GREEN + "\n".join(_HEADER_LINES) + Style.RESET_ALL)
+    if path is None:
+        return
+
+    path_length = len(path)
+    border_length_minus_edges = path_length + 4
+    print(Fore.GREEN + "    " + _BOX_TOP_LEFT + _BOX_HORIZONTAL * border_length_minus_edges + _BOX_TOP_RIGHT)
+    print("    " + _BOX_VERTICAL + "  " + Fore.WHITE + path + Fore.GREEN + "  " + _BOX_VERTICAL)
+    print(Fore.GREEN + "    " + _BOX_BOTTOM_LEFT + _BOX_HORIZONTAL * border_length_minus_edges + _BOX_BOTTOM_RIGHT + Style.RESET_ALL)
+    if not invalid_choice:
+        print("\n" * 2)
+
+
+def error_message(
+    sti: str = None,
+    besked: str = None,
+    ugyldigt_valg: bool = True,
+    sov: float = 0.0,
+    get_input: bool = True,
+):
+    header(sti, invalid_choice=True)
+    print("\n")
+
+    if ugyldigt_valg:
+        besked = "Ugyldigt valg. Prøv igen!"
+
+    if besked:
+        sentences = besked.splitlines()
+        if not sentences:
+            sentences = [""]
+        ansi_escape_pattern = re.compile(r"\x1b\[[0-9;]*m")
+        visible_sentence_lengths = [len(ansi_escape_pattern.sub("", sentence)) for sentence in sentences]
+        biggest_sentence_length = max(visible_sentence_lengths)
+        print(_WARNING_ICON)
+        print(_BOX_TOP_LEFT + _BOX_HORIZONTAL * (biggest_sentence_length + 2) + _BOX_TOP_RIGHT)
+        for sentence, visible_sentence_length in zip(sentences, visible_sentence_lengths):
+            difference_to_biggest = biggest_sentence_length - visible_sentence_length
+            print(
+                Fore.WHITE
+                + _BOX_VERTICAL
+                + Fore.RED
+                + f" {sentence} "
+                + Fore.WHITE
+                + " " * difference_to_biggest
+                + _BOX_VERTICAL
+            )
+        print(_BOX_BOTTOM_LEFT + _BOX_HORIZONTAL * (biggest_sentence_length + 2) + _BOX_BOTTOM_RIGHT + Style.RESET_ALL)
+
+    if sov:
+        time.sleep(sov)
+
+    if get_input:
+        input(Fore.LIGHTBLACK_EX + "\n\nTryk Enter for at gå tilbage..." + Style.RESET_ALL)
+
+
+def load_data():
+    if not os.path.exists("data/løn.txt"):
+        with open("data/løn.txt", "w", encoding="utf-8") as file:
+            json.dump([], file, ensure_ascii=False, indent=4)
+        return []
+
+    with open("data/løn.txt", "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def save_data(new_data):
+    data = load_data()
+    ny_dato = next(iter(new_data))
+
+    for i, entry in enumerate(data):
+        if ny_dato in entry:
+            data[i] = new_data
+            break
+    else:
+        data.append(new_data)
+
+    with open("data/løn.txt", "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=4)
+
+
+def load_settings():
+    if not os.path.exists("data/oplysninger.txt"):
+        default_data = {
+            "skat": 0.4,
+            "fradrag": 0,
+            "am bidrag": 0.08,
+            "su": 9539,
+            "boligstøtte": 1203,
+            "udgifter": 8250,
+            "løn start": 15,
+            "løn slut": 14,
+        }
+        with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
+            json.dump(default_data, file, ensure_ascii=False, indent=4)
+        return []
+
+    with open("data/oplysninger.txt", "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def save_settings(new_settings):
+    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
+    if not all(key in new_settings for key in required_keys):
+        error_message(
+            sti=None,
+            besked=Fore.RED + "Kunne ikke gemme data: nøgle mangler" + Style.RESET_ALL,
+            ugyldigt_valg=False,
+            get_input=True,
+        )
+
+    with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
+        json.dump(new_settings, file, ensure_ascii=False, indent=4)
+
+
+def _shift_month(year, month, months):
+    month = month + months
+    while month > 12:
+        month -= 12
+        year += 1
+    while month < 1:
+        month += 12
+        year -= 1
+    return year, month
+
+
+def _safe_date(year, month, day):
+    day = int(day)
+    if day < 1:
+        day = 1
+
+    max_day = monthrange(year, month)[1]
+    if day > max_day:
+        day = max_day
+
+    return date(year, month, day)
+
+
+def get_salary_period_for_date(dato_obj, løn_start, løn_slut):
+    løn_start = int(løn_start)
+    løn_slut = int(løn_slut)
+
+    current_start = _safe_date(dato_obj.year, dato_obj.month, løn_start)
+    if løn_start > løn_slut:
+        next_year, next_month = _shift_month(dato_obj.year, dato_obj.month, 1)
+        current_end = _safe_date(next_year, next_month, løn_slut)
+    else:
+        current_end = _safe_date(dato_obj.year, dato_obj.month, løn_slut)
+
+    previous_year, previous_month = _shift_month(dato_obj.year, dato_obj.month, -1)
+    previous_start = _safe_date(previous_year, previous_month, løn_start)
+    if løn_start > løn_slut:
+        previous_end = _safe_date(dato_obj.year, dato_obj.month, løn_slut)
+    else:
+        previous_end = _safe_date(previous_year, previous_month, løn_slut)
+
+    if previous_start <= dato_obj <= previous_end:
+        return previous_start, previous_end
+    return current_start, current_end
+
+
+def calculate_netto_salary():
+    settings = load_settings()
+    data = load_data()
+    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
+    if not all(key in settings for key in required_keys):
+        error_message(
+            sti=None,
+            besked=Fore.RED + "Forkerte indstillinger: nøgle(r) mangler" + Style.RESET_ALL,
+            ugyldigt_valg=False,
+            get_input=True,
+        )
+        return None
+
+    if not data:
+        error_message(
+            sti=None,
+            besked=Fore.RED + "Din data er tom. Venligst indberet dagsløn først." + Style.RESET_ALL,
+            ugyldigt_valg=False,
+            get_input=True,
+        )
+        return None
+
+    i_dag = datetime.now().date()
+
+    løn_start = settings.get("løn start")
+    løn_slut = settings.get("løn slut")
+
+    periode_start, periode_slut = get_salary_period_for_date(i_dag, løn_start, løn_slut)
+
+    total_timer = 0
+    total_brutto = 0
+    for entry in data:
+        dato_str, løn_info = next(iter(entry.items()))
+        dato_obj = datetime.strptime(dato_str, "%d-%m-%Y").date()
+
+        if periode_start <= dato_obj <= periode_slut:
+            timer = løn_info.get("timer", 0)
+            timeløn = løn_info.get("timeløn", 0)
+            total_timer += timer
+            total_brutto += timer * timeløn
+
+    netto = calculate_netto_salary_from_brutto(total_brutto)
+    return total_brutto, netto, total_timer
+
+
+def calculate_all_netto_salaries():
+    settings = load_settings()
+    data = load_data()
+    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
+    if not all(key in settings for key in required_keys):
+        error_message(
+            sti=None,
+            besked=Fore.RED + "Forkerte indstillinger: nøgle(r) mangler" + Style.RESET_ALL,
+            ugyldigt_valg=False,
+            get_input=True,
+        )
+        return None
+
+    if not data:
+        error_message(
+            sti=None,
+            besked=Fore.RED + "Din data er tom. Venligst indberet dagsløn først." + Style.RESET_ALL,
+            ugyldigt_valg=False,
+            get_input=True,
+        )
+        return None
+
+    løn_start = settings.get("løn start")
+    løn_slut = settings.get("løn slut")
+
+    lønsedler = {}
+    for entry in data:
+        dato_str, løn_info = next(iter(entry.items()))
+        dato_obj = datetime.strptime(dato_str, "%d-%m-%Y").date()
+        periode_start, periode_slut = get_salary_period_for_date(dato_obj, løn_start, løn_slut)
+
+        lønseddel_nøgle = (periode_start, periode_slut)
+        if lønseddel_nøgle not in lønsedler:
+            lønsedler[lønseddel_nøgle] = {
+                "periode_start": periode_start,
+                "periode_slut": periode_slut,
+                "timer": 0,
+                "brutto": 0,
+            }
+
+        timer = løn_info.get("timer", 0)
+        timeløn = løn_info.get("timeløn", 0)
+        brutto = timer * timeløn
+
+        lønsedler[lønseddel_nøgle]["timer"] += timer
+        lønsedler[lønseddel_nøgle]["brutto"] += brutto
+
+    sorterede_lønsedler = sorted(lønsedler.values(), key=lambda value: value["periode_start"], reverse=True)
+    for lønseddel in sorterede_lønsedler:
+        lønseddel["netto"] = calculate_netto_salary_from_brutto(lønseddel["brutto"])
+
+    return sorterede_lønsedler
+
+
+def calculate_salary_forecast(data=None, settings=None, today=None):
+    settings = settings if settings is not None else load_settings()
+    data = data if data is not None else load_data()
+
+    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
+    if not all(key in settings for key in required_keys):
+        return None
+
+    if not data:
+        return None
+
+    if today is None:
+        today = datetime.now().date()
+
+    løn_start = settings.get("løn start")
+    løn_slut = settings.get("løn slut")
+    periode_start, periode_slut = get_salary_period_for_date(today, løn_start, løn_slut)
+
+    total_days = (periode_slut - periode_start).days + 1
+    elapsed_days = min(max((today - periode_start).days + 1, 1), total_days)
+    remaining_days = max(total_days - elapsed_days, 0)
+    progress_ratio = elapsed_days / total_days if total_days else 1
+
+    current_hours = 0.0
+    current_brutto = 0.0
+    historical_periods = {}
+
+    for entry in data:
+        dato_str, løn_info = next(iter(entry.items()))
+        dato_obj = datetime.strptime(dato_str, "%d-%m-%Y").date()
+        timer = float(løn_info.get("timer", 0))
+        timeløn = float(løn_info.get("timeløn", 0))
+        brutto = timer * timeløn
+
+        entry_periode_start, entry_periode_slut = get_salary_period_for_date(dato_obj, løn_start, løn_slut)
+        period_key = (entry_periode_start, entry_periode_slut)
+        if period_key not in historical_periods:
+            historical_periods[period_key] = {
+                "periode_start": entry_periode_start,
+                "periode_slut": entry_periode_slut,
+                "timer": 0.0,
+                "brutto": 0.0,
+                "total_days": (entry_periode_slut - entry_periode_start).days + 1,
+            }
+
+        historical_periods[period_key]["timer"] += timer
+        historical_periods[period_key]["brutto"] += brutto
+
+        if periode_start <= dato_obj <= today:
+            current_hours += timer
+            current_brutto += brutto
+
+    afsluttede_perioder = [
+        period
+        for period in historical_periods.values()
+        if period["periode_slut"] < periode_start
+    ]
+
+    historical_daily_hours = None
+    historical_daily_brutto = None
+    historical_average_hours = None
+    historical_average_brutto = None
+    if afsluttede_perioder:
+        historical_total_days = sum(period["total_days"] for period in afsluttede_perioder)
+        historical_total_hours = sum(period["timer"] for period in afsluttede_perioder)
+        historical_total_brutto = sum(period["brutto"] for period in afsluttede_perioder)
+
+        if historical_total_days > 0:
+            historical_daily_hours = historical_total_hours / historical_total_days
+            historical_daily_brutto = historical_total_brutto / historical_total_days
+
+        historical_average_hours = historical_total_hours / len(afsluttede_perioder)
+        historical_average_brutto = historical_total_brutto / len(afsluttede_perioder)
+
+    current_daily_hours = current_hours / elapsed_days if elapsed_days > 0 else None
+    current_daily_brutto = current_brutto / elapsed_days if elapsed_days > 0 else None
+
+    estimated_remaining_daily_hours = _blend_forecast_rate(current_daily_hours, historical_daily_hours, progress_ratio)
+    estimated_remaining_daily_brutto = _blend_forecast_rate(current_daily_brutto, historical_daily_brutto, progress_ratio)
+
+    estimated_total_hours = None
+    estimated_total_brutto = None
+    if estimated_remaining_daily_hours is not None:
+        estimated_total_hours = current_hours + (estimated_remaining_daily_hours * remaining_days)
+    if estimated_remaining_daily_brutto is not None:
+        estimated_total_brutto = current_brutto + (estimated_remaining_daily_brutto * remaining_days)
+
+    estimated_total_netto = None
+    estimated_total_with_support = None
+    if estimated_total_brutto is not None:
+        estimated_total_netto = calculate_netto_salary_from_brutto(estimated_total_brutto)
+        estimated_total_with_support = estimated_total_netto + settings.get("su", 0) + settings.get("boligstøtte", 0)
+
+    current_netto = calculate_netto_salary_from_brutto(current_brutto)
+
+    return {
+        "periode_start": periode_start,
+        "periode_slut": periode_slut,
+        "total_days": total_days,
+        "elapsed_days": elapsed_days,
+        "remaining_days": remaining_days,
+        "progress_ratio": progress_ratio,
+        "current_hours": current_hours,
+        "current_brutto": current_brutto,
+        "current_netto": current_netto,
+        "historical_periods_count": len(afsluttede_perioder),
+        "historical_average_hours": historical_average_hours,
+        "historical_average_brutto": historical_average_brutto,
+        "estimated_hours": estimated_total_hours,
+        "estimated_brutto": estimated_total_brutto,
+        "estimated_netto": estimated_total_netto,
+        "estimated_total_with_support": estimated_total_with_support,
+    }
+
+
+def _blend_forecast_rate(current_rate, historical_rate, progress_ratio):
+    if current_rate is None and historical_rate is None:
+        return None
+
+    if current_rate is None:
+        return historical_rate
+
+    if historical_rate is None:
+        return current_rate
+
+    return (historical_rate * (1 - progress_ratio)) + (current_rate * progress_ratio)
+
+
+def calculate_salary_breakdown(brutto, skat, fradrag, am_bidrag=0.08):
+    brutto = float(brutto)
+    skat = float(skat)
+    fradrag = float(fradrag)
+    am_bidrag = float(am_bidrag)
+
+    am_beløb = brutto * am_bidrag
+    efter_am = brutto - am_beløb
+    skattegrundlag = max(0, efter_am - fradrag)
+    skat_beløb = skattegrundlag * skat
+    netto = efter_am - skat_beløb
+
+    return {
+        "brutto": brutto,
+        "am_bidrag": am_beløb,
+        "efter_am": efter_am,
+        "fradrag": fradrag,
+        "skattegrundlag": skattegrundlag,
+        "skat": skat_beløb,
+        "netto": netto,
+    }
+
+
+def calculate_salary_breakdown_from_brutto(brutto):
+    settings = load_settings()
+
+    return calculate_salary_breakdown(
+        brutto,
+        settings.get("skat", 1),
+        settings.get("fradrag", 0),
+        settings.get("am bidrag", 1),
+    )
+
+
+def calculate_netto_salary_from_brutto(brutto):
+    return calculate_salary_breakdown_from_brutto(brutto)["netto"]
