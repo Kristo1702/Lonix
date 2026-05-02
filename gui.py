@@ -148,6 +148,10 @@ QPushButton#SecondaryButton {
 QPushButton#SecondaryButton:hover {
     background: #d9e1e6;
 }
+QPushButton#SecondaryButton:checked {
+    background: #1f8a70;
+    color: #ffffff;
+}
 QLineEdit, QComboBox {
     background: #ffffff;
     border: 1px solid #cfd8e3;
@@ -800,7 +804,7 @@ class DashboardPage(BasePage):
         self.estimate_card.set_values(format_money(estimated_total), f"Estimeret rådighed: {format_money(estimated_available)}")
         self.available_card.set_values(format_money(available_now), f"Budgetterede faste udgifter: {format_money(budget_expenses)}")
         self.hours_card.set_values(f"{format_number(summary['timer'])} t.", f"{len(summary['rows'])} vagter i perioden")
-        self.gross_card.set_values(format_money(summary["brutto"]), f"Skat: {format_percent(self.settings.get('skat'))}")
+        self.gross_card.set_values(format_money(summary["brutto"]), "Før skat")
         self.period_card.set_values(
             f"d. {self.settings.get('løn start')} - d. {self.settings.get('løn slut')}",
             format_period(summary),
@@ -1144,7 +1148,7 @@ class PaymentsPage(BasePage):
     def __init__(self, window):
         super().__init__(
             window,
-            "Udbetalinger",
+            "Lønsedler",
             "Afsluttede lønperioder med løn, anden indkomst og total udbetaling.",
         )
 
@@ -1152,7 +1156,7 @@ class PaymentsPage(BasePage):
         content.setSpacing(16)
         self.root.addLayout(content, 1)
 
-        table_panel, table_layout = make_panel("Afsluttede lønperioder")
+        table_panel, table_layout = make_panel("Afsluttede lønsedler")
         content.addWidget(table_panel, 2)
         self.payments_table = QTableWidget()
         setup_table(self.payments_table, ["Periode", "Timer", "Brutto", "Netto", "Total"])
@@ -1207,7 +1211,7 @@ class PaymentsPage(BasePage):
             ("Periode", format_period(period)),
             ("Vagter", str(period["vagter"])),
             ("Timer", f"{format_number(period['timer'])} t."),
-            ("Gennemsnitlig timeløn", format_money(avg_rate)),
+            ("Timeløn", format_money(avg_rate)),
             ("Brutto løn", format_money(period["brutto"])),
             ("AM-bidrag", f"-{format_money(period['am_bidrag'])}"),
             ("Skat", f"-{format_money(period['skat'])}"),
@@ -1227,9 +1231,16 @@ class StatisticsPage(BasePage):
         super().__init__(
             window,
             "Statistik",
-            "Nøgletal, rekorder, udvikling, arbejdsmønster og prognose.",
+            "Nøgletal, rekorder, prognose og grafer samlet ét sted.",
         )
 
+        self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(False)
+        self.root.addWidget(self.tabs, 1)
+
+        numbers_tab = QWidget()
+        numbers_layout = QVBoxLayout(numbers_tab)
+        numbers_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
@@ -1238,17 +1249,47 @@ class StatisticsPage(BasePage):
         self.body_layout.setContentsMargins(0, 0, 0, 0)
         self.body_layout.setSpacing(16)
         self.scroll.setWidget(self.body)
-        self.root.addWidget(self.scroll, 1)
+        numbers_layout.addWidget(self.scroll)
+        self.tabs.addTab(numbers_tab, "Nøgletal")
+
+        charts_tab = QWidget()
+        charts_layout = QVBoxLayout(charts_tab)
+        charts_layout.setContentsMargins(0, 0, 0, 0)
+        self.charts_scroll = QScrollArea()
+        self.charts_scroll.setWidgetResizable(True)
+        self.charts_scroll.setFrameShape(QFrame.NoFrame)
+        self.charts_body = QWidget()
+        self.charts_body_layout = QVBoxLayout(self.charts_body)
+        self.charts_body_layout.setContentsMargins(0, 0, 0, 0)
+        self.charts_body_layout.setSpacing(16)
+        self.charts_scroll.setWidget(self.charts_body)
+        charts_layout.addWidget(self.charts_scroll)
+        self.tabs.addTab(charts_tab, "Grafer")
+
+        self.hours_chart = LineChart()
+        self.salary_chart = LineChart()
+        self.development_chart = LineChart()
+        for title, chart in [
+            ("Timer pr. lønperiode", self.hours_chart),
+            ("Brutto/netto pr. lønperiode", self.salary_chart),
+            ("Udvikling i netto løn", self.development_chart),
+        ]:
+            panel, layout = make_panel(title)
+            layout.addWidget(chart)
+            self.charts_body_layout.addWidget(panel)
+        self.charts_body_layout.addStretch()
 
     def refresh(self):
         clear_layout(self.body_layout)
         if not self.data:
             self.body_layout.addWidget(make_message("Der er ingen løndata endnu. Opret en indberetning først."))
             self.body_layout.addStretch()
+            self._refresh_charts()
             return
         if not has_required_settings(self.settings):
             self.body_layout.addWidget(make_message("Indstillingerne mangler nøgler, så statistik kan ikke beregnes."))
             self.body_layout.addStretch()
+            self._refresh_charts()
             return
 
         try:
@@ -1256,6 +1297,7 @@ class StatisticsPage(BasePage):
         except Exception as error:
             self.body_layout.addWidget(make_message(f"Kunne ikke beregne statistik:\n{error}"))
             self.body_layout.addStretch()
+            self._refresh_charts()
             return
 
         self._add_metric_grid(stats)
@@ -1268,6 +1310,36 @@ class StatisticsPage(BasePage):
         self._add_deductions(stats)
         self._add_forecast(stats)
         self.body_layout.addStretch()
+        self._refresh_charts()
+
+    def _refresh_charts(self):
+        periods, _ = build_periods(self.data, self.settings)
+        labels = [month_title(period) for period in periods]
+
+        self.hours_chart.set_data(
+            labels,
+            [("Timer", [period["timer"] for period in periods], "#1f8a70")],
+        )
+        self.salary_chart.set_data(
+            labels,
+            [
+                ("Brutto", [period["brutto"] for period in periods], "#2563eb"),
+                ("Netto", [period["netto"] for period in periods], "#1f8a70"),
+            ],
+        )
+
+        net_development = []
+        previous = None
+        for period in periods:
+            if previous is None:
+                net_development.append(0)
+            else:
+                net_development.append(period["netto"] - previous)
+            previous = period["netto"]
+        self.development_chart.set_data(
+            labels,
+            [("Ændring", net_development, "#d97706")],
+        )
 
     def _add_metric_grid(self, stats):
         grid = QGridLayout()
@@ -1442,71 +1514,6 @@ class StatisticsPage(BasePage):
                 ["Estimeret rådighedsbeløb", format_money(forecast["estimated_disposable_income"])],
             ]
         self._add_table("Prognose", ["Måling", "Værdi"], rows)
-
-
-class ChartsPage(BasePage):
-    def __init__(self, window):
-        super().__init__(
-            window,
-            "Grafer",
-            "Visuel udvikling for timer, brutto og netto pr. lønperiode.",
-        )
-
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self.body = QWidget()
-        self.body_layout = QVBoxLayout(self.body)
-        self.body_layout.setContentsMargins(0, 0, 0, 0)
-        self.body_layout.setSpacing(16)
-        self.scroll.setWidget(self.body)
-        self.root.addWidget(self.scroll, 1)
-
-        self.hours_chart = LineChart()
-        self.salary_chart = LineChart()
-        self.development_chart = LineChart()
-
-        for title, chart in [
-            ("Timer pr. lønperiode", self.hours_chart),
-            ("Brutto/netto pr. lønperiode", self.salary_chart),
-            ("Udvikling i netto løn", self.development_chart),
-        ]:
-            panel, layout = make_panel(title)
-            layout.addWidget(chart)
-            self.body_layout.addWidget(panel)
-        self.body_layout.addStretch()
-
-    def refresh(self):
-        periods, _ = build_periods(self.data, self.settings)
-        labels = [month_title(period) for period in periods]
-        if not periods:
-            labels = []
-
-        self.hours_chart.set_data(
-            labels,
-            [("Timer", [period["timer"] for period in periods], "#1f8a70")],
-        )
-        self.salary_chart.set_data(
-            labels,
-            [
-                ("Brutto", [period["brutto"] for period in periods], "#2563eb"),
-                ("Netto", [period["netto"] for period in periods], "#1f8a70"),
-            ],
-        )
-
-        net_development = []
-        previous = None
-        for period in periods:
-            if previous is None:
-                net_development.append(0)
-            else:
-                net_development.append(period["netto"] - previous)
-            previous = period["netto"]
-        self.development_chart.set_data(
-            labels,
-            [("Ændring", net_development, "#d97706")],
-        )
-
 
 class HistoryPage(BasePage):
     def __init__(self, window):
@@ -1986,19 +1993,14 @@ class MainWindow(QMainWindow):
 
         self._add_page(sidebar_layout, "Overblik", DashboardPage(self))
         self._add_page(sidebar_layout, "Indberet", EntryPage(self))
-        self._add_page(sidebar_layout, "Lønberegner", CalculatorPage(self))
-        self._add_page(sidebar_layout, "Udbetalinger", PaymentsPage(self))
+        self._add_page(sidebar_layout, "Lønsedler", PaymentsPage(self))
         self._add_page(sidebar_layout, "Statistik", StatisticsPage(self))
-        self._add_page(sidebar_layout, "Grafer", ChartsPage(self))
         self._add_page(sidebar_layout, "Budget", BudgetPage(self))
         self._add_page(sidebar_layout, "Historik", HistoryPage(self))
-        self._add_page(sidebar_layout, "Indstillinger", SettingsPage(self))
 
         sidebar_layout.addStretch()
-        refresh_button = QPushButton("Opdater")
-        refresh_button.setObjectName("SecondaryButton")
-        refresh_button.clicked.connect(self.refresh_all)
-        sidebar_layout.addWidget(refresh_button)
+        self._add_footer_page(sidebar_layout, "Indstillinger", SettingsPage(self))
+        self._add_footer_page(sidebar_layout, "Lønberegner", CalculatorPage(self))
 
         self.nav_buttons[0].setChecked(True)
         self.stack.setCurrentIndex(0)
@@ -2008,6 +2010,18 @@ class MainWindow(QMainWindow):
         index = len(self.pages)
         button = QPushButton(label)
         button.setObjectName("NavButton")
+        button.setCheckable(True)
+        button.clicked.connect(lambda checked=False, page_index=index: self.stack.setCurrentIndex(page_index))
+        self.button_group.addButton(button)
+        self.nav_buttons.append(button)
+        sidebar_layout.addWidget(button)
+        self.pages.append(page)
+        self.stack.addWidget(page)
+
+    def _add_footer_page(self, sidebar_layout, label, page):
+        index = len(self.pages)
+        button = QPushButton(label)
+        button.setObjectName("SecondaryButton")
         button.setCheckable(True)
         button.clicked.connect(lambda checked=False, page_index=index: self.stack.setCurrentIndex(page_index))
         self.button_group.addButton(button)
