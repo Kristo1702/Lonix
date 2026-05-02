@@ -10,6 +10,9 @@ from colorama import Fore, Style, init
 
 init()
 
+REQUIRED_SETTINGS_KEYS = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
+DEFAULT_FIXED_EXPENSES = 8250
+
 
 def _stdout_supports(text):
     encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
@@ -109,6 +112,9 @@ def error_message(
 
 
 def load_data():
+    if not os.path.exists("data"):
+        os.mkdir("data")
+
     if not os.path.exists("data/løn.txt"):
         with open("data/løn.txt", "w", encoding="utf-8") as file:
             json.dump([], file, ensure_ascii=False, indent=4)
@@ -129,11 +135,16 @@ def save_data(new_data):
     else:
         data.append(new_data)
 
+    data = sorted(data, key=lambda entry: datetime.strptime(next(iter(entry)), "%d-%m-%Y"))
+
     with open("data/løn.txt", "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=4)
 
 
 def load_settings():
+    if not os.path.exists("data"):
+        os.mkdir("data")
+
     if not os.path.exists("data/oplysninger.txt"):
         default_data = {
             "skat": 0.4,
@@ -141,30 +152,109 @@ def load_settings():
             "am bidrag": 0.08,
             "su": 9539,
             "boligstøtte": 1203,
-            "udgifter": 8250,
+            "udgifter": DEFAULT_FIXED_EXPENSES,
+            "budget kategorier": [
+                {"navn": "Faste udgifter", "beløb": DEFAULT_FIXED_EXPENSES}
+            ],
+            "ønsket rådighedsbeløb": 1000,
             "løn start": 15,
             "løn slut": 14,
         }
         with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
             json.dump(default_data, file, ensure_ascii=False, indent=4)
-        return []
+        return default_data
 
     with open("data/oplysninger.txt", "r", encoding="utf-8") as file:
-        return json.load(file)
+        settings = json.load(file)
+
+    return normalize_settings(settings)
 
 
 def save_settings(new_settings):
-    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
-    if not all(key in new_settings for key in required_keys):
-        error_message(
-            sti=None,
-            besked=Fore.RED + "Kunne ikke gemme data: nøgle mangler" + Style.RESET_ALL,
-            ugyldigt_valg=False,
-            get_input=True,
-        )
+    new_settings = normalize_settings(new_settings)
+    if not all(key in new_settings for key in REQUIRED_SETTINGS_KEYS):
+        raise ValueError("Kunne ikke gemme data: nøgle mangler")
+
+    # Legacy compatibility only. New calculations use budget categories.
+    new_settings["udgifter"] = calculate_budget_expenses(new_settings)
+
+    if not os.path.exists("data"):
+        os.mkdir("data")
 
     with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
         json.dump(new_settings, file, ensure_ascii=False, indent=4)
+
+
+def normalize_settings(settings):
+    if not isinstance(settings, dict):
+        settings = {}
+
+    normalized = dict(settings)
+    if "udgifter" not in normalized:
+        normalized["udgifter"] = DEFAULT_FIXED_EXPENSES
+
+    if "budget kategorier" not in normalized:
+        legacy_expenses = float(normalized.get("udgifter", 0) or 0)
+        normalized["budget kategorier"] = [
+            {"navn": "Faste udgifter", "beløb": legacy_expenses}
+        ]
+    else:
+        clean_categories = []
+        for item in normalized.get("budget kategorier", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                amount = float(item.get("beløb", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            clean_categories.append(
+                {
+                    "navn": str(item.get("navn", "Kategori")),
+                    "beløb": max(0.0, amount),
+                }
+            )
+        normalized["budget kategorier"] = clean_categories
+
+    if "ønsket rådighedsbeløb" not in normalized:
+        normalized["ønsket rådighedsbeløb"] = float(normalized.get("rådighed advarsel", 1000) or 0)
+    normalized.pop("rådighed advarsel", None)
+
+    return normalized
+
+
+def get_budget_categories(settings=None):
+    settings = normalize_settings(settings if settings is not None else load_settings())
+    categories = []
+    for item in settings.get("budget kategorier", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            amount = float(item.get("beløb", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        categories.append(
+            {
+                "navn": str(item.get("navn", "Kategori")),
+                "beløb": max(0.0, amount),
+            }
+        )
+    return categories
+
+
+def get_disposable_income_goal(settings=None):
+    settings = normalize_settings(settings if settings is not None else load_settings())
+    try:
+        return max(0.0, float(settings.get("ønsket rådighedsbeløb", 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def calculate_budget_expenses(settings=None):
+    return sum(category["beløb"] for category in get_budget_categories(settings))
+
+
+def calculate_disposable_income(total_income, settings=None):
+    return float(total_income) - calculate_budget_expenses(settings)
 
 
 def _shift_month(year, month, months):
@@ -216,8 +306,7 @@ def get_salary_period_for_date(dato_obj, løn_start, løn_slut):
 def calculate_netto_salary():
     settings = load_settings()
     data = load_data()
-    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
-    if not all(key in settings for key in required_keys):
+    if not all(key in settings for key in REQUIRED_SETTINGS_KEYS):
         error_message(
             sti=None,
             besked=Fore.RED + "Forkerte indstillinger: nøgle(r) mangler" + Style.RESET_ALL,
@@ -261,8 +350,7 @@ def calculate_netto_salary():
 def calculate_all_netto_salaries():
     settings = load_settings()
     data = load_data()
-    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
-    if not all(key in settings for key in required_keys):
+    if not all(key in settings for key in REQUIRED_SETTINGS_KEYS):
         error_message(
             sti=None,
             besked=Fore.RED + "Forkerte indstillinger: nøgle(r) mangler" + Style.RESET_ALL,
@@ -316,8 +404,7 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
     settings = settings if settings is not None else load_settings()
     data = data if data is not None else load_data()
 
-    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
-    if not all(key in settings for key in required_keys):
+    if not all(key in settings for key in REQUIRED_SETTINGS_KEYS):
         return None
 
     if not data:
@@ -401,11 +488,16 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
 
     estimated_total_netto = None
     estimated_total_with_support = None
+    estimated_disposable_income = None
     if estimated_total_brutto is not None:
         estimated_total_netto = calculate_netto_salary_from_brutto(estimated_total_brutto)
         estimated_total_with_support = estimated_total_netto + settings.get("su", 0) + settings.get("boligstøtte", 0)
+        estimated_disposable_income = calculate_disposable_income(estimated_total_with_support, settings)
 
     current_netto = calculate_netto_salary_from_brutto(current_brutto)
+    current_total_with_support = current_netto + settings.get("su", 0) + settings.get("boligstøtte", 0)
+    current_disposable_income = calculate_disposable_income(current_total_with_support, settings)
+    budget_expenses = calculate_budget_expenses(settings)
 
     return {
         "periode_start": periode_start,
@@ -417,6 +509,9 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
         "current_hours": current_hours,
         "current_brutto": current_brutto,
         "current_netto": current_netto,
+        "current_total_with_support": current_total_with_support,
+        "current_disposable_income": current_disposable_income,
+        "budget_expenses": budget_expenses,
         "historical_periods_count": len(afsluttede_perioder),
         "historical_average_hours": historical_average_hours,
         "historical_average_brutto": historical_average_brutto,
@@ -424,6 +519,7 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
         "estimated_brutto": estimated_total_brutto,
         "estimated_netto": estimated_total_netto,
         "estimated_total_with_support": estimated_total_with_support,
+        "estimated_disposable_income": estimated_disposable_income,
     }
 
 

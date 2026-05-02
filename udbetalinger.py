@@ -70,7 +70,7 @@ def main():
 
     settings = ft.load_settings()
     data = ft.load_data()
-    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
+    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
     if not all(key in settings for key in required_keys):
         ft.error_message(
             sti="Hovedmenu > udbetalinger",
@@ -91,10 +91,10 @@ def main():
 
     try:
         udbetalinger = ft.calculate_all_netto_salaries()
-    except:
+    except Exception as error:
         ft.error_message(
             sti="Hovedmenu > udbetalinger",
-            besked="Kunne ikke beregne udbetalinger",
+            besked=f"Kunne ikke beregne udbetalinger:\n\n{error}",
             ugyldigt_valg=False,
             get_input=True
         )

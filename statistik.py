@@ -22,7 +22,7 @@ MONTH_NAMES = {
     12: "December",
 }
 
-REQUIRED_KEYS = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
+REQUIRED_KEYS = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -248,6 +248,14 @@ def print_stats(data=None, settings=None):
             [
                 "Estimeret total inkl. SU og boligstøtte",
                 _format_optional(statistics["forecast"]["estimated_total_with_support"], _format_money),
+            ],
+            [
+                "Budgetterede faste udgifter",
+                _format_money(statistics["forecast"]["budget_expenses"]),
+            ],
+            [
+                "Estimeret rådighedsbeløb",
+                _format_optional(statistics["forecast"]["estimated_disposable_income"], _format_money),
             ],
         ],
         right_align={1},
@@ -558,6 +566,8 @@ def _percentage_change(current, previous):
 
 
 def _format_number(value, decimals=2):
+    if decimals <= 0:
+        return f"{value:.0f}"
     return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
 
 

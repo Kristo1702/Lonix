@@ -8,6 +8,8 @@ AM_BIDRAG = 0.08
 
 
 def _format_number(value, decimals=2):
+    if decimals <= 0:
+        return f"{value:.0f}"
     return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
 
 

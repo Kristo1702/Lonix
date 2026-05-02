@@ -12,18 +12,18 @@ def _format_hours(value):
 def build_overview(settings, netto_løn, brutto_løn, timer, forecast=None, rådighed=False):
     bolig = settings.get("boligstøtte", 0)
     su = settings.get("su", 0)
-    udgifter = settings.get("udgifter")
+    faste_udgifter = ft.calculate_budget_expenses(settings)
     løn_start = settings.get("løn start", 15)
     løn_slut = settings.get("løn slut", 14)
 
     total_netto = su + bolig + netto_løn
-    til_rådighed = total_netto - udgifter
+    til_rådighed = ft.calculate_disposable_income(total_netto, settings)
 
     estimeret_total = None
     estimeret_til_rådighed = None
     if forecast and forecast.get("estimated_total_with_support") is not None:
         estimeret_total = forecast["estimated_total_with_support"]
-        estimeret_til_rådighed = estimeret_total - udgifter
+        estimeret_til_rådighed = forecast.get("estimated_disposable_income")
 
     separator = ft.ui_line(42)
     print(Fore.LIGHTBLACK_EX + separator)
@@ -56,9 +56,10 @@ def build_overview(settings, netto_løn, brutto_løn, timer, forecast=None, råd
     if estimeret_total is not None:
         print(Fore.GREEN + f"  - Estimeret total udbetalt: {estimeret_total:.0f} kr.")
     if rådighed:
-        print(Fore.GREEN + f"  - Efter udgifter nu: {til_rådighed:.0f} kr.")
+        print(Fore.LIGHTBLACK_EX + f"  Budgetterede faste udgifter: {faste_udgifter:.0f} kr.")
+        print(Fore.GREEN + f"  - Rådighedsbeløb nu: {til_rådighed:.0f} kr.")
         if estimeret_til_rådighed is not None:
-            print(Fore.GREEN + f"  - Estimeret efter udgifter: {estimeret_til_rådighed:.0f} kr.")
+            print(Fore.GREEN + f"  - Estimeret rådighedsbeløb: {estimeret_til_rådighed:.0f} kr.")
     print(Fore.LIGHTBLACK_EX + "\n" + separator + Style.RESET_ALL)
 
 
@@ -66,7 +67,7 @@ def main():
     ft.header("Hovedmenu > Næste udbetaling")
 
     settings = ft.load_settings()
-    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "udgifter", "løn start", "løn slut"]
+    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
     if not all(key in settings for key in required_keys):
         ft.error_message(
             sti="Hovedmenu > Næste udbetaling",
@@ -79,10 +80,10 @@ def main():
     try:
         brutto, netto, timer = ft.calculate_netto_salary()
         forecast = ft.calculate_salary_forecast(settings=settings)
-    except Exception:
+    except Exception as error:
         ft.error_message(
             sti="Hovedmenu > Næste udbetaling",
-            besked="Kunne ikke beregne netto løn",
+            besked=f"Kunne ikke beregne netto løn:\n\n{error}",
             ugyldigt_valg=False,
             get_input=True,
         )
