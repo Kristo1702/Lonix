@@ -22,7 +22,7 @@ MONTH_NAMES = {
     12: "December",
 }
 
-REQUIRED_KEYS = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
+REQUIRED_KEYS = ft.REQUIRED_SETTINGS_KEYS
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -246,8 +246,8 @@ def print_stats(data=None, settings=None):
             ["Estimerede timer ved periodens slut", _format_optional(statistics["forecast"]["estimated_hours"], _format_number)],
             ["Estimeret løn ved periodens slut", _format_money_pair_optional(statistics["forecast"]["estimated_brutto"], statistics["forecast"]["estimated_netto"])],
             [
-                "Estimeret total inkl. SU og boligstøtte",
-                _format_optional(statistics["forecast"]["estimated_total_with_support"], _format_money),
+                "Estimeret total inkl. anden indkomst",
+                _format_optional(statistics["forecast"]["estimated_total_income"], _format_money),
             ],
             [
                 "Budgetterede faste udgifter",

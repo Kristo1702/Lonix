@@ -10,27 +10,25 @@ def _format_hours(value):
 
 
 def build_overview(settings, netto_løn, brutto_løn, timer, forecast=None, rådighed=False):
-    bolig = settings.get("boligstøtte", 0)
-    su = settings.get("su", 0)
+    anden_indkomst = ft.get_other_income(settings)
     faste_udgifter = ft.calculate_budget_expenses(settings)
     løn_start = settings.get("løn start", 15)
     løn_slut = settings.get("løn slut", 14)
 
-    total_netto = su + bolig + netto_løn
+    total_netto = anden_indkomst + netto_løn
     til_rådighed = ft.calculate_disposable_income(total_netto, settings)
 
     estimeret_total = None
     estimeret_til_rådighed = None
-    if forecast and forecast.get("estimated_total_with_support") is not None:
-        estimeret_total = forecast["estimated_total_with_support"]
+    if forecast and forecast.get("estimated_total_income") is not None:
+        estimeret_total = forecast["estimated_total_income"]
         estimeret_til_rådighed = forecast.get("estimated_disposable_income")
 
     separator = ft.ui_line(42)
     print(Fore.LIGHTBLACK_EX + separator)
 
     print(Fore.WHITE + "\n  ===== ANDEN INDKOMST =====")
-    print(Fore.LIGHTGREEN_EX + f"  - SU: {su} kr.")
-    print(f"  - Boligstøtte: {bolig} kr.")
+    print(Fore.LIGHTGREEN_EX + f"  - Anden indkomst (netto): {anden_indkomst:.0f} kr.")
 
     print(Fore.WHITE + "\n  ===== LØN =====")
     print(Fore.LIGHTBLACK_EX + f"  OBS: Lønperiode fra d.{løn_start} - d.{løn_slut}")
@@ -67,7 +65,7 @@ def main():
     ft.header("Hovedmenu > Næste udbetaling")
 
     settings = ft.load_settings()
-    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
+    required_keys = ft.REQUIRED_SETTINGS_KEYS
     if not all(key in settings for key in required_keys):
         ft.error_message(
             sti="Hovedmenu > Næste udbetaling",

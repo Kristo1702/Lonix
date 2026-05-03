@@ -40,9 +40,8 @@ def build_udbetaling_overview(settings, udbetaling):
     timer = udbetaling.get("timer", 0)
     brutto = udbetaling.get("brutto", 0)
     netto_løn = udbetaling.get("netto", 0)
-    su = settings.get("su", 0)
-    boligstøtte = settings.get("boligstøtte", 0)
-    total_udbetalt = netto_løn + su + boligstøtte
+    anden_indkomst = ft.get_other_income(settings)
+    total_udbetalt = netto_løn + anden_indkomst
     titel = _get_udbetaling_titel(udbetaling)
 
     print(Fore.LIGHTBLACK_EX + "───────────────────────────────────────")
@@ -58,8 +57,7 @@ def build_udbetaling_overview(settings, udbetaling):
     print(Fore.LIGHTGREEN_EX + f"  • Netto løn: {netto_løn:.0f} kr.")
 
     print(Fore.WHITE + "\n  ===== ANDEN INDKOMST =====")
-    print(Fore.LIGHTGREEN_EX + f"  • SU: {su:.0f} kr.")
-    print(Fore.LIGHTGREEN_EX + f"  • Boligstøtte: {boligstøtte:.0f} kr.")
+    print(Fore.LIGHTGREEN_EX + f"  • Anden indkomst (netto): {anden_indkomst:.0f} kr.")
 
     print(Fore.WHITE + "\n  ===== TOTAL =====")
     print(Fore.GREEN + f"  • Total udbetalt: {total_udbetalt:.0f} kr.")
@@ -70,7 +68,7 @@ def main():
 
     settings = ft.load_settings()
     data = ft.load_data()
-    required_keys = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
+    required_keys = ft.REQUIRED_SETTINGS_KEYS
     if not all(key in settings for key in required_keys):
         ft.error_message(
             sti="Hovedmenu > udbetalinger",

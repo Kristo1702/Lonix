@@ -3,13 +3,15 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 
-from PyQt5.QtCore import QPointF, Qt
-from PyQt5.QtGui import QColor, QFont, QPainter, QPen
+from PyQt5.QtCore import QPointF, QSize, Qt, QTimer
+from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QButtonGroup,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -36,8 +38,11 @@ import functions as ft
 import statistik
 
 
+LOGO_PATH = os.path.join(os.environ.get("LOCALAPPDATA", ""), "lønix", "logo.png")
+
+
 APP_NAME = "Lønix"
-REQUIRED_KEYS = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
+REQUIRED_KEYS = ["skat", "fradrag", "am bidrag", "anden indkomst netto", "løn start", "løn slut"]
 
 MONTH_NAMES = {
     1: "Januar",
@@ -152,6 +157,17 @@ QPushButton#SecondaryButton:checked {
     background: #1f8a70;
     color: #ffffff;
 }
+QPushButton#InlineButton {
+    background: transparent;
+    color: #1f8a70;
+    border: 1px solid #cfd8e3;
+    border-radius: 6px;
+    padding: 5px 9px;
+    font-weight: 700;
+}
+QPushButton#InlineButton:hover {
+    background: #edf7f4;
+}
 QLineEdit, QComboBox {
     background: #ffffff;
     border: 1px solid #cfd8e3;
@@ -186,6 +202,9 @@ QScrollArea {
 QScrollArea > QWidget > QWidget {
     background: transparent;
 }
+QWidget#PageBody {
+    background: transparent;
+}
 QProgressBar {
     background: #e7ecef;
     border: 0;
@@ -204,14 +223,18 @@ QTabWidget::pane {
 QTabBar::tab {
     background: #e7ecef;
     border-radius: 7px;
-    padding: 9px 13px;
-    margin-right: 6px;
+    padding: 10px 18px;
+    margin-right: 8px;
+    min-width: 74px;
     color: #42505f;
     font-weight: 700;
 }
 QTabBar::tab:selected {
     background: #1f8a70;
     color: white;
+}
+QTabWidget#CalculatorTabs QTabBar::tab {
+    min-width: 128px;
 }
 QScrollBar:vertical {
     background: transparent;
@@ -306,7 +329,7 @@ def format_date(value):
 
 def parse_number_text(value):
     cleaned = value.strip().lower()
-    for token in ["kr.", "kr", "t.", "timer", "time", "%"]:
+    for token in ["kr.", "kr", "t.", "timer", "time", "d.", "%"]:
         cleaned = cleaned.replace(token, "")
     cleaned = cleaned.replace(" ", "").replace(",", ".")
     if not cleaned:
@@ -460,10 +483,10 @@ def delete_entry(entry_date):
     save_entry_rows(rows)
 
 
-def last_rate(data):
+def last_rate(data, settings=None):
     rows = entry_rows(data)
     if not rows:
-        return 150.0
+        return ft.get_default_hourly_rate(settings)
     return rows[0]["timeløn"]
 
 
@@ -516,7 +539,35 @@ def table_item(value, align=Qt.AlignLeft | Qt.AlignVCenter):
     return item
 
 
+def load_logo_pixmap(size=None):
+    if not LOGO_PATH or not os.path.exists(LOGO_PATH):
+        return QPixmap()
+    pixmap = QPixmap(LOGO_PATH)
+    if pixmap.isNull() or size is None:
+        return pixmap
+    return pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
+def make_logo_label(size, object_name=None):
+    pixmap = load_logo_pixmap(size)
+    if pixmap.isNull():
+        return None
+    label = QLabel()
+    if object_name:
+        label.setObjectName(object_name)
+    label.setPixmap(pixmap)
+    label.setFixedSize(size)
+    label.setAlignment(Qt.AlignCenter)
+    return label
+
+
+def app_icon():
+    pixmap = load_logo_pixmap()
+    return QIcon(pixmap) if not pixmap.isNull() else QIcon()
+
+
 def setup_table(table, headers):
+    table.setMinimumWidth(0)
     table.setColumnCount(len(headers))
     table.setHorizontalHeaderLabels(headers)
     table.verticalHeader().setVisible(False)
@@ -524,6 +575,8 @@ def setup_table(table, headers):
     table.setSelectionBehavior(QAbstractItemView.SelectRows)
     table.setSelectionMode(QAbstractItemView.SingleSelection)
     table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
     table.horizontalHeader().setStretchLastSection(True)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
@@ -542,6 +595,7 @@ def clear_layout(layout):
 def make_panel(title):
     panel = QGroupBox(title)
     panel.setObjectName("Panel")
+    panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
     layout = QVBoxLayout(panel)
     layout.setContentsMargins(16, 20, 16, 16)
     layout.setSpacing(10)
@@ -560,22 +614,27 @@ class MetricCard(QFrame):
     def __init__(self, title, value="-", subtitle="", accent="#1f8a70"):
         super().__init__()
         self.setObjectName("Card")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(118)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setMinimumHeight(106)
+        self.setMinimumWidth(0)
         self.accent = accent
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(6)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(4)
 
         self.title_label = QLabel(title)
         self.title_label.setObjectName("MetricTitle")
+        self.title_label.setWordWrap(True)
         self.value_label = QLabel(value)
         self.value_label.setObjectName("MetricValue")
         self.value_label.setWordWrap(True)
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("MetricSub")
         self.subtitle_label.setWordWrap(True)
+        for label in [self.title_label, self.value_label, self.subtitle_label]:
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label)
@@ -693,9 +752,24 @@ class BasePage(QWidget):
     def __init__(self, window, title, subtitle):
         super().__init__()
         self.window = window
-        self.root = QVBoxLayout(self)
+
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page_layout.addWidget(self.scroll_area)
+
+        self.page_body = QWidget()
+        self.page_body.setObjectName("PageBody")
+        self.scroll_area.setWidget(self.page_body)
+
+        self.root = QVBoxLayout(self.page_body)
         self.root.setContentsMargins(28, 24, 28, 24)
-        self.root.setSpacing(18)
+        self.root.setSpacing(16)
 
         title_label = QLabel(title)
         title_label.setObjectName("PageTitle")
@@ -723,30 +797,30 @@ class DashboardPage(BasePage):
         super().__init__(
             window,
             "Overblik",
-            "Nuværende lønperiode, registreret løn, prognose og de seneste vagter.",
+            "Nuværende lønperiode, registreret løn, budget og de seneste vagter.",
         )
 
-        grid = QGridLayout()
-        grid.setSpacing(14)
-        self.root.addLayout(grid)
+        self.summary_grid = QGridLayout()
+        self.summary_grid.setSpacing(14)
+        self.root.addLayout(self.summary_grid)
 
         self.net_card = MetricCard("Netto løn nu", accent="#1f8a70")
-        self.estimate_card = MetricCard("Estimeret total", accent="#d97706")
-        self.available_card = MetricCard("Til rådighed", accent="#2563eb")
+        self.total_card = MetricCard("Total indkomst nu", accent="#2563eb")
+        self.available_card = MetricCard("Til rådighed nu", accent="#d97706")
         self.hours_card = MetricCard("Timer", accent="#7c3aed")
         self.gross_card = MetricCard("Brutto løn", accent="#0f766e")
         self.period_card = MetricCard("Lønperiode", accent="#475569")
 
-        cards = [
+        self.summary_cards = [
             self.net_card,
-            self.estimate_card,
+            self.total_card,
             self.available_card,
             self.hours_card,
             self.gross_card,
             self.period_card,
         ]
-        for index, card in enumerate(cards):
-            grid.addWidget(card, index // 3, index % 3)
+        for index, card in enumerate(self.summary_cards):
+            self.summary_grid.addWidget(card, index // 3, index % 3)
 
         progress_panel, progress_layout = make_panel("Periodens forløb")
         self.progress = QProgressBar()
@@ -767,6 +841,24 @@ class DashboardPage(BasePage):
         progress_layout.addLayout(goal_row)
         self.root.addWidget(progress_panel)
 
+        estimate_panel, estimate_layout = make_panel("Estimater")
+        self.estimate_grid = QGridLayout()
+        self.estimate_grid.setSpacing(14)
+        estimate_layout.addLayout(self.estimate_grid)
+        self.estimate_net_card = MetricCard("Estimeret netto løn", accent="#1f8a70")
+        self.estimate_total_card = MetricCard("Estimeret total indkomst", accent="#2563eb")
+        self.estimate_available_card = MetricCard("Estimeret rådighedsbeløb", accent="#d97706")
+        self.estimate_hours_card = MetricCard("Estimerede timer", accent="#7c3aed")
+        self.estimate_cards = [
+            self.estimate_net_card,
+            self.estimate_total_card,
+            self.estimate_available_card,
+            self.estimate_hours_card,
+        ]
+        for index, card in enumerate(self.estimate_cards):
+            self.estimate_grid.addWidget(card, index // 2, index % 2)
+        self.root.addWidget(estimate_panel)
+
         lower = QHBoxLayout()
         lower.setSpacing(14)
         self.root.addLayout(lower, 1)
@@ -774,12 +866,14 @@ class DashboardPage(BasePage):
         breakdown_panel, breakdown_layout = make_panel("Lønberegning")
         self.breakdown_table = QTableWidget()
         setup_table(self.breakdown_table, ["Post", "Beløb"])
+        self.breakdown_table.setMinimumHeight(190)
         breakdown_layout.addWidget(self.breakdown_table)
         lower.addWidget(breakdown_panel, 1)
 
-        recent_panel, recent_layout = make_panel("Seneste vagter")
+        recent_panel, recent_layout = make_panel("Vagter i perioden")
         self.recent_table = QTableWidget()
         setup_table(self.recent_table, ["Dato", "Timer", "Timeløn", "Brutto"])
+        self.recent_table.setMinimumHeight(190)
         recent_layout.addWidget(self.recent_table)
         lower.addWidget(recent_panel, 1)
 
@@ -790,33 +884,43 @@ class DashboardPage(BasePage):
 
         summary = current_period_summary(self.data, self.settings)
         forecast = ft.calculate_salary_forecast(self.data, self.settings)
-        su = self.settings.get("su", 0)
-        bolig = self.settings.get("boligstøtte", 0)
+        other_income = ft.get_other_income(self.settings)
         budget_expenses = ft.calculate_budget_expenses(self.settings)
 
-        total_now = summary["netto"] + su + bolig
+        total_now = summary["netto"] + other_income
         available_now = ft.calculate_disposable_income(total_now, self.settings)
-        estimated_total = forecast.get("estimated_total_with_support") if forecast else None
+        estimated_total = forecast.get("estimated_total_income") if forecast else None
         estimated_available = forecast.get("estimated_disposable_income") if forecast else None
+        estimated_netto = forecast.get("estimated_netto") if forecast else None
+        estimated_brutto = forecast.get("estimated_brutto") if forecast else None
+        estimated_hours = forecast.get("estimated_hours") if forecast else None
         disposable_goal = ft.get_disposable_income_goal(self.settings)
+        show_other_income = other_income > 0
+        self._arrange_cards(show_other_income)
 
-        self.net_card.set_values(format_money(summary["netto"]), f"Total inkl. SU og boligstøtte: {format_money(total_now)}")
-        self.estimate_card.set_values(format_money(estimated_total), f"Estimeret rådighed: {format_money(estimated_available)}")
-        self.available_card.set_values(format_money(available_now), f"Budgetterede faste udgifter: {format_money(budget_expenses)}")
+        self.net_card.set_values(format_money(summary["netto"]), "Efter skat")
+        if show_other_income:
+            self.total_card.set_values(format_money(total_now), "Netto løn nu + anden indkomst")
+        self.available_card.set_values(format_money(available_now), f"Efter udgifter: {format_money(budget_expenses)}")
         self.hours_card.set_values(f"{format_number(summary['timer'])} t.", f"{len(summary['rows'])} vagter i perioden")
         self.gross_card.set_values(format_money(summary["brutto"]), "Før skat")
         self.period_card.set_values(
             f"d. {self.settings.get('løn start')} - d. {self.settings.get('løn slut')}",
             format_period(summary),
         )
+        estimated_hours_text = f"{format_number(estimated_hours)} t." if estimated_hours is not None else "N/A"
+        self.estimate_net_card.set_values(format_money(estimated_netto), "For hele lønperioden")
+        if show_other_income:
+            self.estimate_total_card.set_values(format_money(estimated_total), "Estimeret netto + anden indkomst")
+        self.estimate_available_card.set_values(format_money(estimated_available), f"Efter faste udgifter: {format_money(budget_expenses)}")
+        self.estimate_hours_card.set_values(estimated_hours_text, f"Estimeret brutto: {format_money(estimated_brutto)}")
 
         if forecast:
             percent = int(round(forecast.get("progress_ratio", 0) * 100))
             self.progress.setValue(max(0, min(percent, 100)))
             self.progress_detail.setText(
                 f"{forecast['elapsed_days']} af {forecast['total_days']} dage er gået. "
-                f"{forecast['remaining_days']} dage tilbage. "
-                f"Estimeret netto løn: {format_money(forecast.get('estimated_netto'))}."
+                f"{forecast['remaining_days']} dage tilbage."
             )
         else:
             self.progress.setValue(0)
@@ -824,10 +928,61 @@ class DashboardPage(BasePage):
 
         self._update_goal_lamp(available_now, estimated_available, disposable_goal)
         self._fill_breakdown(summary["breakdown"])
-        self._fill_recent()
+        self._fill_recent(summary["rows"])
+
+    def _arrange_cards(self, show_other_income):
+        while self.summary_grid.count():
+            self.summary_grid.takeAt(0)
+        while self.estimate_grid.count():
+            self.estimate_grid.takeAt(0)
+
+        summary_cards = [
+            (self.net_card, True),
+            (self.total_card, show_other_income),
+            (self.available_card, True),
+            (self.hours_card, True),
+            (self.gross_card, True),
+            (self.period_card, True),
+        ]
+        visible_summary_cards = []
+        for card, visible in summary_cards:
+            card.setVisible(visible)
+            if visible:
+                visible_summary_cards.append(card)
+        for index, card in enumerate(visible_summary_cards):
+            self.summary_grid.addWidget(card, index // 3, index % 3)
+
+        estimate_cards = [
+            (self.estimate_net_card, True),
+            (self.estimate_total_card, show_other_income),
+            (self.estimate_available_card, True),
+            (self.estimate_hours_card, True),
+        ]
+        visible_estimate_cards = []
+        for card, visible in estimate_cards:
+            card.setVisible(visible)
+            if visible:
+                visible_estimate_cards.append(card)
+        for index, card in enumerate(visible_estimate_cards):
+            self.estimate_grid.addWidget(card, index // 2, index % 2)
+
+        self.summary_grid.invalidate()
+        self.estimate_grid.invalidate()
 
     def _show_missing_settings(self):
-        for card in [self.net_card, self.estimate_card, self.available_card, self.hours_card, self.gross_card, self.period_card]:
+        self._arrange_cards(True)
+        for card in [
+            self.net_card,
+            self.total_card,
+            self.available_card,
+            self.hours_card,
+            self.gross_card,
+            self.period_card,
+            self.estimate_net_card,
+            self.estimate_total_card,
+            self.estimate_available_card,
+            self.estimate_hours_card,
+        ]:
             card.set_values("N/A", "Indstillinger mangler")
         self.progress.setValue(0)
         self.progress_detail.setText("Udfyld indstillingerne før beregninger kan vises.")
@@ -867,8 +1022,7 @@ class DashboardPage(BasePage):
             self.breakdown_table.setItem(row_index, 0, table_item(label))
             self.breakdown_table.setItem(row_index, 1, table_item(value, Qt.AlignRight | Qt.AlignVCenter))
 
-    def _fill_recent(self):
-        rows = entry_rows(self.data)[:8]
+    def _fill_recent(self, rows):
         self.recent_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             self.recent_table.setItem(row_index, 0, table_item(format_date(row["dato"])))
@@ -949,7 +1103,7 @@ class EntryPage(BasePage):
         self._set_defaults()
 
     def refresh(self):
-        set_field_number(self.rate_field, last_rate(self.data))
+        set_field_number(self.rate_field, last_rate(self.data, self.settings))
         self._fill_history()
         self._update_summary()
 
@@ -960,7 +1114,7 @@ class EntryPage(BasePage):
         self.hours_field.setText("4")
         self.start_field.setText("14:00")
         self.end_field.setText("18:00")
-        set_field_number(self.rate_field, last_rate(self.window.data))
+        set_field_number(self.rate_field, last_rate(self.window.data, self.window.settings))
         self._update_mode()
 
     def _update_mode(self):
@@ -1041,10 +1195,13 @@ class CalculatorPage(BasePage):
         self.root.addLayout(content, 1)
 
         input_panel, input_layout = make_panel("Input")
+        input_panel.setMinimumWidth(380)
         content.addWidget(input_panel, 0)
 
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("CalculatorTabs")
         self.tabs.setUsesScrollButtons(False)
+        self.tabs.tabBar().setExpanding(True)
         input_layout.addWidget(self.tabs)
 
         brutto_tab = QWidget()
@@ -1065,6 +1222,7 @@ class CalculatorPage(BasePage):
         hours_form.addRow("Timer", self.calc_hours_field)
         hours_form.addRow("Timeløn", self.calc_rate_field)
         self.tabs.addTab(hours_tab, "Timer + timeløn")
+        self.tabs.tabBar().setMinimumWidth(290)
         self.tabs.currentChanged.connect(self._calculate)
 
         tax_form = QFormLayout()
@@ -1093,7 +1251,7 @@ class CalculatorPage(BasePage):
 
     def refresh(self):
         if has_required_settings(self.settings):
-            set_field_number(self.calc_rate_field, last_rate(self.data))
+            set_field_number(self.calc_rate_field, last_rate(self.data, self.settings))
             set_field_number(self.fradrag_field, float(self.settings.get("fradrag", 0)))
             set_field_number(self.tax_field, float(self.settings.get("skat", 0)) * 100)
             set_field_number(self.am_field, float(self.settings.get("am bidrag", 0)) * 100)
@@ -1179,11 +1337,10 @@ class PaymentsPage(BasePage):
         _, complete_periods = build_periods(self.data, self.settings)
         self.payments = list(reversed(complete_periods))
         self.payments_table.setRowCount(len(self.payments))
-        su = self.settings.get("su", 0) if has_required_settings(self.settings) else 0
-        bolig = self.settings.get("boligstøtte", 0) if has_required_settings(self.settings) else 0
+        other_income = ft.get_other_income(self.settings) if has_required_settings(self.settings) else 0
 
         for row_index, period in enumerate(self.payments):
-            total = period["netto"] + su + bolig
+            total = period["netto"] + other_income
             self.payments_table.setItem(row_index, 0, table_item(f"{month_title(period)}\n{format_period(period)}"))
             self.payments_table.setItem(row_index, 1, table_item(format_number(period["timer"]), Qt.AlignRight | Qt.AlignVCenter))
             self.payments_table.setItem(row_index, 2, table_item(format_money(period["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
@@ -1202,9 +1359,8 @@ class PaymentsPage(BasePage):
         if selected < 0 or selected >= len(self.payments):
             return
         period = self.payments[selected]
-        su = self.settings.get("su", 0)
-        bolig = self.settings.get("boligstøtte", 0)
-        total = period["netto"] + su + bolig
+        other_income = ft.get_other_income(self.settings)
+        total = period["netto"] + other_income
         avg_rate = period["brutto"] / period["timer"] if period["timer"] else None
         self.detail_title.setText(month_title(period))
         rows = [
@@ -1216,8 +1372,7 @@ class PaymentsPage(BasePage):
             ("AM-bidrag", f"-{format_money(period['am_bidrag'])}"),
             ("Skat", f"-{format_money(period['skat'])}"),
             ("Netto løn", format_money(period["netto"])),
-            ("SU", format_money(su)),
-            ("Boligstøtte", format_money(bolig)),
+            ("Anden indkomst (netto)", format_money(other_income)),
             ("Total udbetalt", format_money(total)),
         ]
         self.detail_table.setRowCount(len(rows))
@@ -1509,8 +1664,8 @@ class StatisticsPage(BasePage):
                 ["Registrerede timer", format_number(forecast["current_hours"])],
                 ["Estimerede timer", format_number(forecast["estimated_hours"])],
                 ["Estimeret løn", f"{format_money(forecast['estimated_brutto'])} / {format_money(forecast['estimated_netto'])}"],
-                ["Estimeret total inkl. støtte", format_money(forecast["estimated_total_with_support"])],
-                ["Budgetterede faste udgifter", format_money(forecast["budget_expenses"])],
+                ["Estimeret total inkl. anden indkomst", format_money(forecast["estimated_total_income"])],
+                ["Samlede udgifter", format_money(forecast["budget_expenses"])],
                 ["Estimeret rådighedsbeløb", format_money(forecast["estimated_disposable_income"])],
             ]
         self._add_table("Prognose", ["Måling", "Værdi"], rows)
@@ -1677,186 +1832,198 @@ class HistoryPage(BasePage):
         self.window.refresh_all()
 
 
+class BudgetEntryDialog(QDialog):
+    def __init__(self, parent, title, item=None, allow_delete=False):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.deleted = False
+        self.entry = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        form = QFormLayout()
+        form.setVerticalSpacing(12)
+        layout.addLayout(form)
+
+        self.name_field = make_text_input(item.get("navn", "") if item else "", "fx Husleje")
+        self.amount_field = make_text_input(placeholder="fx 5200")
+        if item:
+            set_field_number(self.amount_field, item.get("beløb", 0))
+
+        form.addRow("Navn", self.name_field)
+        form.addRow("Beløb", self.amount_field)
+
+        buttons = QDialogButtonBox()
+        save_button = buttons.addButton("Gem", QDialogButtonBox.AcceptRole)
+        cancel_button = buttons.addButton("Annuller", QDialogButtonBox.RejectRole)
+        save_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        if allow_delete:
+            delete_button = buttons.addButton("Slet post", QDialogButtonBox.DestructiveRole)
+            delete_button.setObjectName("SecondaryButton")
+            delete_button.clicked.connect(self._delete_post)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        name = self.name_field.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Ugyldig post", "Posten skal have et navn.")
+            return
+        try:
+            amount = parse_positive_number(self.amount_field, "Beløb", allow_zero=True)
+        except ValueError as error:
+            QMessageBox.warning(self, "Ugyldig post", str(error))
+            return
+        self.entry = {"navn": name, "beløb": amount}
+        super().accept()
+
+    def _delete_post(self):
+        answer = QMessageBox.question(self, "Slet post", "Vil du slette denne budgetpost?")
+        if answer == QMessageBox.Yes:
+            self.deleted = True
+            super().accept()
+
+
 class BudgetPage(BasePage):
     def __init__(self, window):
         super().__init__(
             window,
             "Budget",
-            "Planlæg faste udgifter i kategorier og sæt ønsket rådighedsbeløb for perioden.",
+            "Planlæg faste udgifter i budgetposter, som bruges i rådighedsberegningerne.",
         )
         self.categories = []
 
-        cards = QHBoxLayout()
-        cards.setSpacing(14)
-        self.root.addLayout(cards)
-        self.available_card = MetricCard("Estimeret indkomst", accent="#1f8a70")
-        self.budget_card = MetricCard("Faste udgifter", accent="#2563eb")
-        self.remaining_card = MetricCard("Rådighedsbeløb", accent="#d97706")
-        self.goal_card = MetricCard("Ønsket rådighedsbeløb", accent="#475569")
-        cards.addWidget(self.available_card)
-        cards.addWidget(self.budget_card)
-        cards.addWidget(self.remaining_card)
-        cards.addWidget(self.goal_card)
+        actual_panel, actual_layout = make_panel("Faktiske tal")
+        actual_grid = QGridLayout()
+        actual_grid.setSpacing(14)
+        actual_layout.addLayout(actual_grid)
+        self.current_income_card = MetricCard("Indkomst nu", accent="#1f8a70")
+        self.current_expenses_card = MetricCard("Samlede udgifter", accent="#2563eb")
+        self.current_remaining_card = MetricCard("Rådighed nu", accent="#d97706")
+        for index, card in enumerate([self.current_income_card, self.current_expenses_card, self.current_remaining_card]):
+            actual_grid.addWidget(card, 0, index)
+        self.root.addWidget(actual_panel)
 
-        content = QHBoxLayout()
-        content.setSpacing(16)
-        self.root.addLayout(content, 1)
+        estimate_panel, estimate_layout = make_panel("Estimater")
+        estimate_grid = QGridLayout()
+        estimate_grid.setSpacing(14)
+        estimate_layout.addLayout(estimate_grid)
+        self.estimated_income_card = MetricCard("Estimeret indkomst", accent="#1f8a70")
+        self.estimated_expenses_card = MetricCard("Samlede udgifter", accent="#2563eb")
+        self.estimated_remaining_card = MetricCard("Estimeret rådighed", accent="#d97706")
+        for index, card in enumerate([self.estimated_income_card, self.estimated_expenses_card, self.estimated_remaining_card]):
+            estimate_grid.addWidget(card, 0, index)
+        self.root.addWidget(estimate_panel)
 
-        table_panel, table_layout = make_panel("Kategorier")
-        content.addWidget(table_panel, 2)
+        table_panel, table_layout = make_panel("Budgetposter")
+        self.root.addWidget(table_panel, 1)
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        intro = QLabel("Posterne her er dine faste udgifter for perioden.")
+        intro.setObjectName("PageSubtitle")
+        intro.setWordWrap(True)
+        header.addWidget(intro, 1)
+        add_button = QPushButton("Tilføj ny post")
+        add_button.clicked.connect(self._add_category)
+        header.addWidget(add_button)
+        table_layout.addLayout(header)
+
         self.table = QTableWidget()
-        setup_table(self.table, ["Kategori", "Beløb"])
-        self.table.itemSelectionChanged.connect(self._load_selected_category)
+        setup_table(self.table, ["Post", "Beløb", ""])
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.setMinimumHeight(230)
         table_layout.addWidget(self.table)
-
-        form_panel, form_layout = make_panel("Kategori og rådighedsmål")
-        content.addWidget(form_panel, 1)
-        form = QFormLayout()
-        form.setVerticalSpacing(12)
-        form_layout.addLayout(form)
-
-        self.name_field = make_text_input(placeholder="fx Mad")
-        self.amount_field = make_text_input(placeholder="fx 2500")
-        self.disposable_goal_field = make_text_input(placeholder="fx 2500")
-        form.addRow("Kategori", self.name_field)
-        form.addRow("Beløb", self.amount_field)
-        form.addRow("Ønsket rådighedsbeløb", self.disposable_goal_field)
-
-        button_row = QHBoxLayout()
-        form_layout.addLayout(button_row)
-        self.save_button = QPushButton("Gem kategori")
-        self.save_button.clicked.connect(self._save_category)
-        button_row.addWidget(self.save_button)
-        self.new_button = QPushButton("Ny")
-        self.new_button.setObjectName("SecondaryButton")
-        self.new_button.clicked.connect(self._clear_form)
-        button_row.addWidget(self.new_button)
-
-        delete_button = QPushButton("Slet kategori")
-        delete_button.setObjectName("SecondaryButton")
-        delete_button.clicked.connect(self._delete_category)
-        form_layout.addWidget(delete_button)
-
-        goal_button = QPushButton("Gem ønsket rådighed")
-        goal_button.setObjectName("SecondaryButton")
-        goal_button.clicked.connect(self._save_disposable_goal)
-        form_layout.addWidget(goal_button)
-        form_layout.addStretch()
-
-        self.selected_index = None
 
     def refresh(self):
         self.categories = self._categories_from_settings()
-        set_field_number(self.disposable_goal_field, ft.get_disposable_income_goal(self.settings))
         self._fill_table()
         self._update_cards()
-        if self.categories:
-            self.table.selectRow(0)
-        else:
-            self._clear_form()
 
     def _categories_from_settings(self):
         return ft.get_budget_categories(self.settings)
 
-    def _forecast_income(self):
+    def _current_income(self):
+        if not has_required_settings(self.settings):
+            return None
+        summary = current_period_summary(self.data, self.settings)
+        return summary["netto"] + ft.get_other_income(self.settings)
+
+    def _estimated_income(self):
         if not has_required_settings(self.settings):
             return None
         forecast = ft.calculate_salary_forecast(self.data, self.settings)
-        if forecast and forecast.get("estimated_total_with_support") is not None:
-            return forecast["estimated_total_with_support"]
-        else:
-            summary = current_period_summary(self.data, self.settings)
-            return summary["netto"] + self.settings.get("su", 0) + self.settings.get("boligstøtte", 0)
+        if not forecast:
+            return None
+        return forecast.get("estimated_total_income")
 
     def _budget_total(self):
         return sum(item["beløb"] for item in self.categories)
 
     def _update_cards(self):
-        income = self._forecast_income()
-        budget_total = ft.calculate_budget_expenses(self.settings)
-        remaining = income - budget_total if income is not None else None
+        budget_total = self._budget_total()
+        current_income = self._current_income()
+        estimated_income = self._estimated_income()
+        current_remaining = current_income - budget_total if current_income is not None else None
+        estimated_remaining = estimated_income - budget_total if estimated_income is not None else None
         disposable_goal = ft.get_disposable_income_goal(self.settings)
 
-        self.available_card.set_values(format_money(income), "Løn, SU og boligstøtte")
-        self.budget_card.set_values(format_money(budget_total), f"{len(self.categories)} kategorier")
-        self.remaining_card.set_values(format_money(remaining), "Estimeret indkomst minus faste udgifter")
-        if remaining is None:
-            self.goal_card.set_values(format_money(disposable_goal), "Mangler indkomstdata")
+        self.current_income_card.set_values(format_money(current_income), "Registreret netto + anden indkomst")
+        self.current_expenses_card.set_values(format_money(budget_total), f"{len(self.categories)} budgetposter")
+        self.current_remaining_card.set_values(format_money(current_remaining), "Indkomst nu minus faste udgifter")
+        self.estimated_income_card.set_values(format_money(estimated_income), "For hele lønperioden")
+        self.estimated_expenses_card.set_values(format_money(budget_total), "Samme faste udgifter i estimatet")
+        if estimated_remaining is None:
+            self.estimated_remaining_card.set_values("N/A", f"Mål: {format_money(disposable_goal)}")
         else:
-            difference = remaining - disposable_goal
-            self.goal_card.set_values(format_money(disposable_goal), f"Forskel: {signed_money(difference)}")
+            self.estimated_remaining_card.set_values(
+                format_money(estimated_remaining),
+                f"Mål: {format_money(disposable_goal)} | Forskel: {signed_money(estimated_remaining - disposable_goal)}",
+            )
 
     def _fill_table(self):
         self.table.setRowCount(len(self.categories))
         for row_index, item in enumerate(self.categories):
             self.table.setItem(row_index, 0, table_item(item["navn"]))
             self.table.setItem(row_index, 1, table_item(format_money(item["beløb"]), Qt.AlignRight | Qt.AlignVCenter))
+            edit_button = QPushButton("Rediger")
+            edit_button.setObjectName("InlineButton")
+            edit_button.clicked.connect(lambda checked=False, index=row_index: self._edit_category(index))
+            self.table.setCellWidget(row_index, 2, edit_button)
         self.table.resizeRowsToContents()
-
-    def _load_selected_category(self):
-        selected = self.table.currentRow()
-        if selected < 0 or selected >= len(self.categories):
-            return
-        self.selected_index = selected
-        item = self.categories[selected]
-        self.name_field.setText(item["navn"])
-        set_field_number(self.amount_field, item["beløb"])
-
-    def _clear_form(self):
-        self.selected_index = None
-        self.name_field.clear()
-        self.amount_field.clear()
+        self.table.setMinimumHeight(min(460, 96 + (len(self.categories) * 36)))
 
     def _settings_with_budget(self):
         new_settings = dict(self.settings) if isinstance(self.settings, dict) else {}
         new_settings["budget kategorier"] = self.categories
-        try:
-            new_settings["ønsket rådighedsbeløb"] = parse_positive_number(
-                self.disposable_goal_field,
-                "Ønsket rådighedsbeløb",
-                allow_zero=True,
-            )
-        except ValueError:
-            new_settings["ønsket rådighedsbeløb"] = ft.get_disposable_income_goal(self.settings)
         return new_settings
 
-    def _save_category(self):
-        name = self.name_field.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Ugyldig kategori", "Kategori skal have et navn.")
-            return
-        try:
-            amount = parse_positive_number(self.amount_field, "Beløb", allow_zero=True)
-        except ValueError as error:
-            QMessageBox.warning(self, "Ugyldig kategori", str(error))
-            return
-
-        item = {"navn": name, "beløb": amount}
-        if self.selected_index is None:
-            self.categories.append(item)
-        else:
-            self.categories[self.selected_index] = item
+    def _save_budget(self):
         ft.save_settings(self._settings_with_budget())
         self.window.refresh_all()
 
-    def _delete_category(self):
-        if self.selected_index is None or self.selected_index >= len(self.categories):
-            QMessageBox.information(self, "Ingen kategori valgt", "Vælg først en kategori.")
-            return
-        del self.categories[self.selected_index]
-        ft.save_settings(self._settings_with_budget())
-        self.window.refresh_all()
+    def _add_category(self):
+        dialog = BudgetEntryDialog(self, "Tilføj ny post")
+        if dialog.exec_() == QDialog.Accepted and dialog.entry:
+            self.categories.append(dialog.entry)
+            self._save_budget()
 
-    def _save_disposable_goal(self):
-        try:
-            disposable_goal = parse_positive_number(self.disposable_goal_field, "Ønsket rådighedsbeløb", allow_zero=True)
-        except ValueError as error:
-            QMessageBox.warning(self, "Ugyldigt rådighedsbeløb", str(error))
+    def _edit_category(self, index):
+        if index < 0 or index >= len(self.categories):
             return
-        new_settings = self._settings_with_budget()
-        new_settings["ønsket rådighedsbeløb"] = disposable_goal
-        ft.save_settings(new_settings)
-        self.window.refresh_all()
+        dialog = BudgetEntryDialog(self, "Rediger post", self.categories[index], allow_delete=True)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        if dialog.deleted:
+            del self.categories[index]
+        elif dialog.entry:
+            self.categories[index] = dialog.entry
+        self._save_budget()
 
 
 class SettingsPage(BasePage):
@@ -1864,10 +2031,10 @@ class SettingsPage(BasePage):
         super().__init__(
             window,
             "Indstillinger",
-            "Tilpas skat, støtte og lønperiodens datoer. Faste udgifter styres på Budget-siden.",
+            "Tilpas skat, anden indkomst, rådighedsmål og lønperiodens datoer. Faste udgifter styres på Budget-siden.",
         )
 
-        panel, layout = make_panel("Økonomi og lønperiode")
+        panel, layout = make_panel("Økonomi, mål og lønperiode")
         self.root.addWidget(panel)
         form = QFormLayout()
         form.setVerticalSpacing(12)
@@ -1876,16 +2043,18 @@ class SettingsPage(BasePage):
         self.tax_field = make_text_input(placeholder="fx 49")
         self.fradrag_field = make_text_input(placeholder="fx 0")
         self.am_field = make_text_input(placeholder="fx 8")
-        self.su_field = make_text_input(placeholder="fx 9539")
-        self.housing_field = make_text_input(placeholder="fx 1203")
+        self.other_income_field = make_text_input(placeholder="fx 10742")
+        self.disposable_goal_field = make_text_input(placeholder="fx 2500")
+        self.default_rate_field = make_text_input(placeholder="fx 150")
         self.start_day_field = make_text_input(placeholder="1-31")
         self.end_day_field = make_text_input(placeholder="1-31")
 
         form.addRow("Skat %", self.tax_field)
         form.addRow("Fradrag", self.fradrag_field)
         form.addRow("AM-bidrag %", self.am_field)
-        form.addRow("SU", self.su_field)
-        form.addRow("Boligstøtte", self.housing_field)
+        form.addRow("Anden indkomst (netto)", self.other_income_field)
+        form.addRow("Ønsket rådighedsbeløb", self.disposable_goal_field)
+        form.addRow("Standard timeløn", self.default_rate_field)
         form.addRow("Lønperiode starter d.", self.start_day_field)
         form.addRow("Lønperiode slutter d.", self.end_day_field)
 
@@ -1898,6 +2067,10 @@ class SettingsPage(BasePage):
         reset_button.setObjectName("SecondaryButton")
         reset_button.clicked.connect(self.refresh)
         button_row.addWidget(reset_button)
+        tutorial_button = QPushButton("Start tutorial")
+        tutorial_button.setObjectName("SecondaryButton")
+        tutorial_button.clicked.connect(lambda: self.window.start_tutorial(force=True))
+        button_row.addWidget(tutorial_button)
         button_row.addStretch()
 
         note = QLabel("Ændringer påvirker beregninger og prognoser med det samme, men ændrer ikke dine gemte vagter.")
@@ -1911,16 +2084,18 @@ class SettingsPage(BasePage):
             "skat": 0.4,
             "fradrag": 0,
             "am bidrag": 0.08,
-            "su": 9539,
-            "boligstøtte": 1203,
+            "anden indkomst netto": 0,
+            "ønsket rådighedsbeløb": 1000,
+            "standard timeløn": 150,
             "løn start": 15,
             "løn slut": 14,
         }
         set_field_number(self.tax_field, float(settings.get("skat", 0)) * 100)
         set_field_number(self.fradrag_field, float(settings.get("fradrag", 0)))
         set_field_number(self.am_field, float(settings.get("am bidrag", 0)) * 100)
-        set_field_number(self.su_field, float(settings.get("su", 0)))
-        set_field_number(self.housing_field, float(settings.get("boligstøtte", 0)))
+        set_field_number(self.other_income_field, ft.get_other_income(settings))
+        set_field_number(self.disposable_goal_field, ft.get_disposable_income_goal(settings))
+        set_field_number(self.default_rate_field, ft.get_default_hourly_rate(settings))
         self.start_day_field.setText(str(int(settings.get("løn start", 15))))
         self.end_day_field.setText(str(int(settings.get("løn slut", 14))))
 
@@ -1934,8 +2109,20 @@ class SettingsPage(BasePage):
                     "skat": tax / 100 if tax > 1 else tax,
                     "fradrag": parse_positive_number(self.fradrag_field, "Fradrag", allow_zero=True),
                     "am bidrag": am / 100 if am > 1 else am,
-                    "su": parse_positive_number(self.su_field, "SU", allow_zero=True),
-                    "boligstøtte": parse_positive_number(self.housing_field, "Boligstøtte", allow_zero=True),
+                    "anden indkomst netto": parse_positive_number(
+                        self.other_income_field,
+                        "Anden indkomst",
+                        allow_zero=True,
+                    ),
+                    "standard timeløn": parse_positive_number(
+                        self.default_rate_field,
+                        "Standard timeløn",
+                    ),
+                    "ønsket rådighedsbeløb": parse_positive_number(
+                        self.disposable_goal_field,
+                        "Ønsket rådighedsbeløb",
+                        allow_zero=True,
+                    ),
                     "løn start": parse_int_field(self.start_day_field, "Lønperiode starter", 1, 31),
                     "løn slut": parse_int_field(self.end_day_field, "Lønperiode slutter", 1, 31),
                 }
@@ -1949,6 +2136,528 @@ class SettingsPage(BasePage):
         self.window.refresh_all()
 
 
+class TutorialDialog(QDialog):
+    def __init__(self, window, force=False):
+        super().__init__(window)
+        self.window = window
+        self.force = force
+        self.step_index = 0
+        self.setModal(True)
+        self.setWindowTitle("Kom godt i gang")
+        self.setWindowIcon(app_icon())
+        self.setMinimumWidth(680)
+
+        self.steps = [
+            {
+                "key": "welcome",
+                "title": "Velkommen til Lønix",
+                "text": (
+                    "Denne korte tutorial hjælper dig med at sætte programmet op.\n\n"
+                    "Lønix bruges til at registrere vagter, beregne løn, holde styr på faste udgifter "
+                    "og se hvor meget du har til rådighed i lønperioden."
+                ),
+            },
+            {
+                "key": "overview",
+                "page": 0,
+                "title": "Overblik",
+                "text": (
+                    "Overblik viser den aktuelle lønperiode.\n\n"
+                    "Her ser du registreret netto løn, timer, brutto løn, rådighedsbeløb efter budget "
+                    "og en separat estimatsektion for resten af perioden."
+                ),
+            },
+            {
+                "key": "entry",
+                "page": 1,
+                "title": "Indberet",
+                "text": (
+                    "Indberet bruges til at registrere en vagt.\n\n"
+                    "Du kan vælge start/slut eller skrive antal timer direkte. Timelønnen bruger din "
+                    "standardtimeløn, indtil du ændrer den eller har tidligere vagter."
+                ),
+            },
+            {
+                "key": "payments",
+                "page": 2,
+                "title": "Lønsedler",
+                "text": (
+                    "Lønsedler viser afsluttede lønperioder.\n\n"
+                    "Her kan du se timer, brutto, netto og total udbetaling for tidligere perioder."
+                ),
+            },
+            {
+                "key": "statistics",
+                "page": 3,
+                "title": "Statistik",
+                "text": (
+                    "Statistik samler nøgletal og grafer.\n\n"
+                    "Brug siden til at se udvikling i timer, løn og mønstre over tid."
+                ),
+            },
+            {
+                "key": "budget",
+                "page": 4,
+                "title": "Budget",
+                "text": (
+                    "Budget er dine faste udgifter for perioden.\n\n"
+                    "Tilføj de poster du faktisk har, for eksempel husleje, abonnementer eller forsikring. "
+                    "Budgettet bruges til at beregne rådighedsbeløb."
+                ),
+            },
+            {
+                "key": "history",
+                "page": 5,
+                "title": "Historik",
+                "text": (
+                    "Historik viser alle registrerede vagter.\n\n"
+                    "Her kan du rette fejl i gamle indberetninger eller slette en vagt."
+                ),
+            },
+            {
+                "key": "calculator",
+                "page": 6,
+                "title": "Lønberegner",
+                "text": (
+                    "Lønberegneren er til hurtige beregninger.\n\n"
+                    "Du kan beregne netto ud fra bruttoløn eller ud fra timer og timeløn uden at gemme en vagt."
+                ),
+            },
+            {
+                "key": "settings",
+                "page": 7,
+                "title": "Indstillinger",
+                "text": (
+                    "Indstillinger styrer skat, fradrag, anden indkomst, standardtimeløn og lønperiode.\n\n"
+                    "Angiv også dit ønskede rådighedsbeløb. Det bruges som mål i Overblik og Budget."
+                ),
+            },
+            {
+                "key": "setup",
+                "page": 7,
+                "title": "Dine grundoplysninger",
+                "text": (
+                    "Udfyld de vigtigste tal. De gemmes i Indstillinger og bruges i resten af programmet.\n\n"
+                    "Lad et felt stå tomt, hvis du vil bruge standardværdien i feltets placeholder."
+                ),
+            },
+            {
+                "key": "done",
+                "title": "Du er klar",
+                "text": (
+                    "Tutorialen er færdig.\n\n"
+                    "Start med at indberette dine vagter og tilføje dine faste udgifter i Budget. "
+                    "Du kan altid starte tutorialen igen fra Indstillinger."
+                ),
+            },
+        ]
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 18)
+        root.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        root.addLayout(header)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("PageTitle")
+        self.title_label.setWordWrap(True)
+        header.addWidget(self.title_label, 1)
+        self.step_label = QLabel()
+        self.step_label.setObjectName("PageSubtitle")
+        header.addWidget(self.step_label)
+
+        self.body_label = QLabel()
+        self.body_label.setObjectName("PageSubtitle")
+        self.body_label.setWordWrap(True)
+        self.body_label.setMinimumHeight(82)
+        root.addWidget(self.body_label)
+
+        self.visual_frame = QFrame()
+        self.visual_frame.setObjectName("Card")
+        self.visual_frame.setMinimumHeight(190)
+        self.visual_frame.setStyleSheet(
+            """
+            QFrame#Card {
+                background: #f8fafc;
+                border: 1px solid #dde3ea;
+                border-radius: 8px;
+            }
+            """
+        )
+        self.visual_layout = QVBoxLayout(self.visual_frame)
+        self.visual_layout.setContentsMargins(18, 16, 18, 16)
+        self.visual_layout.setSpacing(10)
+        root.addWidget(self.visual_frame)
+
+        self.setup_widget = self._build_setup_widget()
+        root.addWidget(self.setup_widget)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        self.back_button = QPushButton("Tilbage")
+        self.back_button.setObjectName("SecondaryButton")
+        self.back_button.clicked.connect(self._back)
+        button_row.addWidget(self.back_button)
+        self.next_button = QPushButton("Næste")
+        self.next_button.clicked.connect(self._next)
+        button_row.addWidget(self.next_button)
+        root.addLayout(button_row)
+
+        self._fill_existing_values() if self.force else None
+        self._show_step()
+
+    def _build_setup_widget(self):
+        widget = QWidget()
+        grid = QGridLayout(widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(10)
+
+        self.setup_other_income = make_text_input(placeholder="0 kr")
+        self.setup_tax = make_text_input(placeholder="40%")
+        self.setup_fradrag = make_text_input(placeholder="0 kr")
+        self.setup_goal = make_text_input(placeholder="2000 kr")
+        self.setup_start = make_text_input(placeholder="d.15")
+        self.setup_end = make_text_input(placeholder="d.14")
+        self.setup_rate = make_text_input(placeholder="150 kr")
+
+        def add_field(row, column, label, field):
+            cell = QWidget()
+            layout = QVBoxLayout(cell)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(4)
+            label_widget = QLabel(label)
+            label_widget.setStyleSheet("color: #475569; font-weight: 700;")
+            layout.addWidget(label_widget)
+            layout.addWidget(field)
+            grid.addWidget(cell, row, column)
+
+        add_field(0, 0, "Anden indkomst (netto)", self.setup_other_income)
+        add_field(0, 1, "Skatteprocent", self.setup_tax)
+        add_field(0, 2, "Fradrag", self.setup_fradrag)
+        add_field(1, 0, "Ønsket rådighedsbeløb", self.setup_goal)
+        add_field(1, 1, "Lønperiode start", self.setup_start)
+        add_field(1, 2, "Lønperiode slut", self.setup_end)
+        add_field(2, 0, "Timeløn", self.setup_rate)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        return widget
+
+    def _fill_existing_values(self):
+        settings = self.window.settings
+        set_field_number(self.setup_other_income, ft.get_other_income(settings))
+        set_field_number(self.setup_tax, float(settings.get("skat", 0.4)) * 100)
+        set_field_number(self.setup_fradrag, float(settings.get("fradrag", 0)))
+        set_field_number(self.setup_goal, ft.get_disposable_income_goal(settings))
+        self.setup_start.setText(str(int(settings.get("løn start", 15))))
+        self.setup_end.setText(str(int(settings.get("løn slut", 14))))
+        set_field_number(self.setup_rate, ft.get_default_hourly_rate(settings))
+
+    def _current_step(self):
+        return self.steps[self.step_index]
+
+    def _show_step(self):
+        step = self._current_step()
+        self.title_label.setText(step["title"])
+        self.body_label.setText(step["text"])
+        self.step_label.setText(f"{self.step_index + 1} / {len(self.steps)}")
+        self.setup_widget.setVisible(step["key"] == "setup")
+        self._set_visual(step["key"])
+        if step["key"] == "setup":
+            self.body_label.setMinimumHeight(60)
+            self.visual_frame.setMinimumHeight(118)
+            self.visual_frame.setMaximumHeight(138)
+        else:
+            self.body_label.setMinimumHeight(82)
+            self.visual_frame.setMinimumHeight(190)
+            self.visual_frame.setMaximumHeight(16777215)
+        if "page" in step:
+            self.window.go_to_page(step["page"])
+        self.back_button.setEnabled(self.step_index > 0)
+        self.next_button.setText("Afslut" if step["key"] == "done" else "Næste")
+
+    def _set_visual(self, key):
+        clear_layout(self.visual_layout)
+        builders = {
+            "welcome": self._visual_welcome,
+            "overview": self._visual_overview,
+            "entry": self._visual_entry,
+            "payments": self._visual_payments,
+            "statistics": self._visual_statistics,
+            "budget": self._visual_budget,
+            "history": self._visual_history,
+            "calculator": self._visual_calculator,
+            "settings": self._visual_settings,
+            "setup": self._visual_setup,
+            "done": self._visual_done,
+        }
+        builders.get(key, self._visual_welcome)()
+
+    def _visual_title(self, text):
+        label = QLabel(text)
+        label.setStyleSheet("color: #334155; font-weight: 800;")
+        self.visual_layout.addWidget(label)
+
+    def _mini_card(self, title, value, accent="#1f8a70", subtitle=""):
+        card = QFrame()
+        card.setStyleSheet(
+            f"""
+            QFrame {{
+                background: #ffffff;
+                border: 1px solid #dbe3ec;
+                border-left: 4px solid {accent};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                border: 0;
+                background: transparent;
+            }}
+            """
+        )
+        card.setMinimumHeight(76)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(2)
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #64748b; font-weight: 700;")
+        value_label = QLabel(value)
+        value_label.setStyleSheet("color: #0f172a; font-size: 15pt; font-weight: 850;")
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        if subtitle:
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setStyleSheet("color: #64748b;")
+            subtitle_label.setWordWrap(True)
+            layout.addWidget(subtitle_label)
+        return card
+
+    def _mini_row(self, left, right="", accent=False):
+        row = QFrame()
+        row.setMinimumHeight(34)
+        row.setStyleSheet(
+            f"""
+            QFrame {{
+                background: {'#ecfdf5' if accent else '#ffffff'};
+                border: 1px solid {'#99f6e4' if accent else '#dde3ea'};
+                border-radius: 6px;
+            }}
+            QLabel {{
+                border: 0;
+                background: transparent;
+            }}
+            """
+        )
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(12)
+        left_label = QLabel(left)
+        left_label.setStyleSheet("font-weight: 700; color: #334155;")
+        left_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        right_label = QLabel(right)
+        right_label.setStyleSheet("color: #475569;")
+        right_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+        right_label.setWordWrap(False)
+        layout.addWidget(left_label, 1)
+        layout.addWidget(right_label, 1)
+        return row
+
+    def _mini_bar(self, label, value, color="#1f8a70"):
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        label_widget = QLabel(label)
+        label_widget.setStyleSheet("color: #475569; font-weight: 700;")
+        bar_back = QFrame()
+        bar_back.setFixedHeight(11)
+        bar_back.setStyleSheet("background: #e2e8f0; border-radius: 5px;")
+        bar_layout = QHBoxLayout(bar_back)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        fill = QFrame()
+        fill.setStyleSheet(f"background: {color}; border-radius: 5px;")
+        bar_layout.addWidget(fill, max(1, value))
+        bar_layout.addStretch(max(1, 100 - value))
+        layout.addWidget(label_widget)
+        layout.addWidget(bar_back)
+        return wrapper
+
+    def _visual_welcome(self):
+        self._visual_title("Lønix samler løn, budget og rådighed ét sted")
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        grid.addWidget(self._mini_card("Indberet", "Vagter", "#1f8a70", "Dato, timer og timeløn"), 0, 0)
+        grid.addWidget(self._mini_card("Beregn", "Netto", "#2563eb", "Skat og fradrag medregnes"), 0, 1)
+        grid.addWidget(self._mini_card("Planlæg", "Budget", "#d97706", "Faste udgifter trækkes fra"), 0, 2)
+        self.visual_layout.addLayout(grid)
+        self.visual_layout.addWidget(self._mini_bar("Rådighed gennem perioden", 62))
+
+    def _visual_overview(self):
+        self._visual_title("Overblik viser status nu og estimater separat")
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        grid.addWidget(self._mini_card("Netto løn nu", "3.600 kr.", "#1f8a70"), 0, 0)
+        grid.addWidget(self._mini_card("Til rådighed nu", "1.850 kr.", "#d97706"), 0, 1)
+        grid.addWidget(self._mini_card("Timer", "24,5 t.", "#7c3aed"), 0, 2)
+        self.visual_layout.addLayout(grid)
+        self.visual_layout.addWidget(self._mini_bar("Periodens forløb", 40))
+        self.visual_layout.addWidget(self._mini_row("Estimater", "Forventet netto, rådighed og timer"))
+
+    def _visual_entry(self):
+        self._visual_title("Indberet registrerer én vagt ad gangen")
+        rows = QVBoxLayout()
+        rows.setSpacing(7)
+        for left, right in [
+            ("Dato", "03-05-2026"),
+            ("Metode", "Start/slut"),
+            ("Start og slut", "14:00 - 18:00"),
+            ("Timeløn", "150 kr."),
+        ]:
+            rows.addWidget(self._mini_row(left, right))
+        rows.addWidget(self._mini_row("Gem indberetning", "Tilføjes til historik og beregninger", True))
+        self.visual_layout.addLayout(rows)
+
+    def _visual_payments(self):
+        self._visual_title("Lønsedler samler afsluttede perioder")
+        rows = QVBoxLayout()
+        rows.setSpacing(7)
+        rows.addWidget(self._mini_row("April 2026", "Netto 8.240 kr. | Total 8.240 kr.", True))
+        rows.addWidget(self._mini_row("Marts 2026", "42 t. | Brutto 6.300 kr."))
+        rows.addWidget(self._mini_row("Detaljer", "AM-bidrag, skat og anden indkomst"))
+        self.visual_layout.addLayout(rows)
+
+    def _visual_statistics(self):
+        self._visual_title("Statistik hjælper dig med at opdage mønstre")
+        bars = QGridLayout()
+        bars.setSpacing(12)
+        bars.addWidget(self._mini_bar("Timer pr. periode", 78, "#7c3aed"), 0, 0)
+        bars.addWidget(self._mini_bar("Netto løn", 64, "#1f8a70"), 1, 0)
+        bars.addWidget(self._mini_bar("Brutto løn", 86, "#2563eb"), 2, 0)
+        bars.addWidget(self._mini_card("Nøgletal", "Gennemsnit", "#475569", "Timer, løn og bedste periode"), 0, 1, 3, 1)
+        self.visual_layout.addLayout(bars)
+
+    def _visual_budget(self):
+        self._visual_title("Budget bruges som dine faste udgifter")
+        rows = QVBoxLayout()
+        rows.setSpacing(7)
+        rows.addWidget(self._mini_row("Husleje", "5.200 kr.", True))
+        rows.addWidget(self._mini_row("Forsikring", "350 kr."))
+        rows.addWidget(self._mini_row("Abonnementer", "199 kr."))
+        rows.addWidget(self._mini_row("Rådighed", "Indkomst minus budgetposter"))
+        self.visual_layout.addLayout(rows)
+
+    def _visual_history(self):
+        self._visual_title("Historik er dit redigerbare arkiv")
+        rows = QVBoxLayout()
+        rows.setSpacing(7)
+        rows.addWidget(self._mini_row("03-05-2026", "7 t. | 150 kr.", True))
+        rows.addWidget(self._mini_row("02-05-2026", "4 t. | 150 kr."))
+        rows.addWidget(self._mini_row("Rediger valgt vagt", "Ret dato, timer eller timeløn"))
+        rows.addWidget(self._mini_row("Slet", "Fjerner en fejlregistrering"))
+        self.visual_layout.addLayout(rows)
+
+    def _visual_calculator(self):
+        self._visual_title("Lønberegneren gemmer ikke noget")
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        grid.addWidget(self._mini_card("Bruttoløn", "3.000 kr.", "#2563eb"), 0, 0)
+        grid.addWidget(self._mini_card("Timer + timeløn", "20 t. x 150", "#7c3aed"), 0, 1)
+        grid.addWidget(self._mini_card("Netto", "1.795 kr.", "#1f8a70", "Beregnet ud fra dine satser"), 1, 0, 1, 2)
+        self.visual_layout.addLayout(grid)
+
+    def _visual_settings(self):
+        self._visual_title("Indstillinger styrer beregningerne")
+        rows = QVBoxLayout()
+        rows.setSpacing(7)
+        rows.addWidget(self._mini_row("Skat og fradrag", "Bruges til netto løn"))
+        rows.addWidget(self._mini_row("Anden indkomst", "Medregnes kun hvis beløbet er over 0"))
+        rows.addWidget(self._mini_row("Standard timeløn", "Forudfylder Indberet"))
+        rows.addWidget(self._mini_row("Lønperiode", "Bestemmer Overblik og estimater", True))
+        self.visual_layout.addLayout(rows)
+
+    def _visual_setup(self):
+        self._visual_title("Tallene her bliver gemt i Indstillinger")
+        flow = QHBoxLayout()
+        flow.setSpacing(10)
+        flow.addWidget(self._mini_card("1", "Udfyld", "#2563eb", "Skat, fradrag og periode"))
+        flow.addWidget(self._mini_card("2", "Gem", "#1f8a70", "Tutorialen opdaterer appen"))
+        flow.addWidget(self._mini_card("3", "Brug", "#d97706", "Indberet og se overblik"))
+        self.visual_layout.addLayout(flow)
+
+    def _visual_done(self):
+        self._visual_title("Klar til første indberetning")
+        rows = QVBoxLayout()
+        rows.setSpacing(7)
+        rows.addWidget(self._mini_row("Start", "Gå til Indberet og gem din første vagt", True))
+        rows.addWidget(self._mini_row("Budget", "Tilføj faste udgifter når du har dem"))
+        rows.addWidget(self._mini_row("Genstart tutorial", "Findes altid under Indstillinger"))
+        self.visual_layout.addLayout(rows)
+
+    def _field_number(self, field, default, label, allow_zero=True):
+        if not field.text().strip():
+            return default
+        return parse_positive_number(field, label, allow_zero=allow_zero)
+
+    def _field_int(self, field, default, label):
+        if not field.text().strip():
+            return default
+        return parse_int_field(field, label, 1, 31)
+
+    def _save_setup_step(self):
+        try:
+            tax_value = self._field_number(self.setup_tax, 40, "Skatteprocent", allow_zero=True)
+            am_value = float(self.window.settings.get("am bidrag", 0.08))
+            new_settings = dict(self.window.settings) if isinstance(self.window.settings, dict) else {}
+            new_settings.update(
+                {
+                    "skat": tax_value / 100 if tax_value > 1 else tax_value,
+                    "fradrag": self._field_number(self.setup_fradrag, 0, "Fradrag", allow_zero=True),
+                    "am bidrag": am_value,
+                    "anden indkomst netto": self._field_number(self.setup_other_income, 0, "Anden indkomst", allow_zero=True),
+                    "ønsket rådighedsbeløb": self._field_number(
+                        self.setup_goal,
+                        2000,
+                        "Ønsket rådighedsbeløb",
+                        allow_zero=True,
+                    ),
+                    "standard timeløn": self._field_number(self.setup_rate, 150, "Timeløn", allow_zero=False),
+                    "løn start": self._field_int(self.setup_start, 15, "Lønperiode start"),
+                    "løn slut": self._field_int(self.setup_end, 14, "Lønperiode slut"),
+                }
+            )
+        except ValueError as error:
+            QMessageBox.warning(self, "Ugyldige oplysninger", str(error))
+            return False
+
+        ft.save_settings(new_settings)
+        self.window.refresh_all()
+        return True
+
+    def _complete_tutorial(self):
+        new_settings = dict(self.window.settings) if isinstance(self.window.settings, dict) else {}
+        new_settings[ft.TUTORIAL_DONE_KEY] = True
+        ft.save_settings(new_settings)
+        self.window.refresh_all()
+        self.accept()
+
+    def _next(self):
+        step = self._current_step()
+        if step["key"] == "done":
+            self._complete_tutorial()
+            return
+        if step["key"] == "setup" and not self._save_setup_step():
+            return
+        self.step_index += 1
+        self._show_step()
+
+    def _back(self):
+        if self.step_index <= 0:
+            return
+        self.step_index -= 1
+        self._show_step()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1959,6 +2668,7 @@ class MainWindow(QMainWindow):
         self.nav_buttons = []
 
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(app_icon())
         self.resize(1220, 780)
         self.setMinimumSize(980, 650)
 
@@ -1977,12 +2687,21 @@ class MainWindow(QMainWindow):
         sidebar_layout.setSpacing(8)
         layout.addWidget(sidebar)
 
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        brand_logo = make_logo_label(QSize(44, 44))
+        if brand_logo is not None:
+            brand_row.addWidget(brand_logo, 0, Qt.AlignTop)
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(2)
         brand = QLabel(APP_NAME)
         brand.setObjectName("Brand")
-        brand_sub = QLabel("Løn, SU og overblik")
+        brand_sub = QLabel("Løn, budget og overblik")
         brand_sub.setObjectName("BrandSub")
-        sidebar_layout.addWidget(brand)
-        sidebar_layout.addWidget(brand_sub)
+        brand_text.addWidget(brand)
+        brand_text.addWidget(brand_sub)
+        brand_row.addLayout(brand_text, 1)
+        sidebar_layout.addLayout(brand_row)
         sidebar_layout.addSpacing(18)
 
         self.stack = QStackedWidget()
@@ -1997,21 +2716,27 @@ class MainWindow(QMainWindow):
         self._add_page(sidebar_layout, "Statistik", StatisticsPage(self))
         self._add_page(sidebar_layout, "Budget", BudgetPage(self))
         self._add_page(sidebar_layout, "Historik", HistoryPage(self))
+        self._add_page(sidebar_layout, "Lønberegner", CalculatorPage(self))
 
         sidebar_layout.addStretch()
         self._add_footer_page(sidebar_layout, "Indstillinger", SettingsPage(self))
-        self._add_footer_page(sidebar_layout, "Lønberegner", CalculatorPage(self))
+
+        self.tutorial_overlay = QWidget(root)
+        self.tutorial_overlay.setStyleSheet("background: rgba(15, 23, 42, 150);")
+        self.tutorial_overlay.hide()
+        self._tutorial_dialog = None
 
         self.nav_buttons[0].setChecked(True)
         self.stack.setCurrentIndex(0)
         self.refresh_all()
+        QTimer.singleShot(250, self._maybe_start_tutorial)
 
     def _add_page(self, sidebar_layout, label, page):
         index = len(self.pages)
         button = QPushButton(label)
         button.setObjectName("NavButton")
         button.setCheckable(True)
-        button.clicked.connect(lambda checked=False, page_index=index: self.stack.setCurrentIndex(page_index))
+        button.clicked.connect(lambda checked=False, page_index=index: self.go_to_page(page_index))
         self.button_group.addButton(button)
         self.nav_buttons.append(button)
         sidebar_layout.addWidget(button)
@@ -2023,7 +2748,7 @@ class MainWindow(QMainWindow):
         button = QPushButton(label)
         button.setObjectName("SecondaryButton")
         button.setCheckable(True)
-        button.clicked.connect(lambda checked=False, page_index=index: self.stack.setCurrentIndex(page_index))
+        button.clicked.connect(lambda checked=False, page_index=index: self.go_to_page(page_index))
         self.button_group.addButton(button)
         self.nav_buttons.append(button)
         sidebar_layout.addWidget(button)
@@ -2036,10 +2761,50 @@ class MainWindow(QMainWindow):
         for page in self.pages:
             page.refresh()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_tutorial_overlay()
+
+    def _position_tutorial_overlay(self):
+        if hasattr(self, "tutorial_overlay"):
+            self.tutorial_overlay.setGeometry(self.stack.geometry())
+
+    def go_to_page(self, index):
+        if index < 0 or index >= len(self.pages):
+            return
+        self.stack.setCurrentIndex(index)
+        self.nav_buttons[index].setChecked(True)
+        if self._tutorial_dialog is not None:
+            self.nav_buttons[index].raise_()
+
+    def _maybe_start_tutorial(self):
+        self.refresh_all()
+        if not ft.is_tutorial_completed(self.settings):
+            self.start_tutorial(force=False)
+
+    def start_tutorial(self, force=False):
+        if self._tutorial_dialog is not None:
+            self._tutorial_dialog.raise_()
+            self._tutorial_dialog.activateWindow()
+            return
+        self._position_tutorial_overlay()
+        self.tutorial_overlay.show()
+        self.tutorial_overlay.raise_()
+        self._tutorial_dialog = TutorialDialog(self, force=force)
+        self._tutorial_dialog.finished.connect(self._finish_tutorial_dialog)
+        self._tutorial_dialog.open()
+        self._tutorial_dialog.raise_()
+
+    def _finish_tutorial_dialog(self):
+        self.tutorial_overlay.hide()
+        self._tutorial_dialog = None
+        self.refresh_all()
+
 
 def run():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(app_icon())
     app.setStyleSheet(APP_STYLE)
     font = QFont("Segoe UI", 10)
     app.setFont(font)

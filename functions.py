@@ -10,8 +10,14 @@ from colorama import Fore, Style, init
 
 init()
 
-REQUIRED_SETTINGS_KEYS = ["skat", "fradrag", "am bidrag", "su", "boligstøtte", "løn start", "løn slut"]
-DEFAULT_FIXED_EXPENSES = 8250
+OTHER_INCOME_KEY = "anden indkomst netto"
+DEFAULT_HOURLY_RATE_KEY = "standard timeløn"
+TUTORIAL_DONE_KEY = "tutorial gennemført"
+REQUIRED_SETTINGS_KEYS = ["skat", "fradrag", "am bidrag", OTHER_INCOME_KEY, "løn start", "løn slut"]
+DEFAULT_FIXED_EXPENSES = 0
+DEFAULT_HOURLY_RATE = 150
+LEGACY_DEFAULT_FIXED_EXPENSES = 8250
+LEGACY_DEFAULT_OTHER_INCOME = 9539 + 1203
 
 
 def _stdout_supports(text):
@@ -150,12 +156,11 @@ def load_settings():
             "skat": 0.4,
             "fradrag": 0,
             "am bidrag": 0.08,
-            "su": 9539,
-            "boligstøtte": 1203,
+            OTHER_INCOME_KEY: 0,
+            DEFAULT_HOURLY_RATE_KEY: DEFAULT_HOURLY_RATE,
+            TUTORIAL_DONE_KEY: False,
             "udgifter": DEFAULT_FIXED_EXPENSES,
-            "budget kategorier": [
-                {"navn": "Faste udgifter", "beløb": DEFAULT_FIXED_EXPENSES}
-            ],
+            "budget kategorier": [],
             "ønsket rådighedsbeløb": 1000,
             "løn start": 15,
             "løn slut": 14,
@@ -195,9 +200,12 @@ def normalize_settings(settings):
 
     if "budget kategorier" not in normalized:
         legacy_expenses = float(normalized.get("udgifter", 0) or 0)
-        normalized["budget kategorier"] = [
-            {"navn": "Faste udgifter", "beløb": legacy_expenses}
-        ]
+        if legacy_expenses > 0 and legacy_expenses != LEGACY_DEFAULT_FIXED_EXPENSES:
+            normalized["budget kategorier"] = [
+                {"navn": "Faste udgifter", "beløb": legacy_expenses}
+            ]
+        else:
+            normalized["budget kategorier"] = []
     else:
         clean_categories = []
         for item in normalized.get("budget kategorier", []):
@@ -213,11 +221,41 @@ def normalize_settings(settings):
                     "beløb": max(0.0, amount),
                 }
             )
+        if (
+            len(clean_categories) == 1
+            and clean_categories[0]["navn"] == "Faste udgifter"
+            and clean_categories[0]["beløb"] == LEGACY_DEFAULT_FIXED_EXPENSES
+        ):
+            clean_categories = []
         normalized["budget kategorier"] = clean_categories
+
+    if OTHER_INCOME_KEY not in normalized:
+        try:
+            legacy_other_income = float(normalized.get("su", 0) or 0) + float(normalized.get("boligstøtte", 0) or 0)
+        except (TypeError, ValueError):
+            legacy_other_income = 0.0
+        normalized[OTHER_INCOME_KEY] = 0.0 if legacy_other_income == LEGACY_DEFAULT_OTHER_INCOME else legacy_other_income
+    else:
+        try:
+            normalized[OTHER_INCOME_KEY] = max(0.0, float(normalized.get(OTHER_INCOME_KEY, 0) or 0))
+        except (TypeError, ValueError):
+            normalized[OTHER_INCOME_KEY] = 0.0
+    normalized.pop("su", None)
+    normalized.pop("boligstøtte", None)
 
     if "ønsket rådighedsbeløb" not in normalized:
         normalized["ønsket rådighedsbeløb"] = float(normalized.get("rådighed advarsel", 1000) or 0)
     normalized.pop("rådighed advarsel", None)
+
+    try:
+        normalized[DEFAULT_HOURLY_RATE_KEY] = max(
+            0.0,
+            float(normalized.get(DEFAULT_HOURLY_RATE_KEY, DEFAULT_HOURLY_RATE) or DEFAULT_HOURLY_RATE),
+        )
+    except (TypeError, ValueError):
+        normalized[DEFAULT_HOURLY_RATE_KEY] = float(DEFAULT_HOURLY_RATE)
+
+    normalized[TUTORIAL_DONE_KEY] = bool(normalized.get(TUTORIAL_DONE_KEY, False))
 
     return normalized
 
@@ -247,6 +285,27 @@ def get_disposable_income_goal(settings=None):
         return max(0.0, float(settings.get("ønsket rådighedsbeløb", 0) or 0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def get_other_income(settings=None):
+    settings = normalize_settings(settings if settings is not None else load_settings())
+    try:
+        return max(0.0, float(settings.get(OTHER_INCOME_KEY, 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_default_hourly_rate(settings=None):
+    settings = normalize_settings(settings if settings is not None else load_settings())
+    try:
+        return max(0.0, float(settings.get(DEFAULT_HOURLY_RATE_KEY, DEFAULT_HOURLY_RATE) or DEFAULT_HOURLY_RATE))
+    except (TypeError, ValueError):
+        return float(DEFAULT_HOURLY_RATE)
+
+
+def is_tutorial_completed(settings=None):
+    settings = normalize_settings(settings if settings is not None else load_settings())
+    return bool(settings.get(TUTORIAL_DONE_KEY, False))
 
 
 def calculate_budget_expenses(settings=None):
@@ -487,16 +546,17 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
         estimated_total_brutto = current_brutto + (estimated_remaining_daily_brutto * remaining_days)
 
     estimated_total_netto = None
-    estimated_total_with_support = None
+    estimated_total_income = None
     estimated_disposable_income = None
+    other_income = get_other_income(settings)
     if estimated_total_brutto is not None:
         estimated_total_netto = calculate_netto_salary_from_brutto(estimated_total_brutto)
-        estimated_total_with_support = estimated_total_netto + settings.get("su", 0) + settings.get("boligstøtte", 0)
-        estimated_disposable_income = calculate_disposable_income(estimated_total_with_support, settings)
+        estimated_total_income = estimated_total_netto + other_income
+        estimated_disposable_income = calculate_disposable_income(estimated_total_income, settings)
 
     current_netto = calculate_netto_salary_from_brutto(current_brutto)
-    current_total_with_support = current_netto + settings.get("su", 0) + settings.get("boligstøtte", 0)
-    current_disposable_income = calculate_disposable_income(current_total_with_support, settings)
+    current_total_income = current_netto + other_income
+    current_disposable_income = calculate_disposable_income(current_total_income, settings)
     budget_expenses = calculate_budget_expenses(settings)
 
     return {
@@ -509,7 +569,9 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
         "current_hours": current_hours,
         "current_brutto": current_brutto,
         "current_netto": current_netto,
-        "current_total_with_support": current_total_with_support,
+        "other_income": other_income,
+        "current_total_income": current_total_income,
+        "current_total_with_support": current_total_income,
         "current_disposable_income": current_disposable_income,
         "budget_expenses": budget_expenses,
         "historical_periods_count": len(afsluttede_perioder),
@@ -518,7 +580,8 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
         "estimated_hours": estimated_total_hours,
         "estimated_brutto": estimated_total_brutto,
         "estimated_netto": estimated_total_netto,
-        "estimated_total_with_support": estimated_total_with_support,
+        "estimated_total_income": estimated_total_income,
+        "estimated_total_with_support": estimated_total_income,
         "estimated_disposable_income": estimated_disposable_income,
     }
 

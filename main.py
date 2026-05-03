@@ -1,5 +1,6 @@
 # pyinstaller --onedir --windowed --icon="C:\Users\Krist\AppData\Local\lønix\logo.png" --name="Lønix" main.py
 
+
 import sys
 
 from gui import run
