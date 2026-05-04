@@ -1,0 +1,54 @@
+{
+    "skat": 0.4,
+    "fradrag": 0.0,
+    "am bidrag": 0.08,
+    "udgifter": 10993.0,
+    "budget kategorier": [
+        {
+            "navn": "Mad",
+            "beløb": 1500.0
+        },
+        {
+            "navn": "Husleje",
+            "beløb": 5200.0
+        },
+        {
+            "navn": "Telefon (Eesy)",
+            "beløb": 119.0
+        },
+        {
+            "navn": "ChatGPT",
+            "beløb": 165.0
+        },
+        {
+            "navn": "Andet",
+            "beløb": 500.0
+        },
+        {
+            "navn": "El + WiFi (Ewii)",
+            "beløb": 350.0
+        },
+        {
+            "navn": "OneDrive (Microsoft)",
+            "beløb": 10.0
+        },
+        {
+            "navn": "Opsparing",
+            "beløb": 2000.0
+        },
+        {
+            "navn": "Gæld (Miksi)",
+            "beløb": 1000.0
+        },
+        {
+            "navn": "Lunar Unlimited",
+            "beløb": 149.0
+        }
+    ],
+    "ønsket rådighedsbeløb": 2000.0,
+    "løn start": 15,
+    "løn slut": 14,
+    "anden indkomst netto": 10733.0,
+    "standard timeløn": 150.0,
+    "tutorial gennemført": true
+}

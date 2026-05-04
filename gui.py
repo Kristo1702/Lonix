@@ -38,7 +38,30 @@ import functions as ft
 import statistik
 
 
-LOGO_PATH = os.path.join(os.environ.get("LOCALAPPDATA", ""), "lønix", "logo.png")
+def resource_path(relative_path):
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, relative_path)
+
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
+
+def find_logo_path():
+    bundled_logo_path = resource_path("logo.png")
+    if os.path.exists(bundled_logo_path):
+        return bundled_logo_path
+
+    localappdata_logo_path = os.path.join(
+        os.environ.get("LOCALAPPDATA", ""),
+        "lønix",
+        "logo.png",
+    )
+    if os.path.exists(localappdata_logo_path):
+        return localappdata_logo_path
+
+    return ""
+
+
+LOGO_PATH = find_logo_path()
 
 
 APP_NAME = "Lønix"
@@ -550,38 +573,70 @@ def entry_rows(data):
         dato = parse_date_key(dato_str)
         timer = float(info.get("timer", 0))
         timeløn = float(info.get("timeløn", 0))
-        rows.append(
-            {
-                "dato": dato,
-                "timer": timer,
-                "timeløn": timeløn,
-                "brutto": timer * timeløn,
-            }
-        )
+
+        row = {
+            "dato": dato,
+            "timer": timer,
+            "timeløn": timeløn,
+            "brutto": timer * timeløn,
+        }
+
+        if info.get("start"):
+            row["start"] = str(info.get("start"))
+
+        if info.get("slut"):
+            row["slut"] = str(info.get("slut"))
+
+        rows.append(row)
+
     return sorted(rows, key=lambda row: row["dato"], reverse=True)
 
 
 def save_entry_rows(rows):
     ensure_storage()
     clean_rows = sorted(rows, key=lambda row: row["dato"])
-    payload = [
-        {
-            date_to_key(row["dato"]): {
-                "timer": float(row["timer"]),
-                "timeløn": float(row["timeløn"]),
-            }
+
+    payload = []
+    for row in clean_rows:
+        entry_info = {
+            "timer": float(row["timer"]),
+            "timeløn": float(row["timeløn"]),
         }
-        for row in clean_rows
-    ]
+
+        start = row.get("start")
+        slut = row.get("slut")
+        if start and slut:
+            entry_info["start"] = str(start)
+            entry_info["slut"] = str(slut)
+
+        payload.append(
+            {
+                date_to_key(row["dato"]): entry_info
+            }
+        )
+
     with open("data/løn.txt", "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=4)
 
 
-def upsert_entry(entry_date, hours, rate, original_date=None):
+def upsert_entry(entry_date, hours, rate, original_date=None, start=None, slut=None):
     rows = entry_rows(ft.load_data())
     target_key = original_date or entry_date
+
     rows = [row for row in rows if row["dato"] != target_key]
-    rows.append({"dato": entry_date, "timer": float(hours), "timeløn": float(rate), "brutto": float(hours) * float(rate)})
+
+    new_row = {
+        "dato": entry_date,
+        "timer": float(hours),
+        "timeløn": float(rate),
+        "brutto": float(hours) * float(rate),
+    }
+
+    if start and slut:
+        new_row["start"] = str(start)
+        new_row["slut"] = str(slut)
+
+    rows.append(new_row)
     save_entry_rows(rows)
 
 
@@ -644,6 +699,16 @@ def table_item(value, align=Qt.AlignLeft | Qt.AlignVCenter):
     item.setFlags(item.flags() ^ Qt.ItemIsEditable)
     item.setTextAlignment(align)
     return item
+
+
+def format_work_time(row):
+    start = row.get("start")
+    slut = row.get("slut")
+
+    if start and slut:
+        return f"{start} - {slut} ({format_number(row['timer'])}t)"
+
+    return format_number(row["timer"])
 
 
 def load_logo_pixmap(size=None):
@@ -1396,7 +1461,7 @@ class DashboardPage(BasePage):
         self.goal_card = GoalHeaderWidget()
         self.root.addWidget(self.goal_card)
 
-        progress_panel, progress_layout = make_dashboard_panel("Periodens forløb")
+        progress_panel, progress_layout = make_dashboard_panel("Forløb")
         progress_layout.setSpacing(12)
         self.period_progress = PeriodProgressWidget()
         self.progress_detail = QLabel()
@@ -1465,13 +1530,13 @@ class DashboardPage(BasePage):
         self.breakdown_table = QTableWidget()
         setup_table(self.breakdown_table, ["Post", "Beløb"])
         breakdown_layout.addWidget(self.breakdown_table)
-        lower.addWidget(breakdown_panel, 1, Qt.AlignTop)
+        lower.addWidget(breakdown_panel, 2, Qt.AlignTop)
 
         recent_panel, recent_layout = make_dashboard_panel("Vagter i perioden")
         self.recent_table = QTableWidget()
-        setup_table(self.recent_table, ["Dato", "Timer", "Timeløn", "Brutto"])
+        setup_table(self.recent_table, ["Dato", "Timer", "Brutto"])
         recent_layout.addWidget(self.recent_table)
-        lower.addWidget(recent_panel, 1, Qt.AlignTop)
+        lower.addWidget(recent_panel, 3, Qt.AlignTop)
 
     def refresh(self):
         if not has_required_settings(self.settings):
@@ -1673,9 +1738,8 @@ class DashboardPage(BasePage):
         self.recent_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             self.recent_table.setItem(row_index, 0, table_item(format_date(row["dato"])))
-            self.recent_table.setItem(row_index, 1, table_item(format_number(row["timer"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.recent_table.setItem(row_index, 2, table_item(format_money(row["timeløn"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.recent_table.setItem(row_index, 3, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.recent_table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
+            self.recent_table.setItem(row_index, 2, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
         fit_table_height(self.recent_table, len(rows), max_rows=20, min_rows=min(3, max(1, len(rows))))
 
 
@@ -1797,6 +1861,14 @@ class EntryPage(BasePage):
             selected_date = parse_date_text(self.date_edit.text())
             hours = self._selected_hours()
             rate = parse_positive_number(self.rate_field, "Timeløn")
+
+            start_time = None
+            end_time = None
+
+            if self.mode_combo.currentIndex() == 0:
+                start_time = self.start_field.text().strip()
+                end_time = self.end_field.text().strip()
+
         except ValueError as error:
             QMessageBox.warning(self, "Ugyldig indberetning", str(error))
             return
@@ -1812,7 +1884,14 @@ class EntryPage(BasePage):
             if answer != QMessageBox.Yes:
                 return
 
-        upsert_entry(selected_date, hours, rate)
+        upsert_entry(
+            selected_date,
+            hours,
+            rate,
+            start=start_time,
+            slut=end_time,
+        )
+
         QMessageBox.information(
             self,
             "Indberetning gemt",
@@ -1825,9 +1904,10 @@ class EntryPage(BasePage):
         self.history_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             self.history_table.setItem(row_index, 0, table_item(format_date(row["dato"])))
-            self.history_table.setItem(row_index, 1, table_item(format_number(row["timer"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.history_table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
             self.history_table.setItem(row_index, 2, table_item(format_money(row["timeløn"]), Qt.AlignRight | Qt.AlignVCenter))
             self.history_table.setItem(row_index, 3, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+        self.history_table.resizeRowsToContents()
 
 
 class CalculatorPage(BasePage):
@@ -2389,7 +2469,7 @@ class HistoryPage(BasePage):
         self.table.setRowCount(len(self.rows))
         for row_index, row in enumerate(self.rows):
             self.table.setItem(row_index, 0, table_item(format_date(row["dato"])))
-            self.table.setItem(row_index, 1, table_item(format_number(row["timer"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
             self.table.setItem(row_index, 2, table_item(format_money(row["timeløn"]), Qt.AlignRight | Qt.AlignVCenter))
             self.table.setItem(row_index, 3, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
         self.table.resizeRowsToContents()
@@ -2793,11 +2873,12 @@ class TutorialDialog(QDialog):
         self.setModal(True)
         self.setWindowTitle("Kom godt i gang")
         self.setWindowIcon(app_icon())
-        self.setMinimumWidth(680)
+        self.setMinimumSize(760, 620)
+        self.resize(820, 680)
 
         self.steps = [
             {
-                "key": "welcome",
+                "key": "Velkommen!",
                 "title": "Velkommen til Lønix",
                 "text": (
                     "Denne korte tutorial hjælper dig med at sætte programmet op.\n\n"
@@ -2812,7 +2893,7 @@ class TutorialDialog(QDialog):
                 "text": (
                     "Overblik viser den aktuelle lønperiode.\n\n"
                     "Her ser du registreret netto løn, timer, brutto løn, rådighedsbeløb efter budget "
-                    "og en separat estimatsektion for resten af perioden."
+                    "og estimater for resten af perioden."
                 ),
             },
             {
@@ -2820,32 +2901,23 @@ class TutorialDialog(QDialog):
                 "page": 1,
                 "title": "Indberet",
                 "text": (
-                    "Indberet bruges til at registrere en vagt.\n\n"
+                    "Indberet bruges til at registrere en ny vagt.\n\n"
                     "Du kan vælge start/slut eller skrive antal timer direkte. Timelønnen bruger din "
                     "standardtimeløn, indtil du ændrer den eller har tidligere vagter."
                 ),
             },
             {
-                "key": "payments",
+                "key": "history",
                 "page": 2,
-                "title": "Lønsedler",
+                "title": "Historik",
                 "text": (
-                    "Lønsedler viser afsluttede lønperioder.\n\n"
-                    "Her kan du se timer, brutto, netto og total udbetaling for tidligere perioder."
-                ),
-            },
-            {
-                "key": "statistics",
-                "page": 3,
-                "title": "Statistik",
-                "text": (
-                    "Statistik samler nøgletal og grafer.\n\n"
-                    "Brug siden til at se udvikling i timer, løn og mønstre over tid."
+                    "Historik viser alle registrerede vagter.\n\n"
+                    "Her kan du rette fejl i gamle indberetninger eller slette en vagt."
                 ),
             },
             {
                 "key": "budget",
-                "page": 4,
+                "page": 3,
                 "title": "Budget",
                 "text": (
                     "Budget er dine faste udgifter for perioden.\n\n"
@@ -2854,12 +2926,21 @@ class TutorialDialog(QDialog):
                 ),
             },
             {
-                "key": "history",
-                "page": 5,
-                "title": "Historik",
+                "key": "payments",
+                "page": 4,
+                "title": "Lønsedler",
                 "text": (
-                    "Historik viser alle registrerede vagter.\n\n"
-                    "Her kan du rette fejl i gamle indberetninger eller slette en vagt."
+                    "Lønsedler viser afsluttede lønperioder.\n\n"
+                    "Her kan du se timer, brutto, netto og total udbetaling for tidligere perioder."
+                ),
+            },
+            {
+                "key": "statistics",
+                "page": 5,
+                "title": "Statistik",
+                "text": (
+                    "Statistik samler nøgletal og grafer.\n\n"
+                    "Brug siden til at se udvikling i timer, løn og mønstre over tid."
                 ),
             },
             {
@@ -2956,42 +3037,103 @@ class TutorialDialog(QDialog):
         self._show_step()
 
     def _build_setup_widget(self):
-        widget = QWidget()
-        grid = QGridLayout(widget)
+        wrapper = QFrame()
+        wrapper.setObjectName("Card")
+        wrapper.setStyleSheet(
+            """
+            QFrame#Card {
+                background: #ffffff;
+                border: 1px solid #dde3ea;
+                border-radius: 8px;
+            }
+            QLabel#SetupTitle {
+                color: #111827;
+                font-size: 12pt;
+                font-weight: 850;
+                border: 0;
+                background: transparent;
+            }
+            QLabel#SetupHint {
+                color: #64748b;
+                border: 0;
+                background: transparent;
+            }
+            QLabel#SetupFieldLabel {
+                color: #334155;
+                font-size: 9pt;
+                font-weight: 800;
+                border: 0;
+                background: transparent;
+            }
+            """
+        )
+
+        root = QVBoxLayout(wrapper)
+        root.setContentsMargins(18, 16, 18, 18)
+        root.setSpacing(14)
+
+        title = QLabel("Grundoplysninger")
+        title.setObjectName("SetupTitle")
+        root.addWidget(title)
+
+        hint = QLabel(
+            "Udfyld dine vigtigste tal her. Felterne bliver gemt i Indstillinger, "
+            "når du trykker Næste."
+        )
+        hint.setObjectName("SetupHint")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(10)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(12)
+        root.addLayout(grid)
 
         self.setup_other_income = make_text_input(placeholder="0 kr")
         self.setup_tax = make_text_input(placeholder="40%")
         self.setup_fradrag = make_text_input(placeholder="0 kr")
         self.setup_goal = make_text_input(placeholder="2000 kr")
-        self.setup_start = make_text_input(placeholder="d.15")
-        self.setup_end = make_text_input(placeholder="d.14")
+        self.setup_start = make_text_input(placeholder="15")
+        self.setup_end = make_text_input(placeholder="14")
         self.setup_rate = make_text_input(placeholder="150 kr")
 
-        def add_field(row, column, label, field):
+        fields = [
+            ("Anden indkomst netto", self.setup_other_income),
+            ("Skatteprocent", self.setup_tax),
+            ("Fradrag", self.setup_fradrag),
+            ("Ønsket rådighedsbeløb", self.setup_goal),
+            ("Lønperiode startdag", self.setup_start),
+            ("Lønperiode slutdag", self.setup_end),
+            ("Standard timeløn", self.setup_rate),
+        ]
+
+        def add_field(index, label_text, field):
+            row = index // 2
+            column = index % 2
+
             cell = QWidget()
-            layout = QVBoxLayout(cell)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(4)
-            label_widget = QLabel(label)
-            label_widget.setStyleSheet("color: #475569; font-weight: 700;")
-            layout.addWidget(label_widget)
-            layout.addWidget(field)
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(5)
+
+            label = QLabel(label_text)
+            label.setObjectName("SetupFieldLabel")
+            label.setWordWrap(False)
+
+            field.setMinimumWidth(250)
+
+            cell_layout.addWidget(label)
+            cell_layout.addWidget(field)
             grid.addWidget(cell, row, column)
 
-        add_field(0, 0, "Anden indkomst (netto)", self.setup_other_income)
-        add_field(0, 1, "Skatteprocent", self.setup_tax)
-        add_field(0, 2, "Fradrag", self.setup_fradrag)
-        add_field(1, 0, "Ønsket rådighedsbeløb", self.setup_goal)
-        add_field(1, 1, "Lønperiode start", self.setup_start)
-        add_field(1, 2, "Lønperiode slut", self.setup_end)
-        add_field(2, 0, "Timeløn", self.setup_rate)
+        for index, (label_text, field) in enumerate(fields):
+            add_field(index, label_text, field)
+
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
-        return widget
+
+        return wrapper
 
     def _fill_existing_values(self):
         settings = self.window.settings
@@ -3008,21 +3150,27 @@ class TutorialDialog(QDialog):
 
     def _show_step(self):
         step = self._current_step()
+        is_setup_step = step["key"] == "setup"
+
         self.title_label.setText(step["title"])
         self.body_label.setText(step["text"])
         self.step_label.setText(f"{self.step_index + 1} / {len(self.steps)}")
-        self.setup_widget.setVisible(step["key"] == "setup")
-        self._set_visual(step["key"])
-        if step["key"] == "setup":
-            self.body_label.setMinimumHeight(60)
-            self.visual_frame.setMinimumHeight(118)
-            self.visual_frame.setMaximumHeight(138)
+
+        self.setup_widget.setVisible(is_setup_step)
+
+        if is_setup_step:
+            self.visual_frame.hide()
+            self.body_label.setMinimumHeight(48)
         else:
+            self.visual_frame.show()
             self.body_label.setMinimumHeight(82)
             self.visual_frame.setMinimumHeight(190)
             self.visual_frame.setMaximumHeight(16777215)
+            self._set_visual(step["key"])
+
         if "page" in step:
             self.window.go_to_page(step["page"])
+
         self.back_button.setEnabled(self.step_index > 0)
         self.next_button.setText("Afslut" if step["key"] == "done" else "Næste")
 
@@ -3225,13 +3373,7 @@ class TutorialDialog(QDialog):
         self.visual_layout.addLayout(rows)
 
     def _visual_setup(self):
-        self._visual_title("Tallene her bliver gemt i Indstillinger")
-        flow = QHBoxLayout()
-        flow.setSpacing(10)
-        flow.addWidget(self._mini_card("1", "Udfyld", "#2563eb", "Skat, fradrag og periode"))
-        flow.addWidget(self._mini_card("2", "Gem", "#1f8a70", "Tutorialen opdaterer appen"))
-        flow.addWidget(self._mini_card("3", "Brug", "#d97706", "Indberet og se overblik"))
-        self.visual_layout.addLayout(flow)
+        pass
 
     def _visual_done(self):
         self._visual_title("Klar til første indberetning")
