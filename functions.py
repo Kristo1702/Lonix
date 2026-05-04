@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from calendar import monthrange
@@ -13,11 +14,20 @@ init()
 OTHER_INCOME_KEY = "anden indkomst netto"
 DEFAULT_HOURLY_RATE_KEY = "standard timeløn"
 TUTORIAL_DONE_KEY = "tutorial gennemført"
+JOB_NAME_KEY = "job navn"
 REQUIRED_SETTINGS_KEYS = ["skat", "fradrag", "am bidrag", OTHER_INCOME_KEY, "løn start", "løn slut"]
 DEFAULT_FIXED_EXPENSES = 0
 DEFAULT_HOURLY_RATE = 150
 LEGACY_DEFAULT_FIXED_EXPENSES = 8250
 LEGACY_DEFAULT_OTHER_INCOME = 9539 + 1203
+DATA_DIR = "data"
+DATA_FILENAME = "løn.txt"
+SETTINGS_FILENAME = "oplysninger.txt"
+ACTIVE_JOB_FILENAME = "aktivt_job.txt"
+DEFAULT_JOB_NAME = "Standard"
+COMBINED_JOB_ID = "__combined__"
+COMBINED_JOB_NAME = "Kombineret"
+_ACTIVE_JOB_ID = None
 
 
 def _stdout_supports(text):
@@ -117,21 +127,236 @@ def error_message(
         input(Fore.LIGHTBLACK_EX + "\n\nTryk Enter for at gå tilbage..." + Style.RESET_ALL)
 
 
-def load_data():
-    if not os.path.exists("data"):
-        os.mkdir("data")
+def default_settings(job_name=DEFAULT_JOB_NAME):
+    return {
+        JOB_NAME_KEY: str(job_name),
+        "skat": 0.4,
+        "fradrag": 0,
+        "am bidrag": 0.08,
+        OTHER_INCOME_KEY: 0,
+        DEFAULT_HOURLY_RATE_KEY: DEFAULT_HOURLY_RATE,
+        TUTORIAL_DONE_KEY: False,
+        "udgifter": DEFAULT_FIXED_EXPENSES,
+        "budget kategorier": [],
+        "ønsket rådighedsbeløb": 1000,
+        "løn start": 15,
+        "løn slut": 14,
+    }
 
-    if not os.path.exists("data/løn.txt"):
-        with open("data/løn.txt", "w", encoding="utf-8") as file:
+
+def _ensure_data_dir():
+    if not os.path.exists(DATA_DIR):
+        os.mkdir(DATA_DIR)
+
+
+def _sanitize_job_id(name):
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name).strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    if not cleaned:
+        raise ValueError("Jobbet skal have et navn.")
+    return cleaned[:80]
+
+
+def _job_dir(job_id):
+    return os.path.join(DATA_DIR, _sanitize_job_id(job_id))
+
+
+def _job_data_path(job_id):
+    return os.path.join(_job_dir(job_id), DATA_FILENAME)
+
+
+def _job_settings_path(job_id):
+    return os.path.join(_job_dir(job_id), SETTINGS_FILENAME)
+
+
+def _active_job_path():
+    return os.path.join(DATA_DIR, ACTIVE_JOB_FILENAME)
+
+
+def _root_data_path():
+    return os.path.join(DATA_DIR, DATA_FILENAME)
+
+
+def _root_settings_path():
+    return os.path.join(DATA_DIR, SETTINGS_FILENAME)
+
+
+def _is_job_directory(path):
+    return (
+        os.path.isdir(path)
+        and os.path.exists(os.path.join(path, DATA_FILENAME))
+        and os.path.exists(os.path.join(path, SETTINGS_FILENAME))
+    )
+
+
+def ensure_job_storage():
+    _ensure_data_dir()
+    if _job_ids_from_disk():
+        _ensure_active_job()
+        return
+
+    create_job(
+        DEFAULT_JOB_NAME,
+        settings=None,
+        data=None,
+        switch_to=False,
+        migrate_legacy=True,
+    )
+    set_active_job_id(_sanitize_job_id(DEFAULT_JOB_NAME))
+
+
+def _job_ids_from_disk():
+    _ensure_data_dir()
+    ids = [
+        name
+        for name in os.listdir(DATA_DIR)
+        if _is_job_directory(os.path.join(DATA_DIR, name))
+    ]
+    return sorted(ids, key=str.casefold)
+
+
+def list_jobs():
+    ensure_job_storage()
+    jobs = []
+    for job_id in _job_ids_from_disk():
+        settings = load_settings(job_id)
+        jobs.append(
+            {
+                "id": job_id,
+                "name": str(settings.get(JOB_NAME_KEY, job_id)),
+            }
+        )
+    return jobs
+
+
+def _ensure_active_job():
+    jobs = _job_ids_from_disk()
+    if not jobs:
+        return None
+
+    active = _read_active_job_id()
+    if active == COMBINED_JOB_ID and len(jobs) <= 1:
+        set_active_job_id(jobs[0])
+        return jobs[0]
+    if active not in jobs and active != COMBINED_JOB_ID:
+        set_active_job_id(jobs[0])
+        return jobs[0]
+    return active or jobs[0]
+
+
+def _read_active_job_id():
+    global _ACTIVE_JOB_ID
+    if _ACTIVE_JOB_ID:
+        return _ACTIVE_JOB_ID
+    path = _active_job_path()
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as file:
+            _ACTIVE_JOB_ID = file.read().strip()
+    return _ACTIVE_JOB_ID
+
+
+def get_active_job_id():
+    ensure_job_storage()
+    return _ensure_active_job()
+
+
+def set_active_job_id(job_id):
+    global _ACTIVE_JOB_ID
+    _ensure_data_dir()
+    if job_id != COMBINED_JOB_ID and job_id not in _job_ids_from_disk():
+        raise ValueError("Jobbet findes ikke.")
+    _ACTIVE_JOB_ID = job_id
+    with open(_active_job_path(), "w", encoding="utf-8") as file:
+        file.write(job_id)
+
+
+def is_combined_job(job_id=None):
+    return (job_id or get_active_job_id()) == COMBINED_JOB_ID
+
+
+def create_job(name, settings=None, data=None, switch_to=True, migrate_legacy=False):
+    _ensure_data_dir()
+    job_id = _sanitize_job_id(name)
+    if job_id.casefold() in {COMBINED_JOB_ID.casefold(), COMBINED_JOB_NAME.casefold()}:
+        raise ValueError("Jobnavnet er reserveret.")
+    path = _job_dir(job_id)
+    if os.path.exists(path) and not migrate_legacy:
+        raise ValueError("Der findes allerede et job med det navn.")
+
+    os.makedirs(path, exist_ok=True)
+
+    data_path = _job_data_path(job_id)
+    settings_path = _job_settings_path(job_id)
+
+    if migrate_legacy and os.path.exists(_root_data_path()):
+        shutil.copyfile(_root_data_path(), data_path)
+    else:
+        with open(data_path, "w", encoding="utf-8") as file:
+            json.dump(data if data is not None else [], file, ensure_ascii=False, indent=4)
+
+    if migrate_legacy and os.path.exists(_root_settings_path()):
+        shutil.copyfile(_root_settings_path(), settings_path)
+        migrated_settings = load_settings(job_id)
+        migrated_settings[JOB_NAME_KEY] = str(name)
+        save_settings(migrated_settings, job_id)
+    else:
+        job_settings = default_settings(name)
+        if settings:
+            job_settings.update(settings)
+        save_settings(job_settings, job_id)
+
+    if switch_to:
+        set_active_job_id(job_id)
+    return job_id
+
+
+def _resolve_job_id(job_id=None, allow_combined=False):
+    if job_id is not None:
+        if job_id == COMBINED_JOB_ID:
+            if allow_combined:
+                return job_id
+            raise ValueError("Kombineret kan ikke gemmes direkte.")
+        return _sanitize_job_id(job_id)
+
+    ensure_job_storage()
+    resolved = get_active_job_id()
+    if resolved == COMBINED_JOB_ID:
+        if allow_combined:
+            return resolved
+        raise ValueError("Kombineret kan ikke gemmes direkte.")
+    return resolved
+
+
+def load_data(job_id=None):
+    job_id = _resolve_job_id(job_id, allow_combined=True)
+
+    if job_id == COMBINED_JOB_ID:
+        combined = []
+        for job in list_jobs():
+            combined.extend(load_data(job["id"]))
+        return combined
+
+    path = _job_data_path(job_id)
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as file:
             json.dump([], file, ensure_ascii=False, indent=4)
         return []
 
-    with open("data/løn.txt", "r", encoding="utf-8") as file:
+    with open(path, "r", encoding="utf-8") as file:
         return json.load(file)
 
 
-def save_data(new_data):
-    data = load_data()
+def save_all_data(data, job_id=None):
+    job_id = _resolve_job_id(job_id)
+    path = _job_data_path(job_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=4)
+
+
+def save_data(new_data, job_id=None):
+    data = load_data(job_id)
     ny_dato = next(iter(new_data))
 
     for i, entry in enumerate(data):
@@ -143,39 +368,33 @@ def save_data(new_data):
 
     data = sorted(data, key=lambda entry: datetime.strptime(next(iter(entry)), "%d-%m-%Y"))
 
-    with open("data/løn.txt", "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=4)
+    save_all_data(data, job_id)
 
 
-def load_settings():
-    if not os.path.exists("data"):
-        os.mkdir("data")
+def load_settings(job_id=None):
+    job_id = _resolve_job_id(job_id, allow_combined=True)
 
-    if not os.path.exists("data/oplysninger.txt"):
-        default_data = {
-            "skat": 0.4,
-            "fradrag": 0,
-            "am bidrag": 0.08,
-            OTHER_INCOME_KEY: 0,
-            DEFAULT_HOURLY_RATE_KEY: DEFAULT_HOURLY_RATE,
-            TUTORIAL_DONE_KEY: False,
-            "udgifter": DEFAULT_FIXED_EXPENSES,
-            "budget kategorier": [],
-            "ønsket rådighedsbeløb": 1000,
-            "løn start": 15,
-            "løn slut": 14,
-        }
-        with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
+    if job_id == COMBINED_JOB_ID:
+        settings = default_settings(COMBINED_JOB_NAME)
+        settings["kombineret"] = True
+        return settings
+
+    path = _job_settings_path(job_id)
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        default_data = default_settings(job_id)
+        with open(path, "w", encoding="utf-8") as file:
             json.dump(default_data, file, ensure_ascii=False, indent=4)
         return default_data
 
-    with open("data/oplysninger.txt", "r", encoding="utf-8") as file:
+    with open(path, "r", encoding="utf-8") as file:
         settings = json.load(file)
 
     return normalize_settings(settings)
 
 
-def save_settings(new_settings):
+def save_settings(new_settings, job_id=None):
+    job_id = _resolve_job_id(job_id)
     new_settings = normalize_settings(new_settings)
     if not all(key in new_settings for key in REQUIRED_SETTINGS_KEYS):
         raise ValueError("Kunne ikke gemme data: nøgle mangler")
@@ -183,10 +402,9 @@ def save_settings(new_settings):
     # Legacy compatibility only. New calculations use budget categories.
     new_settings["udgifter"] = calculate_budget_expenses(new_settings)
 
-    if not os.path.exists("data"):
-        os.mkdir("data")
-
-    with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
+    path = _job_settings_path(job_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
         json.dump(new_settings, file, ensure_ascii=False, indent=4)
 
 
