@@ -1,4 +1,4 @@
-# pyinstaller --onedir --windowed --icon="C:\Users\Krist\AppData\Local\lønix\logo.png" --name="Lønix" main.py
+# pyinstaller --onedir --windowed --icon="C:\Users\Krist\AppData\Local\lønix\logo.png" --add-data "C:\Users\Krist\AppData\Local\lønix\logo.png;." --name="Lønix" main.py
 
 
 import sys

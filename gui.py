@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListView,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -203,6 +204,49 @@ QLineEdit, QComboBox {
     border-radius: 6px;
     padding: 8px 10px;
     min-height: 24px;
+}
+QComboBox {
+    padding-right: 38px;
+}
+QComboBox::drop-down {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 32px;
+    border-left: 1px solid #cfd8e3;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background: #f4f7f9;
+}
+QComboBox::drop-down:hover {
+    background: #e7ecef;
+}
+QComboBox::down-arrow {
+    width: 0;
+    height: 0;
+    image: none;
+    border: 0;
+}
+QListView#ModernComboPopup {
+    background: #ffffff;
+    border: 1px solid #cfd8e3;
+    border-radius: 8px;
+    padding: 5px;
+    outline: 0;
+    selection-background-color: transparent;
+    selection-color: #111827;
+}
+QListView#ModernComboPopup::item {
+    min-height: 30px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    color: #1f2933;
+}
+QListView#ModernComboPopup::item:hover {
+    background: #f1f5f9;
+}
+QListView#ModernComboPopup::item:selected {
+    background: #e5f3ef;
+    color: #111827;
 }
 QLineEdit:focus, QComboBox:focus {
     border: 1px solid #1f8a70;
@@ -415,6 +459,52 @@ def make_text_input(text="", placeholder=""):
     return field
 
 
+class ModernComboBox(QComboBox):
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("ModernComboBox")
+        self.setMinimumWidth(176)
+        self.setMaxVisibleItems(8)
+
+        popup = QListView()
+        popup.setObjectName("ModernComboPopup")
+        popup.setFrameShape(QFrame.NoFrame)
+        popup.setUniformItemSizes(True)
+        popup.setSpacing(2)
+        popup.setFocusPolicy(Qt.NoFocus)
+        popup.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        popup.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setView(popup)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#64748b"), 1.8)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+
+        center_y = self.height() / 2 + 1
+        center_x = self.width() - 17
+        painter.drawLine(QPointF(center_x - 4, center_y - 2), QPointF(center_x, center_y + 2))
+        painter.drawLine(QPointF(center_x, center_y + 2), QPointF(center_x + 4, center_y - 2))
+
+    def showPopup(self):
+        self.view().setMinimumWidth(self.width())
+        super().showPopup()
+        QTimer.singleShot(0, self._move_popup_below_field)
+
+    def _move_popup_below_field(self):
+        popup = self.view().window()
+        if popup is None or not popup.isVisible():
+            return
+
+        popup_width = max(self.width(), self.view().sizeHintForColumn(0) + 34)
+        popup.resize(popup_width, popup.height())
+        popup.move(self.mapToGlobal(self.rect().bottomLeft()) + QPointF(0, 4).toPoint())
+
+
 def set_form_row_visible(form, field, visible):
     label = form.labelForField(field)
     if hasattr(form, "setRowVisible"):
@@ -598,6 +688,19 @@ def setup_table(table, headers):
     table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
 
+def fit_table_height(table, row_count, max_rows=20, min_rows=1):
+    table.resizeRowsToContents()
+    visible_rows = min(max(row_count, min_rows), max_rows)
+    default_row_height = max(table.verticalHeader().defaultSectionSize(), table.fontMetrics().height() + 14, 30)
+    row_height = sum(
+        max(table.rowHeight(index), default_row_height) if index < row_count else default_row_height
+        for index in range(visible_rows)
+    )
+    header_height = max(table.horizontalHeader().height(), table.horizontalHeader().sizeHint().height(), 34)
+    height = header_height + row_height + (table.frameWidth() * 2) + 8
+    table.setFixedHeight(max(header_height + default_row_height + 10, height))
+
+
 def clear_layout(layout):
     while layout.count():
         item = layout.takeAt(0)
@@ -616,6 +719,29 @@ def make_panel(title):
     layout = QVBoxLayout(panel)
     layout.setContentsMargins(16, 20, 16, 16)
     layout.setSpacing(10)
+    return panel, layout
+
+
+def make_dashboard_panel(title):
+    panel = QFrame()
+    panel.setObjectName("DashboardSection")
+    panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+    panel.setStyleSheet(
+        """
+        QFrame#DashboardSection {
+            background: #ffffff;
+            border: 1px solid #dde3ea;
+            border-radius: 8px;
+        }
+        """
+    )
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(16, 14, 16, 16)
+    layout.setSpacing(12)
+    if title:
+        heading = QLabel(title)
+        heading.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
+        layout.addWidget(heading)
     return panel, layout
 
 
@@ -708,9 +834,9 @@ class DashboardMetricItem(QWidget):
     def __init__(self, title, value="-", subtitle="", accent="#1f8a70"):
         super().__init__()
         self.setObjectName("DashboardMetricItem")
-        self.setMinimumHeight(88)
+        self.setMinimumHeight(76)
         self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.setStyleSheet(
             f"""
             QWidget#DashboardMetricItem {{
@@ -723,8 +849,8 @@ class DashboardMetricItem(QWidget):
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(3)
 
         self.title_label = QLabel(title)
         self.title_label.setWordWrap(True)
@@ -750,25 +876,31 @@ class DashboardMetricItem(QWidget):
 
 
 class DashboardMetricStrip(QWidget):
-    def __init__(self, title, columns=3):
+    def __init__(self, title, columns=3, embedded=False):
         super().__init__()
         self.items = []
         self.columns = max(1, columns)
-        self.setObjectName("DashboardSection")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self.setStyleSheet(
-            """
-            QWidget#DashboardSection {
-                background: #ffffff;
-                border: 1px solid #dde3ea;
-                border-radius: 8px;
-            }
-            """
-        )
+        self.setObjectName("DashboardMetricStripEmbedded" if embedded else "DashboardSection")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        if embedded:
+            self.setStyleSheet("QWidget#DashboardMetricStripEmbedded { background: transparent; border: 0; }")
+        else:
+            self.setStyleSheet(
+                """
+                QWidget#DashboardSection {
+                    background: #ffffff;
+                    border: 1px solid #dde3ea;
+                    border-radius: 8px;
+                }
+                """
+            )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 16)
-        layout.setSpacing(14)
+        if embedded:
+            layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(10 if embedded else 14)
 
         heading = QLabel(title)
         heading.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
@@ -873,7 +1005,7 @@ class GoalStatusCard(QWidget):
 class GoalHeaderWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -883,8 +1015,8 @@ class GoalHeaderWidget(QWidget):
         top.setSpacing(12)
         root.addLayout(top)
 
-        title = QLabel("Mål")
-        title.setStyleSheet("color: #111827; font-size: 21pt; font-weight: 900;")
+        title = QLabel("Rådighedsmål")
+        title.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
         top.addWidget(title)
 
         self.status_pill = QLabel()
@@ -936,8 +1068,8 @@ class GoalHeaderWidget(QWidget):
         self.value_label.setText(value)
         self.detail_label.setText(detail)
         if previous_period:
-            self.previous_label.setText(f"Netto: {format_money(previous_period['netto'])}")
-            self.previous_detail_label.setText(f"Til rådighed: {format_money(previous_period['available'])}")
+            self.previous_label.setText(f"Rådighed: {format_money(previous_period['available'])}")
+            self.previous_detail_label.setText("")
         else:
             self.previous_label.setText("Ingen afsluttet periode")
             self.previous_detail_label.setText("Når en periode er afsluttet, vises netto og rådighed her.")
@@ -1084,13 +1216,6 @@ class PeriodProgressWidget(QWidget):
         painter.setBrush(QColor("#1f8a70"))
         painter.drawRoundedRect(QRectF(track_left, track_y, track_width * self.progress_ratio, track_height), 9, 9)
 
-        painter.setPen(QPen(QColor("#ffffff"), 1))
-        for day in range(total_days):
-            ratio = day / max(1, total_days - 1)
-            x = track_left + (track_width * ratio)
-            tick_height = 8 if day % 7 else 14
-            painter.drawLine(int(x), int(track_y + 2), int(x), int(track_y + tick_height))
-
         if self.today:
             today_index = min(max((self.today - self.period_start).days, 0), total_days - 1)
             today_x = track_left + (track_width * (today_index / max(1, total_days - 1)))
@@ -1102,8 +1227,7 @@ class PeriodProgressWidget(QWidget):
 
         self.marker_rects = self._marker_data(rect)
         for index, row, marker, x in self.marker_rects:
-            hovered = index == self.hovered_index
-            color = QColor("#1d4ed8" if hovered else "#dbeafe")
+            color = QColor("#ffffff")
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             painter.drawRoundedRect(marker, 2, 2)
@@ -1116,7 +1240,7 @@ class PeriodProgressWidget(QWidget):
             Qt.AlignLeft | Qt.AlignVCenter,
             f"{format_date(self.period_start)} - {format_date(self.period_end)}",
         )
-        best_text = f"Højeste vagt: {format_money(best_shift['brutto'])}" if best_shift else "Ingen vagter registreret endnu"
+        best_text = f"Bedste vagt: {format_money(best_shift['brutto'])}" if best_shift else "Ingen vagter registreret endnu"
         painter.drawText(
             QRectF(rect.center().x(), footer_y, rect.width() / 2 - 18, 18),
             Qt.AlignRight | Qt.AlignVCenter,
@@ -1245,7 +1369,8 @@ class BasePage(QWidget):
         subtitle_label.setWordWrap(True)
 
         self.root.addWidget(title_label)
-        self.root.addWidget(subtitle_label)
+        if subtitle:
+            self.root.addWidget(subtitle_label)
 
     @property
     def data(self):
@@ -1263,14 +1388,15 @@ class DashboardPage(BasePage):
     def __init__(self, window):
         super().__init__(
             window,
-            "Overblik",
-            "Nuværende lønperiode, registreret løn, budget og de seneste vagter.",
+            "Overblik - Nuværende lønperiode",
+            "",
         )
+        self.root.setAlignment(Qt.AlignTop)
 
         self.goal_card = GoalHeaderWidget()
         self.root.addWidget(self.goal_card)
 
-        progress_panel, progress_layout = make_panel("Periodens forløb")
+        progress_panel, progress_layout = make_dashboard_panel("Periodens forløb")
         progress_layout.setSpacing(12)
         self.period_progress = PeriodProgressWidget()
         self.progress_detail = QLabel()
@@ -1280,8 +1406,12 @@ class DashboardPage(BasePage):
         progress_layout.addWidget(self.progress_detail)
         self.root.addWidget(progress_panel)
 
-        self.summary_strip = DashboardMetricStrip("Nuværende periode", columns=3)
-        self.root.addWidget(self.summary_strip)
+        metrics_panel, metrics_layout = make_dashboard_panel("")
+        metrics_layout.setSpacing(14)
+        self.root.addWidget(metrics_panel)
+
+        self.summary_strip = DashboardMetricStrip("Process", columns=3, embedded=True)
+        metrics_layout.addWidget(self.summary_strip)
 
         self.net_card = DashboardMetricItem("Netto løn", accent="#1f8a70")
         self.total_card = DashboardMetricItem("Total indkomst", accent="#2563eb")
@@ -1301,9 +1431,9 @@ class DashboardPage(BasePage):
         for card in self.summary_cards:
             self.summary_strip.add_item(card)
 
-        self.root.addWidget(make_dashboard_separator())
-        self.estimate_strip = DashboardMetricStrip("Estimater", columns=3)
-        self.root.addWidget(self.estimate_strip)
+        metrics_layout.addWidget(make_dashboard_separator())
+        self.estimate_strip = DashboardMetricStrip("Estimater", columns=3, embedded=True)
+        metrics_layout.addWidget(self.estimate_strip)
         self.estimate_net_card = DashboardMetricItem("Netto løn", accent="#1f8a70")
         self.estimate_total_card = DashboardMetricItem("Total indkomst", accent="#2563eb")
         self.estimate_available_card = DashboardMetricItem("Til rådighed", accent="#d97706")
@@ -1317,33 +1447,31 @@ class DashboardPage(BasePage):
         for card in self.estimate_cards:
             self.estimate_strip.add_item(card)
 
-        self.root.addWidget(make_dashboard_separator())
-        self.stats_strip = DashboardMetricStrip("Stats", columns=3)
-        self.root.addWidget(self.stats_strip)
+        metrics_layout.addWidget(make_dashboard_separator())
+        self.stats_strip = DashboardMetricStrip("Stats", columns=3, embedded=True)
+        metrics_layout.addWidget(self.stats_strip)
         self.stat_average_card = DashboardMetricItem("Snit pr. vagt", accent="#475569")
-        self.stat_best_card = DashboardMetricItem("Bedste vagt", accent="#2563eb")
-        self.stat_rate_card = DashboardMetricItem("Snit pr. time", accent="#1f8a70")
-        self.stats_cards = [self.stat_average_card, self.stat_best_card, self.stat_rate_card]
+        self.stat_week_card = DashboardMetricItem("Snit pr. uge", accent="#2563eb")
+        self.stat_total_net_card = DashboardMetricItem("Løn i alt", accent="#1f8a70")
+        self.stats_cards = [self.stat_average_card, self.stat_week_card, self.stat_total_net_card]
         for card in self.stats_cards:
             self.stats_strip.add_item(card)
 
         lower = QHBoxLayout()
         lower.setSpacing(14)
-        self.root.addLayout(lower, 1)
+        self.root.addLayout(lower)
 
-        breakdown_panel, breakdown_layout = make_panel("Lønberegning")
+        breakdown_panel, breakdown_layout = make_dashboard_panel("Lønberegning")
         self.breakdown_table = QTableWidget()
         setup_table(self.breakdown_table, ["Post", "Beløb"])
-        self.breakdown_table.setMinimumHeight(190)
         breakdown_layout.addWidget(self.breakdown_table)
-        lower.addWidget(breakdown_panel, 1)
+        lower.addWidget(breakdown_panel, 1, Qt.AlignTop)
 
-        recent_panel, recent_layout = make_panel("Vagter i perioden")
+        recent_panel, recent_layout = make_dashboard_panel("Vagter i perioden")
         self.recent_table = QTableWidget()
         setup_table(self.recent_table, ["Dato", "Timer", "Timeløn", "Brutto"])
-        self.recent_table.setMinimumHeight(190)
         recent_layout.addWidget(self.recent_table)
-        lower.addWidget(recent_panel, 1)
+        lower.addWidget(recent_panel, 1, Qt.AlignTop)
 
     def refresh(self):
         if not has_required_settings(self.settings):
@@ -1452,8 +1580,8 @@ class DashboardPage(BasePage):
             self.estimate_available_card,
             self.estimate_hours_card,
             self.stat_average_card,
-            self.stat_best_card,
-            self.stat_rate_card,
+            self.stat_week_card,
+            self.stat_total_net_card,
         ]:
             card.set_values("N/A", "Indstillinger mangler")
         self.period_progress.clear()
@@ -1461,6 +1589,8 @@ class DashboardPage(BasePage):
         self.goal_card.set_status("neutral", "Ikke beregnet", "Udfyld indstillingerne før målet kan vurderes.", None)
         self.breakdown_table.setRowCount(0)
         self.recent_table.setRowCount(0)
+        fit_table_height(self.breakdown_table, 0, max_rows=8, min_rows=1)
+        fit_table_height(self.recent_table, 0, max_rows=20, min_rows=1)
 
     def _last_complete_period_info(self, other_income, budget_expenses):
         _, complete_periods = build_periods(self.data, self.settings)
@@ -1475,18 +1605,22 @@ class DashboardPage(BasePage):
 
     def _update_stats(self, summary):
         rows = summary["rows"]
+        periods, _ = build_periods(self.data, self.settings)
+        total_netto_all = sum(period["netto"] for period in periods) if periods else 0
         if not rows:
-            for card in self.stats_cards:
-                card.set_values("N/A", "Ingen vagter i perioden")
+            self.stat_average_card.set_values("N/A", "Ingen vagter i perioden")
+            self.stat_week_card.set_values("N/A", "Ingen vagter i perioden")
+            self.stat_total_net_card.set_values(format_money(total_netto_all), "Netto fra alle vagter")
             return
 
-        avg_brutto = average_or_none(row["brutto"] for row in rows)
+        avg_netto = summary["netto"] / len(rows)
         avg_hours = average_or_none(row["timer"] for row in rows)
-        best_shift = max(rows, key=lambda row: row["brutto"])
-        hourly_average = summary["brutto"] / summary["timer"] if summary["timer"] else None
-        self.stat_average_card.set_values(format_money(avg_brutto), f"{format_number(avg_hours)} t. i snit")
-        self.stat_best_card.set_values(format_money(best_shift["brutto"]), format_date(best_shift["dato"]))
-        self.stat_rate_card.set_values(format_money(hourly_average), "Brutto pr. time")
+        total_weeks = max(1 / 7, ((summary["periode_slut"] - summary["periode_start"]).days + 1) / 7)
+        weekly_netto = summary["netto"] / total_weeks
+        weekly_hours = summary["timer"] / total_weeks
+        self.stat_average_card.set_values(format_money(avg_netto), f"{format_number(avg_hours)} timer i snit")
+        self.stat_week_card.set_values(format_money(weekly_netto), f"{format_number(weekly_hours)} timer i snit")
+        self.stat_total_net_card.set_values(format_money(total_netto_all), "Netto fra alle vagter")
 
     def _update_goal_status(self, available_now, estimated_available, disposable_goal, previous_period):
         if disposable_goal <= 0:
@@ -1500,24 +1634,22 @@ class DashboardPage(BasePage):
             self.goal_card.set_status(
                 "success",
                 f"{format_money(available_now)} / {format_money(disposable_goal)}",
-                f"Målet er nået. Difference: {signed_money(available_now - disposable_goal)}.",
+                "Målet er nået for den nuværende lønperiode.",
                 previous_period,
             )
         elif estimated_available is not None and estimated_available >= disposable_goal:
             self.goal_card.set_status(
                 "warning",
-                f"{format_money(estimated_available)} est.",
+                f"{format_money(estimated_available)} est. / {format_money(disposable_goal)}",
                 f"Estimatet når målet. Nu: {format_money(available_now)} af {format_money(disposable_goal)}.",
                 previous_period,
             )
         else:
             estimated_text = format_money(estimated_available) if estimated_available is not None else "N/A"
-            difference = estimated_available - disposable_goal if estimated_available is not None else None
-            difference_text = signed_money(difference) if difference is not None else "N/A"
             self.goal_card.set_status(
                 "danger",
-                f"{estimated_text} est.",
-                f"Estimatet er under målet på {format_money(disposable_goal)}. Difference: {difference_text}.",
+                f"{estimated_text} est. / {format_money(disposable_goal)}",
+                f"Estimatet er under målet på {format_money(disposable_goal)}.",
                 previous_period,
             )
 
@@ -1535,6 +1667,7 @@ class DashboardPage(BasePage):
         for row_index, (label, value) in enumerate(rows):
             self.breakdown_table.setItem(row_index, 0, table_item(label))
             self.breakdown_table.setItem(row_index, 1, table_item(value, Qt.AlignRight | Qt.AlignVCenter))
+        fit_table_height(self.breakdown_table, len(rows), max_rows=8, min_rows=len(rows))
 
     def _fill_recent(self, rows):
         self.recent_table.setRowCount(len(rows))
@@ -1543,6 +1676,7 @@ class DashboardPage(BasePage):
             self.recent_table.setItem(row_index, 1, table_item(format_number(row["timer"]), Qt.AlignRight | Qt.AlignVCenter))
             self.recent_table.setItem(row_index, 2, table_item(format_money(row["timeløn"]), Qt.AlignRight | Qt.AlignVCenter))
             self.recent_table.setItem(row_index, 3, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+        fit_table_height(self.recent_table, len(rows), max_rows=20, min_rows=min(3, max(1, len(rows))))
 
 
 class EntryPage(BasePage):
@@ -1571,7 +1705,7 @@ class EntryPage(BasePage):
         self.date_edit.textChanged.connect(self._update_summary)
         form.addRow("Dato", self.date_edit)
 
-        self.mode_combo = QComboBox()
+        self.mode_combo = ModernComboBox()
         self.mode_combo.addItems(["Start/slut", "Antal timer"])
         self.mode_combo.setCurrentIndex(0)
         self.mode_combo.currentIndexChanged.connect(self._update_mode)
