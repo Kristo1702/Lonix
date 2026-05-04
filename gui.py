@@ -3,7 +3,7 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 
-from PyQt5.QtCore import QPointF, QSize, Qt, QTimer
+from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, QTimer
 from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -23,7 +23,6 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QProgressBar,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
@@ -43,6 +42,13 @@ LOGO_PATH = os.path.join(os.environ.get("LOCALAPPDATA", ""), "lønix", "logo.png
 
 APP_NAME = "Lønix"
 REQUIRED_KEYS = ["skat", "fradrag", "am bidrag", "anden indkomst netto", "løn start", "løn slut"]
+
+BASE_WINDOW_SIZE = QSize(1220, 780)
+BASE_MINIMUM_WINDOW_SIZE = QSize(980, 650)
+WINDOW_SCREEN_FILL_RATIO = 0.92
+BASE_SIDEBAR_WIDTH = 224
+MAX_SIDEBAR_WIDTH = 320
+SIDEBAR_WINDOW_RATIO = 0.18
 
 MONTH_NAMES = {
     1: "Januar",
@@ -71,14 +77,37 @@ QMainWindow, QWidget#Content {
 QWidget#Sidebar {
     background: #1f2933;
 }
+QFrame#BrandPanel {
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+}
 QLabel#Brand {
     color: #ffffff;
-    font-size: 23pt;
-    font-weight: 800;
+    font-family: "Segoe UI Semibold", "Segoe UI", Arial, sans-serif;
+    font-size: 22pt;
+    font-weight: 850;
 }
 QLabel#BrandSub {
     color: #aeb7c1;
     font-size: 9pt;
+}
+QPushButton#PrimaryNavButton {
+    background: transparent;
+    color: #f8fafc;
+    border: 0;
+    border-left: 3px solid #2dd4bf;
+    border-radius: 0;
+    padding: 11px 14px 11px 11px;
+    text-align: left;
+    font-weight: 750;
+}
+QPushButton#PrimaryNavButton:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+QPushButton#PrimaryNavButton:checked {
+    background: rgba(255, 255, 255, 0.07);
+    color: #ffffff;
 }
 QPushButton#NavButton {
     background: transparent;
@@ -204,18 +233,6 @@ QScrollArea > QWidget > QWidget {
 }
 QWidget#PageBody {
     background: transparent;
-}
-QProgressBar {
-    background: #e7ecef;
-    border: 0;
-    border-radius: 7px;
-    height: 13px;
-    text-align: center;
-    color: #1f2933;
-}
-QProgressBar::chunk {
-    background: #1f8a70;
-    border-radius: 7px;
 }
 QTabWidget::pane {
     border: 0;
@@ -610,6 +627,36 @@ def make_message(text):
     return label
 
 
+def bounded_window_sizes():
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return BASE_WINDOW_SIZE, BASE_MINIMUM_WINDOW_SIZE
+
+    available = screen.availableGeometry().size()
+    max_width = max(720, int(available.width() * WINDOW_SCREEN_FILL_RATIO))
+    max_height = max(520, int(available.height() * WINDOW_SCREEN_FILL_RATIO))
+
+    minimum_width = min(BASE_MINIMUM_WINDOW_SIZE.width(), max_width)
+    minimum_height = min(BASE_MINIMUM_WINDOW_SIZE.height(), max_height)
+    target_width = min(BASE_WINDOW_SIZE.width(), max_width)
+    target_height = min(BASE_WINDOW_SIZE.height(), max_height)
+
+    return (
+        QSize(max(target_width, minimum_width), max(target_height, minimum_height)),
+        QSize(minimum_width, minimum_height),
+    )
+
+
+def center_on_primary_screen(window):
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return
+
+    frame = window.frameGeometry()
+    frame.moveCenter(screen.availableGeometry().center())
+    window.move(frame.topLeft())
+
+
 class MetricCard(QFrame):
     def __init__(self, title, value="-", subtitle="", accent="#1f8a70"):
         super().__init__()
@@ -655,6 +702,426 @@ class MetricCard(QFrame):
     def set_values(self, value, subtitle=""):
         self.value_label.setText(value)
         self.subtitle_label.setText(subtitle)
+
+
+class DashboardMetricItem(QWidget):
+    def __init__(self, title, value="-", subtitle="", accent="#1f8a70"):
+        super().__init__()
+        self.setObjectName("DashboardMetricItem")
+        self.setMinimumHeight(88)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setStyleSheet(
+            f"""
+            QWidget#DashboardMetricItem {{
+                background: #f8fafc;
+                border: 1px solid #e3e8ef;
+                border-radius: 8px;
+                border-left: 3px solid {accent};
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+
+        self.title_label = QLabel(title)
+        self.title_label.setWordWrap(True)
+        self.title_label.setStyleSheet("color: #5d6a78; font-size: 8.5pt; font-weight: 800;")
+        self.value_label = QLabel(value)
+        self.value_label.setWordWrap(True)
+        self.value_label.setStyleSheet("color: #111827; font-size: 15pt; font-weight: 850;")
+        self.subtitle_label = QLabel(subtitle)
+        self.subtitle_label.setWordWrap(True)
+        self.subtitle_label.setStyleSheet("color: #6b7280; font-size: 8.5pt; line-height: 125%;")
+
+        for label in [self.title_label, self.value_label, self.subtitle_label]:
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.value_label)
+        layout.addWidget(self.subtitle_label)
+
+    def set_values(self, value, subtitle=""):
+        self.value_label.setText(value)
+        self.subtitle_label.setText(subtitle)
+
+
+class DashboardMetricStrip(QWidget):
+    def __init__(self, title, columns=3):
+        super().__init__()
+        self.items = []
+        self.columns = max(1, columns)
+        self.setObjectName("DashboardSection")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setStyleSheet(
+            """
+            QWidget#DashboardSection {
+                background: #ffffff;
+                border: 1px solid #dde3ea;
+                border-radius: 8px;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(14)
+
+        heading = QLabel(title)
+        heading.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
+        layout.addWidget(heading)
+
+        self.grid = QGridLayout()
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(12)
+        self.grid.setVerticalSpacing(12)
+        layout.addLayout(self.grid)
+
+    def add_item(self, item):
+        self.items.append(item)
+        self.set_visible_items(self.items)
+
+    def set_visible_items(self, items):
+        for item in self.items:
+            self.grid.removeWidget(item)
+            item.setVisible(False)
+
+        for index, item in enumerate(items):
+            row = index // self.columns
+            column = index % self.columns
+            self.grid.addWidget(item, row, column)
+            item.setVisible(True)
+            self.grid.setColumnStretch(column, 1)
+
+
+def make_dashboard_separator():
+    separator = QFrame()
+    separator.setFixedHeight(1)
+    separator.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    separator.setStyleSheet("background: #d8e0e7; border: 0;")
+    return separator
+
+
+class GoalStatusCard(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(14)
+
+        self.status_pill = QLabel()
+        self.status_pill.setAlignment(Qt.AlignCenter)
+        self.status_pill.setMinimumWidth(86)
+        layout.addWidget(self.status_pill, 0, Qt.AlignVCenter)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+        self.title_label = QLabel("Rådighedsmål")
+        self.title_label.setStyleSheet("color: #475569; font-size: 8.5pt; font-weight: 850;")
+        self.value_label = QLabel("Ikke beregnet")
+        self.value_label.setStyleSheet("color: #111827; font-size: 17pt; font-weight: 850;")
+        self.detail_label = QLabel()
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet("color: #475569;")
+        text_layout.addWidget(self.title_label)
+        text_layout.addWidget(self.value_label)
+        text_layout.addWidget(self.detail_label)
+        layout.addLayout(text_layout, 1)
+
+        self.set_status("neutral", "Ikke beregnet", "Rådighedsmål ikke beregnet")
+
+    def set_status(self, state, value, detail):
+        styles = {
+            "success": ("NÅET", "#16a34a", "#ecfdf5", "#86efac"),
+            "warning": ("PÅ VEJ", "#d97706", "#fffbeb", "#fbbf24"),
+            "danger": ("UNDER", "#dc2626", "#fef2f2", "#fca5a5"),
+            "neutral": ("IKKE SAT", "#64748b", "#f8fafc", "#cbd5e1"),
+        }
+        label, color, background, border = styles.get(state, styles["neutral"])
+        self.status_pill.setText(label)
+        self.value_label.setText(value)
+        self.detail_label.setText(detail)
+        self.setStyleSheet(
+            f"""
+            QFrame#GoalStatusCard {{
+                background: {background};
+                border: 1px solid {border};
+                border-left: 5px solid {color};
+                border-radius: 8px;
+            }}
+            """
+        )
+        self.status_pill.setStyleSheet(
+            f"""
+            QLabel {{
+                background: {color};
+                color: white;
+                border-radius: 14px;
+                padding: 7px 12px;
+                font-size: 8.5pt;
+                font-weight: 850;
+            }}
+            """
+        )
+
+
+class GoalHeaderWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
+
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        root.addLayout(top)
+
+        title = QLabel("Mål")
+        title.setStyleSheet("color: #111827; font-size: 21pt; font-weight: 900;")
+        top.addWidget(title)
+
+        self.status_pill = QLabel()
+        self.status_pill.setAlignment(Qt.AlignCenter)
+        self.status_pill.setMinimumWidth(76)
+        top.addWidget(self.status_pill, 0, Qt.AlignVCenter)
+        top.addStretch()
+
+        content = QHBoxLayout()
+        content.setSpacing(22)
+        root.addLayout(content)
+
+        current = QVBoxLayout()
+        current.setSpacing(2)
+        self.value_label = QLabel("Ikke beregnet")
+        self.value_label.setStyleSheet("color: #111827; font-size: 18pt; font-weight: 900;")
+        self.detail_label = QLabel()
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet("color: #475569;")
+        current.addWidget(self.value_label)
+        current.addWidget(self.detail_label)
+        content.addLayout(current, 2)
+
+        previous = QVBoxLayout()
+        previous.setSpacing(2)
+        previous_title = QLabel("Sidste lønperiode")
+        previous_title.setStyleSheet("color: #64707d; font-size: 8.5pt; font-weight: 850;")
+        self.previous_label = QLabel("Ingen afsluttet periode")
+        self.previous_label.setStyleSheet("color: #334155; font-size: 11pt; font-weight: 850;")
+        self.previous_detail_label = QLabel("Når en periode er afsluttet, vises netto og rådighed her.")
+        self.previous_detail_label.setWordWrap(True)
+        self.previous_detail_label.setStyleSheet("color: #64707d; font-size: 8.5pt;")
+        previous.addWidget(previous_title)
+        previous.addWidget(self.previous_label)
+        previous.addWidget(self.previous_detail_label)
+        content.addLayout(previous, 1)
+
+        self.set_status("neutral", "Ikke beregnet", "Målet kan ikke vurderes endnu.", None)
+
+    def set_status(self, state, value, detail, previous_period=None):
+        styles = {
+            "success": ("NÅET", "#16a34a"),
+            "warning": ("PÅ VEJ", "#d97706"),
+            "danger": ("UNDER", "#dc2626"),
+            "neutral": ("IKKE SAT", "#64748b"),
+        }
+        label, color = styles.get(state, styles["neutral"])
+        self.status_pill.setText(label)
+        self.value_label.setText(value)
+        self.detail_label.setText(detail)
+        if previous_period:
+            self.previous_label.setText(f"Netto: {format_money(previous_period['netto'])}")
+            self.previous_detail_label.setText(f"Til rådighed: {format_money(previous_period['available'])}")
+        else:
+            self.previous_label.setText("Ingen afsluttet periode")
+            self.previous_detail_label.setText("Når en periode er afsluttet, vises netto og rådighed her.")
+        self.status_pill.setStyleSheet(
+            f"""
+            QLabel {{
+                background: {color};
+                color: white;
+                border-radius: 13px;
+                padding: 6px 11px;
+                font-size: 8.5pt;
+                font-weight: 850;
+            }}
+            """
+        )
+
+
+class PeriodProgressWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.period_start = None
+        self.period_end = None
+        self.today = None
+        self.rows = []
+        self.progress_ratio = 0
+        self.hovered_index = None
+        self.marker_rects = []
+        self.setMinimumHeight(168)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+    def set_period(self, period_start, period_end, today, rows, progress_ratio):
+        self.period_start = period_start
+        self.period_end = period_end
+        self.today = today
+        self.rows = sorted(rows, key=lambda row: row["dato"])
+        self.progress_ratio = max(0, min(float(progress_ratio or 0), 1))
+        self.hovered_index = None
+        self.setToolTip("")
+        self.update()
+
+    def clear(self, message=""):
+        self.period_start = None
+        self.period_end = None
+        self.today = None
+        self.rows = []
+        self.progress_ratio = 0
+        self.hovered_index = None
+        self.marker_rects = []
+        self.setToolTip(message)
+        self.update()
+
+    def _marker_data(self, rect):
+        if not self.period_start or not self.period_end:
+            return []
+
+        total_days = max(1, (self.period_end - self.period_start).days + 1)
+        track_left = rect.left() + 18
+        track_right = rect.right() - 18
+        track_width = max(1, track_right - track_left)
+        track_y = rect.top() + 92
+        max_brutto = max([row["brutto"] for row in self.rows] or [1])
+        marker_width = max(2.5, min(5, int(track_width / max(total_days, 1) * 0.28)))
+
+        markers = []
+        for index, row in enumerate(self.rows):
+            day_index = min(max((row["dato"] - self.period_start).days, 0), total_days - 1)
+            ratio = day_index / max(1, total_days - 1)
+            x = track_left + (track_width * ratio)
+            marker = QRectF(x - marker_width / 2, track_y + 3, marker_width, 12)
+            markers.append((index, row, marker, x))
+        return markers
+
+    def mouseMoveEvent(self, event):
+        hovered = None
+        for index, row, marker, _ in self.marker_rects:
+            hit_rect = QRectF(marker)
+            hit_rect.adjust(-5, -8, 5, 12)
+            if hit_rect.contains(event.pos()):
+                hovered = index
+                self.setToolTip(
+                    f"{format_date(row['dato'])}\n"
+                    f"{format_number(row['timer'])} timer · {format_money(row['brutto'])} brutto\n"
+                    f"Timeløn: {format_money(row['timeløn'])}"
+                )
+                break
+        if hovered is None:
+            self.setToolTip("")
+        if hovered != self.hovered_index:
+            self.hovered_index = hovered
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.hovered_index = None
+        self.setToolTip("")
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(4, 4, -4, -4)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#f8fafc"))
+        painter.drawRoundedRect(rect, 8, 8)
+
+        if not self.period_start or not self.period_end:
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(rect, Qt.AlignCenter, "Udfyld indstillingerne for at se periodens forløb")
+            return
+
+        total_days = max(1, (self.period_end - self.period_start).days + 1)
+        elapsed_days = min(max((self.today - self.period_start).days + 1, 0), total_days) if self.today else 0
+        total_brutto = sum(row["brutto"] for row in self.rows)
+        best_shift = max(self.rows, key=lambda row: row["brutto"]) if self.rows else None
+
+        painter.setPen(QColor("#334155"))
+        painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        painter.drawText(
+            QRectF(rect.left() + 14, rect.top() + 10, rect.width() - 28, 22),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"{elapsed_days} / {total_days} dage",
+        )
+
+        painter.setPen(QColor("#64748b"))
+        painter.setFont(QFont("Segoe UI", 9))
+        painter.drawText(
+            QRectF(rect.left() + 14, rect.top() + 34, rect.width() - 28, 22),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"{len(self.rows)} vagter · {format_money(total_brutto)} brutto",
+        )
+
+        track_left = rect.left() + 18
+        track_right = rect.right() - 18
+        track_width = max(1, track_right - track_left)
+        track_y = rect.top() + 92
+        track_height = 18
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#e5eaf0"))
+        painter.drawRoundedRect(QRectF(track_left, track_y, track_width, track_height), 9, 9)
+        painter.setBrush(QColor("#1f8a70"))
+        painter.drawRoundedRect(QRectF(track_left, track_y, track_width * self.progress_ratio, track_height), 9, 9)
+
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        for day in range(total_days):
+            ratio = day / max(1, total_days - 1)
+            x = track_left + (track_width * ratio)
+            tick_height = 8 if day % 7 else 14
+            painter.drawLine(int(x), int(track_y + 2), int(x), int(track_y + tick_height))
+
+        if self.today:
+            today_index = min(max((self.today - self.period_start).days, 0), total_days - 1)
+            today_x = track_left + (track_width * (today_index / max(1, total_days - 1)))
+            painter.setPen(QPen(QColor("#0f172a"), 2))
+            painter.drawLine(int(today_x), int(track_y - 10), int(today_x), int(track_y + track_height + 18))
+            painter.setPen(QColor("#0f172a"))
+            painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+            painter.drawText(QRectF(today_x - 30, track_y + track_height + 18, 60, 18), Qt.AlignCenter, "I dag")
+
+        self.marker_rects = self._marker_data(rect)
+        for index, row, marker, x in self.marker_rects:
+            hovered = index == self.hovered_index
+            color = QColor("#1d4ed8" if hovered else "#dbeafe")
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(marker, 2, 2)
+
+        footer_y = rect.bottom() - 30
+        painter.setPen(QColor("#64748b"))
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.drawText(
+            QRectF(rect.left() + 14, footer_y, rect.width() / 2 - 20, 18),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"{format_date(self.period_start)} - {format_date(self.period_end)}",
+        )
+        best_text = f"Højeste vagt: {format_money(best_shift['brutto'])}" if best_shift else "Ingen vagter registreret endnu"
+        painter.drawText(
+            QRectF(rect.center().x(), footer_y, rect.width() / 2 - 18, 18),
+            Qt.AlignRight | Qt.AlignVCenter,
+            best_text,
+        )
 
 
 class LineChart(QWidget):
@@ -800,16 +1267,28 @@ class DashboardPage(BasePage):
             "Nuværende lønperiode, registreret løn, budget og de seneste vagter.",
         )
 
-        self.summary_grid = QGridLayout()
-        self.summary_grid.setSpacing(14)
-        self.root.addLayout(self.summary_grid)
+        self.goal_card = GoalHeaderWidget()
+        self.root.addWidget(self.goal_card)
 
-        self.net_card = MetricCard("Netto løn nu", accent="#1f8a70")
-        self.total_card = MetricCard("Total indkomst nu", accent="#2563eb")
-        self.available_card = MetricCard("Til rådighed nu", accent="#d97706")
-        self.hours_card = MetricCard("Timer", accent="#7c3aed")
-        self.gross_card = MetricCard("Brutto løn", accent="#0f766e")
-        self.period_card = MetricCard("Lønperiode", accent="#475569")
+        progress_panel, progress_layout = make_panel("Periodens forløb")
+        progress_layout.setSpacing(12)
+        self.period_progress = PeriodProgressWidget()
+        self.progress_detail = QLabel()
+        self.progress_detail.setObjectName("PageSubtitle")
+        self.progress_detail.setWordWrap(True)
+        progress_layout.addWidget(self.period_progress)
+        progress_layout.addWidget(self.progress_detail)
+        self.root.addWidget(progress_panel)
+
+        self.summary_strip = DashboardMetricStrip("Nuværende periode", columns=3)
+        self.root.addWidget(self.summary_strip)
+
+        self.net_card = DashboardMetricItem("Netto løn", accent="#1f8a70")
+        self.total_card = DashboardMetricItem("Total indkomst", accent="#2563eb")
+        self.available_card = DashboardMetricItem("Til rådighed", accent="#d97706")
+        self.hours_card = DashboardMetricItem("Timer", accent="#7c3aed")
+        self.gross_card = DashboardMetricItem("Brutto løn", accent="#0f766e")
+        self.period_card = DashboardMetricItem("Lønperiode", accent="#475569")
 
         self.summary_cards = [
             self.net_card,
@@ -819,45 +1298,34 @@ class DashboardPage(BasePage):
             self.gross_card,
             self.period_card,
         ]
-        for index, card in enumerate(self.summary_cards):
-            self.summary_grid.addWidget(card, index // 3, index % 3)
+        for card in self.summary_cards:
+            self.summary_strip.add_item(card)
 
-        progress_panel, progress_layout = make_panel("Periodens forløb")
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress_detail = QLabel()
-        self.progress_detail.setObjectName("PageSubtitle")
-        goal_row = QHBoxLayout()
-        goal_row.setSpacing(10)
-        self.goal_lamp = QLabel()
-        self.goal_lamp.setFixedSize(16, 16)
-        self.goal_lamp.setStyleSheet("background: #94a3b8; border-radius: 8px;")
-        self.goal_status = QLabel("Rådighedsmål ikke beregnet")
-        self.goal_status.setObjectName("PageSubtitle")
-        goal_row.addWidget(self.goal_lamp)
-        goal_row.addWidget(self.goal_status, 1)
-        progress_layout.addWidget(self.progress)
-        progress_layout.addWidget(self.progress_detail)
-        progress_layout.addLayout(goal_row)
-        self.root.addWidget(progress_panel)
-
-        estimate_panel, estimate_layout = make_panel("Estimater")
-        self.estimate_grid = QGridLayout()
-        self.estimate_grid.setSpacing(14)
-        estimate_layout.addLayout(self.estimate_grid)
-        self.estimate_net_card = MetricCard("Estimeret netto løn", accent="#1f8a70")
-        self.estimate_total_card = MetricCard("Estimeret total indkomst", accent="#2563eb")
-        self.estimate_available_card = MetricCard("Estimeret rådighedsbeløb", accent="#d97706")
-        self.estimate_hours_card = MetricCard("Estimerede timer", accent="#7c3aed")
+        self.root.addWidget(make_dashboard_separator())
+        self.estimate_strip = DashboardMetricStrip("Estimater", columns=3)
+        self.root.addWidget(self.estimate_strip)
+        self.estimate_net_card = DashboardMetricItem("Netto løn", accent="#1f8a70")
+        self.estimate_total_card = DashboardMetricItem("Total indkomst", accent="#2563eb")
+        self.estimate_available_card = DashboardMetricItem("Til rådighed", accent="#d97706")
+        self.estimate_hours_card = DashboardMetricItem("Timer", accent="#7c3aed")
         self.estimate_cards = [
             self.estimate_net_card,
             self.estimate_total_card,
             self.estimate_available_card,
             self.estimate_hours_card,
         ]
-        for index, card in enumerate(self.estimate_cards):
-            self.estimate_grid.addWidget(card, index // 2, index % 2)
-        self.root.addWidget(estimate_panel)
+        for card in self.estimate_cards:
+            self.estimate_strip.add_item(card)
+
+        self.root.addWidget(make_dashboard_separator())
+        self.stats_strip = DashboardMetricStrip("Stats", columns=3)
+        self.root.addWidget(self.stats_strip)
+        self.stat_average_card = DashboardMetricItem("Snit pr. vagt", accent="#475569")
+        self.stat_best_card = DashboardMetricItem("Bedste vagt", accent="#2563eb")
+        self.stat_rate_card = DashboardMetricItem("Snit pr. time", accent="#1f8a70")
+        self.stats_cards = [self.stat_average_card, self.stat_best_card, self.stat_rate_card]
+        for card in self.stats_cards:
+            self.stats_strip.add_item(card)
 
         lower = QHBoxLayout()
         lower.setSpacing(14)
@@ -886,6 +1354,7 @@ class DashboardPage(BasePage):
         forecast = ft.calculate_salary_forecast(self.data, self.settings)
         other_income = ft.get_other_income(self.settings)
         budget_expenses = ft.calculate_budget_expenses(self.settings)
+        previous_period = self._last_complete_period_info(other_income, budget_expenses)
 
         total_now = summary["netto"] + other_income
         available_now = ft.calculate_disposable_income(total_now, self.settings)
@@ -897,6 +1366,11 @@ class DashboardPage(BasePage):
         disposable_goal = ft.get_disposable_income_goal(self.settings)
         show_other_income = other_income > 0
         self._arrange_cards(show_other_income)
+        today = datetime.now().date()
+        total_days = max(1, (summary["periode_slut"] - summary["periode_start"]).days + 1)
+        elapsed_days = min(max((today - summary["periode_start"]).days + 1, 0), total_days)
+        remaining_days = max(total_days - elapsed_days, 0)
+        progress_ratio = elapsed_days / total_days if total_days else 0
 
         self.net_card.set_values(format_money(summary["netto"]), "Efter skat")
         if show_other_income:
@@ -916,58 +1390,53 @@ class DashboardPage(BasePage):
         self.estimate_hours_card.set_values(estimated_hours_text, f"Estimeret brutto: {format_money(estimated_brutto)}")
 
         if forecast:
-            percent = int(round(forecast.get("progress_ratio", 0) * 100))
-            self.progress.setValue(max(0, min(percent, 100)))
+            progress_ratio = forecast.get("progress_ratio", progress_ratio)
+            elapsed_days = forecast.get("elapsed_days", elapsed_days)
+            total_days = forecast.get("total_days", total_days)
+            remaining_days = forecast.get("remaining_days", remaining_days)
+        self.period_progress.set_period(
+            summary["periode_start"],
+            summary["periode_slut"],
+            today,
+            summary["rows"],
+            progress_ratio,
+        )
+        if summary["rows"]:
             self.progress_detail.setText(
-                f"{forecast['elapsed_days']} af {forecast['total_days']} dage er gået. "
-                f"{forecast['remaining_days']} dage tilbage."
+                f"{elapsed_days} af {total_days} dage er gået. {remaining_days} dage tilbage. "
+                f"Registreret brutto i perioden: {format_money(summary['brutto'])}."
             )
         else:
-            self.progress.setValue(0)
-            self.progress_detail.setText("Der er ikke nok data til en prognose endnu.")
+            self.progress_detail.setText(
+                f"{elapsed_days} af {total_days} dage er gået. {remaining_days} dage tilbage. "
+                "Ingen vagter registreret i perioden endnu."
+            )
 
-        self._update_goal_lamp(available_now, estimated_available, disposable_goal)
+        self._update_goal_status(available_now, estimated_available, disposable_goal, previous_period)
+        self._update_stats(summary)
         self._fill_breakdown(summary["breakdown"])
         self._fill_recent(summary["rows"])
 
     def _arrange_cards(self, show_other_income):
-        while self.summary_grid.count():
-            self.summary_grid.takeAt(0)
-        while self.estimate_grid.count():
-            self.estimate_grid.takeAt(0)
-
         summary_cards = [
-            (self.net_card, True),
-            (self.total_card, show_other_income),
-            (self.available_card, True),
-            (self.hours_card, True),
-            (self.gross_card, True),
-            (self.period_card, True),
+            self.net_card,
+            self.available_card,
+            self.hours_card,
+            self.gross_card,
+            self.period_card,
         ]
-        visible_summary_cards = []
-        for card, visible in summary_cards:
-            card.setVisible(visible)
-            if visible:
-                visible_summary_cards.append(card)
-        for index, card in enumerate(visible_summary_cards):
-            self.summary_grid.addWidget(card, index // 3, index % 3)
+        if show_other_income:
+            summary_cards.insert(1, self.total_card)
+        self.summary_strip.set_visible_items(summary_cards)
 
         estimate_cards = [
-            (self.estimate_net_card, True),
-            (self.estimate_total_card, show_other_income),
-            (self.estimate_available_card, True),
-            (self.estimate_hours_card, True),
+            self.estimate_net_card,
+            self.estimate_available_card,
+            self.estimate_hours_card,
         ]
-        visible_estimate_cards = []
-        for card, visible in estimate_cards:
-            card.setVisible(visible)
-            if visible:
-                visible_estimate_cards.append(card)
-        for index, card in enumerate(visible_estimate_cards):
-            self.estimate_grid.addWidget(card, index // 2, index % 2)
-
-        self.summary_grid.invalidate()
-        self.estimate_grid.invalidate()
+        if show_other_income:
+            estimate_cards.insert(1, self.estimate_total_card)
+        self.estimate_strip.set_visible_items(estimate_cards)
 
     def _show_missing_settings(self):
         self._arrange_cards(True)
@@ -982,30 +1451,75 @@ class DashboardPage(BasePage):
             self.estimate_total_card,
             self.estimate_available_card,
             self.estimate_hours_card,
+            self.stat_average_card,
+            self.stat_best_card,
+            self.stat_rate_card,
         ]:
             card.set_values("N/A", "Indstillinger mangler")
-        self.progress.setValue(0)
+        self.period_progress.clear()
         self.progress_detail.setText("Udfyld indstillingerne før beregninger kan vises.")
-        self.goal_lamp.setStyleSheet("background: #94a3b8; border-radius: 8px;")
-        self.goal_status.setText("Rådighedsmål ikke beregnet")
+        self.goal_card.set_status("neutral", "Ikke beregnet", "Udfyld indstillingerne før målet kan vurderes.", None)
         self.breakdown_table.setRowCount(0)
         self.recent_table.setRowCount(0)
 
-    def _update_goal_lamp(self, available_now, estimated_available, disposable_goal):
+    def _last_complete_period_info(self, other_income, budget_expenses):
+        _, complete_periods = build_periods(self.data, self.settings)
+        if not complete_periods:
+            return None
+        period = complete_periods[-1]
+        total_income = period["netto"] + other_income
+        return {
+            "netto": period["netto"],
+            "available": total_income - budget_expenses,
+        }
+
+    def _update_stats(self, summary):
+        rows = summary["rows"]
+        if not rows:
+            for card in self.stats_cards:
+                card.set_values("N/A", "Ingen vagter i perioden")
+            return
+
+        avg_brutto = average_or_none(row["brutto"] for row in rows)
+        avg_hours = average_or_none(row["timer"] for row in rows)
+        best_shift = max(rows, key=lambda row: row["brutto"])
+        hourly_average = summary["brutto"] / summary["timer"] if summary["timer"] else None
+        self.stat_average_card.set_values(format_money(avg_brutto), f"{format_number(avg_hours)} t. i snit")
+        self.stat_best_card.set_values(format_money(best_shift["brutto"]), format_date(best_shift["dato"]))
+        self.stat_rate_card.set_values(format_money(hourly_average), "Brutto pr. time")
+
+    def _update_goal_status(self, available_now, estimated_available, disposable_goal, previous_period):
         if disposable_goal <= 0:
-            color = "#94a3b8"
-            text = "Intet ønsket rådighedsbeløb er sat."
+            self.goal_card.set_status(
+                "neutral",
+                "Ikke sat",
+                "Angiv et ønsket rådighedsbeløb i Indstillinger for at følge målet.",
+                previous_period,
+            )
         elif available_now >= disposable_goal:
-            color = "#16a34a"
-            text = f"Målet er nået: {format_money(available_now)} af {format_money(disposable_goal)}"
+            self.goal_card.set_status(
+                "success",
+                f"{format_money(available_now)} / {format_money(disposable_goal)}",
+                f"Målet er nået. Difference: {signed_money(available_now - disposable_goal)}.",
+                previous_period,
+            )
         elif estimated_available is not None and estimated_available >= disposable_goal:
-            color = "#f59e0b"
-            text = f"Estimatet når målet: {format_money(estimated_available)} af {format_money(disposable_goal)}"
+            self.goal_card.set_status(
+                "warning",
+                f"{format_money(estimated_available)} est.",
+                f"Estimatet når målet. Nu: {format_money(available_now)} af {format_money(disposable_goal)}.",
+                previous_period,
+            )
         else:
-            color = "#dc2626"
-            text = f"Under målet: {format_money(estimated_available)} estimeret af {format_money(disposable_goal)}"
-        self.goal_lamp.setStyleSheet(f"background: {color}; border-radius: 8px;")
-        self.goal_status.setText(text)
+            estimated_text = format_money(estimated_available) if estimated_available is not None else "N/A"
+            difference = estimated_available - disposable_goal if estimated_available is not None else None
+            difference_text = signed_money(difference) if difference is not None else "N/A"
+            self.goal_card.set_status(
+                "danger",
+                f"{estimated_text} est.",
+                f"Estimatet er under målet på {format_money(disposable_goal)}. Difference: {difference_text}.",
+                previous_period,
+            )
 
     def _fill_breakdown(self, breakdown):
         rows = [
@@ -2669,8 +3183,9 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
-        self.resize(1220, 780)
-        self.setMinimumSize(980, 650)
+        window_size, minimum_size = bounded_window_sizes()
+        self.setMinimumSize(minimum_size)
+        self.resize(window_size)
 
         root = QWidget()
         root.setObjectName("Content")
@@ -2681,27 +3196,33 @@ class MainWindow(QMainWindow):
 
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(224)
+        sidebar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        sidebar.setMinimumWidth(BASE_SIDEBAR_WIDTH)
+        self.sidebar = sidebar
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(18, 24, 18, 18)
         sidebar_layout.setSpacing(8)
         layout.addWidget(sidebar)
 
-        brand_row = QHBoxLayout()
-        brand_row.setSpacing(10)
+        brand_panel = QFrame()
+        brand_panel.setObjectName("BrandPanel")
+        brand_panel_layout = QHBoxLayout(brand_panel)
+        brand_panel_layout.setContentsMargins(12, 11, 12, 11)
+        brand_panel_layout.setSpacing(10)
         brand_logo = make_logo_label(QSize(44, 44))
         if brand_logo is not None:
-            brand_row.addWidget(brand_logo, 0, Qt.AlignTop)
+            brand_panel_layout.addWidget(brand_logo, 0, Qt.AlignTop)
         brand_text = QVBoxLayout()
         brand_text.setSpacing(2)
-        brand = QLabel(APP_NAME)
-        brand.setObjectName("Brand")
-        brand_sub = QLabel("Løn, budget og overblik")
-        brand_sub.setObjectName("BrandSub")
-        brand_text.addWidget(brand)
-        brand_text.addWidget(brand_sub)
-        brand_row.addLayout(brand_text, 1)
-        sidebar_layout.addLayout(brand_row)
+        self.brand_label = QLabel(APP_NAME)
+        self.brand_label.setObjectName("Brand")
+        self.brand_sub_label = QLabel("Løn, budget og overblik")
+        self.brand_sub_label.setObjectName("BrandSub")
+        self.brand_sub_label.setWordWrap(True)
+        brand_text.addWidget(self.brand_label)
+        brand_text.addWidget(self.brand_sub_label)
+        brand_panel_layout.addLayout(brand_text, 1)
+        sidebar_layout.addWidget(brand_panel)
         sidebar_layout.addSpacing(18)
 
         self.stack = QStackedWidget()
@@ -2710,12 +3231,12 @@ class MainWindow(QMainWindow):
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
 
-        self._add_page(sidebar_layout, "Overblik", DashboardPage(self))
+        self._add_page(sidebar_layout, "Overblik", DashboardPage(self), primary=True)
         self._add_page(sidebar_layout, "Indberet", EntryPage(self))
+        self._add_page(sidebar_layout, "Historik", HistoryPage(self))
+        self._add_page(sidebar_layout, "Budget", BudgetPage(self))
         self._add_page(sidebar_layout, "Lønsedler", PaymentsPage(self))
         self._add_page(sidebar_layout, "Statistik", StatisticsPage(self))
-        self._add_page(sidebar_layout, "Budget", BudgetPage(self))
-        self._add_page(sidebar_layout, "Historik", HistoryPage(self))
         self._add_page(sidebar_layout, "Lønberegner", CalculatorPage(self))
 
         sidebar_layout.addStretch()
@@ -2728,13 +3249,51 @@ class MainWindow(QMainWindow):
 
         self.nav_buttons[0].setChecked(True)
         self.stack.setCurrentIndex(0)
+        self._update_sidebar_width()
+        center_on_primary_screen(self)
         self.refresh_all()
         QTimer.singleShot(250, self._maybe_start_tutorial)
 
-    def _add_page(self, sidebar_layout, label, page):
+    def _ui_px(self, value):
+        font_height = max(1, self.fontMetrics().height())
+        scale = max(0.9, min(1.35, font_height / 17))
+        return max(1, int(round(value * scale)))
+
+    def _sidebar_minimum_width(self):
+        metrics = self.fontMetrics()
+        nav_text_width = max(
+            [metrics.horizontalAdvance(button.text()) for button in self.nav_buttons] or [0]
+        )
+        brand_text_width = 0
+        if hasattr(self, "brand_label"):
+            brand_text_width = max(brand_text_width, metrics.horizontalAdvance(self.brand_label.text()))
+        if hasattr(self, "brand_sub_label"):
+            brand_text_width = max(brand_text_width, metrics.horizontalAdvance(self.brand_sub_label.text()))
+
+        nav_width = nav_text_width + self._ui_px(28)
+        brand_width = self._ui_px(44 + 10) + brand_text_width
+        sidebar_padding = self._ui_px(36)
+        return max(self._ui_px(BASE_SIDEBAR_WIDTH), nav_width + sidebar_padding, brand_width + sidebar_padding)
+
+    def _sidebar_target_width(self):
+        content_width = self.centralWidget().width() if self.centralWidget() is not None else self.width()
+        ratio_width = int(max(1, content_width) * SIDEBAR_WINDOW_RATIO)
+        minimum_width = self._sidebar_minimum_width()
+        maximum_width = self._ui_px(MAX_SIDEBAR_WIDTH)
+        return max(self._ui_px(BASE_SIDEBAR_WIDTH), min(max(minimum_width, ratio_width), maximum_width))
+
+    def _update_sidebar_width(self):
+        if not hasattr(self, "sidebar"):
+            return
+
+        width = self._sidebar_target_width()
+        if self.sidebar.width() != width:
+            self.sidebar.setFixedWidth(width)
+
+    def _add_page(self, sidebar_layout, label, page, primary=False):
         index = len(self.pages)
         button = QPushButton(label)
-        button.setObjectName("NavButton")
+        button.setObjectName("PrimaryNavButton" if primary else "NavButton")
         button.setCheckable(True)
         button.clicked.connect(lambda checked=False, page_index=index: self.go_to_page(page_index))
         self.button_group.addButton(button)
@@ -2763,6 +3322,7 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._update_sidebar_width()
         self._position_tutorial_overlay()
 
     def _position_tutorial_overlay(self):
@@ -2802,6 +3362,10 @@ class MainWindow(QMainWindow):
 
 
 def run():
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setWindowIcon(app_icon())
