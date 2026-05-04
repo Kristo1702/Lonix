@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -69,6 +70,8 @@ REQUIRED_KEYS = ["skat", "fradrag", "am bidrag", "anden indkomst netto", "løn s
 
 BASE_WINDOW_SIZE = QSize(1220, 780)
 BASE_MINIMUM_WINDOW_SIZE = QSize(980, 650)
+WINDOW_WIDTH_SETTINGS_KEY = "vindue bredde"
+WINDOW_HEIGHT_SETTINGS_KEY = "vindue højde"
 WINDOW_SCREEN_FILL_RATIO = 0.92
 BASE_SIDEBAR_WIDTH = 224
 MAX_SIDEBAR_WIDTH = 320
@@ -291,6 +294,28 @@ QHeaderView::section {
     padding: 8px;
     font-weight: 750;
 }
+QCheckBox#ShiftRowCheckBox {
+    background: transparent;
+    spacing: 0;
+}
+QCheckBox#ShiftRowCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #7b8794;
+    border-radius: 3px;
+    background: #ffffff;
+}
+QCheckBox#ShiftRowCheckBox::indicator:hover {
+    border: 1px solid #1f8a70;
+    background: #edf7f4;
+}
+QCheckBox#ShiftRowCheckBox::indicator:checked {
+    border: 1px solid #1f8a70;
+    background: #1f8a70;
+}
+QCheckBox#ShiftRowCheckBox::indicator:checked:hover {
+    background: #18735d;
+}
 QScrollArea {
     background: transparent;
     border: 0;
@@ -445,6 +470,13 @@ def parse_int_field(field, label, minimum=0, maximum=1_000_000):
     return value
 
 
+def parse_pause_hours(field):
+    if not field.text().strip():
+        return 0.0
+    minutes = parse_positive_number(field, "Pause", allow_zero=True)
+    return minutes / 60
+
+
 def parse_date_text(value):
     try:
         return datetime.strptime(value.strip(), "%d-%m-%Y").date()
@@ -473,6 +505,14 @@ def calculate_hours_from_times(start_text, end_text):
 
 def set_field_number(field, value, decimals=2):
     field.setText(format_number(float(value), decimals))
+
+
+def pause_minutes(value):
+    return max(0.0, float(value or 0) * 60)
+
+
+def format_pause_minutes(value):
+    return format_number(pause_minutes(value))
 
 
 def make_text_input(text="", placeholder=""):
@@ -528,6 +568,38 @@ class ModernComboBox(QComboBox):
         popup.move(self.mapToGlobal(self.rect().bottomLeft()) + QPointF(0, 4).toPoint())
 
 
+class VisibleCheckBox(QCheckBox):
+    def __init__(self):
+        super().__init__()
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(22, 22)
+        self.setMouseTracking(True)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        size = 16
+        left = (self.width() - size) / 2
+        top = (self.height() - size) / 2
+        box = QRectF(left, top, size, size)
+
+        checked = self.isChecked()
+        hovered = self.underMouse()
+        border = QColor("#1f8a70" if checked or hovered else "#7b8794")
+        fill = QColor("#1f8a70" if checked else ("#edf7f4" if hovered else "#ffffff"))
+
+        painter.setPen(QPen(border, 1.4))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(box, 3, 3)
+
+        if checked:
+            painter.setPen(QPen(QColor("#ffffff"), 2.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(QPointF(left + 4, top + 8), QPointF(left + 7, top + 11))
+            painter.drawLine(QPointF(left + 7, top + 11), QPointF(left + 12, top + 5))
+
+
 def set_form_row_visible(form, field, visible):
     label = form.labelForField(field)
     if hasattr(form, "setRowVisible"):
@@ -571,12 +643,16 @@ def entry_rows(data):
     for entry in data:
         dato_str, info = next(iter(entry.items()))
         dato = parse_date_key(dato_str)
-        timer = float(info.get("timer", 0))
+        duration = ft.get_shift_duration_hours(info)
+        pause = ft.get_shift_pause_hours(info)
+        timer = ft.get_shift_paid_hours(info)
         timeløn = float(info.get("timeløn", 0))
 
         row = {
             "dato": dato,
+            "varighed": duration,
             "timer": timer,
+            "pause": pause,
             "timeløn": timeløn,
             "brutto": timer * timeløn,
         }
@@ -598,10 +674,15 @@ def save_entry_rows(rows):
 
     payload = []
     for row in clean_rows:
+        pause = max(0.0, float(row.get("pause", 0) or 0))
+        duration = max(0.0, float(row.get("varighed", float(row["timer"]) + pause) or 0))
         entry_info = {
-            "timer": float(row["timer"]),
+            "timer": duration,
             "timeløn": float(row["timeløn"]),
         }
+
+        if pause > 0:
+            entry_info["pause"] = pause
 
         start = row.get("start")
         slut = row.get("slut")
@@ -619,17 +700,23 @@ def save_entry_rows(rows):
         json.dump(payload, file, ensure_ascii=False, indent=4)
 
 
-def upsert_entry(entry_date, hours, rate, original_date=None, start=None, slut=None):
+def upsert_entry(entry_date, hours, rate, original_date=None, start=None, slut=None, pause=0):
     rows = entry_rows(ft.load_data())
     target_key = original_date or entry_date
 
     rows = [row for row in rows if row["dato"] != target_key]
 
+    duration = float(hours)
+    pause = max(0.0, float(pause or 0))
+    paid_hours = max(0.0, duration - pause)
+
     new_row = {
         "dato": entry_date,
-        "timer": float(hours),
+        "varighed": duration,
+        "timer": paid_hours,
+        "pause": pause,
         "timeløn": float(rate),
-        "brutto": float(hours) * float(rate),
+        "brutto": paid_hours * float(rate),
     }
 
     if start and slut:
@@ -835,6 +922,31 @@ def bounded_window_sizes():
     return (
         QSize(max(target_width, minimum_width), max(target_height, minimum_height)),
         QSize(minimum_width, minimum_height),
+    )
+
+
+def saved_window_size(settings, fallback_size, minimum_size):
+    if not isinstance(settings, dict):
+        return fallback_size
+
+    try:
+        width = int(float(settings.get(WINDOW_WIDTH_SETTINGS_KEY, 0)))
+        height = int(float(settings.get(WINDOW_HEIGHT_SETTINGS_KEY, 0)))
+    except (TypeError, ValueError):
+        return fallback_size
+
+    if width <= 0 or height <= 0:
+        return fallback_size
+
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry().size()
+        width = min(width, available.width())
+        height = min(height, available.height())
+
+    return QSize(
+        max(width, minimum_size.width()),
+        max(height, minimum_size.height()),
     )
 
 
@@ -1217,7 +1329,8 @@ class PeriodProgressWidget(QWidget):
                 hovered = index
                 self.setToolTip(
                     f"{format_date(row['dato'])}\n"
-                    f"{format_number(row['timer'])} timer · {format_money(row['brutto'])} brutto\n"
+                    f"{format_number(row['timer'])} betalte timer · Pause: {format_pause_minutes(row.get('pause', 0))} min.\n"
+                    f"{format_money(row['brutto'])} brutto\n"
                     f"Timeløn: {format_money(row['timeløn'])}"
                 )
                 break
@@ -1534,7 +1647,7 @@ class DashboardPage(BasePage):
 
         recent_panel, recent_layout = make_dashboard_panel("Vagter i perioden")
         self.recent_table = QTableWidget()
-        setup_table(self.recent_table, ["Dato", "Timer", "Brutto"])
+        setup_table(self.recent_table, ["Dato", "Timer", "Pause", "Brutto"])
         recent_layout.addWidget(self.recent_table)
         lower.addWidget(recent_panel, 3, Qt.AlignTop)
 
@@ -1739,24 +1852,30 @@ class DashboardPage(BasePage):
         for row_index, row in enumerate(rows):
             self.recent_table.setItem(row_index, 0, table_item(format_date(row["dato"])))
             self.recent_table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
-            self.recent_table.setItem(row_index, 2, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.recent_table.setItem(row_index, 2, table_item(format_pause_minutes(row["pause"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.recent_table.setItem(row_index, 3, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
         fit_table_height(self.recent_table, len(rows), max_rows=20, min_rows=min(3, max(1, len(rows))))
 
 
-class EntryPage(BasePage):
-    def __init__(self, window):
-        super().__init__(
-            window,
-            "Indberet",
-            "Registrer en vagt med direkte timetal eller start- og sluttidspunkt.",
-        )
+class ShiftEntryDialog(QDialog):
+    def __init__(self, parent, window):
+        super().__init__(parent)
+        self.window = window
+        self.saved_date = None
 
-        content = QHBoxLayout()
-        content.setSpacing(16)
-        self.root.addLayout(content, 1)
+        self.setModal(True)
+        self.setWindowTitle("Tilføj vagt")
+        self.setWindowIcon(app_icon())
+        self.setMinimumSize(420, 460)
+        self.resize(460, 500)
 
-        form_panel, form_layout = make_panel("Ny indberetning")
-        content.addWidget(form_panel, 0)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(14)
+
+        form_panel, form_layout = make_panel("Ny vagt")
+        form_panel.setMinimumWidth(380)
+        root.addWidget(form_panel, 1)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignLeft)
@@ -1791,6 +1910,10 @@ class EntryPage(BasePage):
         self.rate_field.textChanged.connect(self._update_summary)
         form.addRow("Timeløn", self.rate_field)
 
+        self.pause_field = make_text_input("0", "fx 30")
+        self.pause_field.textChanged.connect(self._update_summary)
+        form.addRow("Pause (minutter)", self.pause_field)
+
         self.summary_label = QLabel()
         self.summary_label.setWordWrap(True)
         self.summary_label.setStyleSheet("color: #42505f; padding-top: 8px;")
@@ -1798,26 +1921,27 @@ class EntryPage(BasePage):
 
         button_row = QHBoxLayout()
         form_layout.addLayout(button_row)
-        self.save_button = QPushButton("Gem indberetning")
+        self.save_button = QPushButton("Gem vagt")
         self.save_button.clicked.connect(self._save_entry)
         button_row.addWidget(self.save_button)
         reset_button = QPushButton("Nulstil")
         reset_button.setObjectName("SecondaryButton")
         reset_button.clicked.connect(self._set_defaults)
         button_row.addWidget(reset_button)
-
-        history_panel, history_layout = make_panel("Alle registreringer")
-        content.addWidget(history_panel, 1)
-        self.history_table = QTableWidget()
-        setup_table(self.history_table, ["Dato", "Timer", "Brutto"])
-        history_layout.addWidget(self.history_table)
+        cancel_button = QPushButton("Annuller")
+        cancel_button.setObjectName("SecondaryButton")
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(cancel_button)
 
         self._set_defaults()
 
-    def refresh(self):
-        set_field_number(self.rate_field, last_rate(self.data, self.settings))
-        self._fill_history()
-        self._update_summary()
+    @property
+    def data(self):
+        return self.window.data
+
+    @property
+    def settings(self):
+        return self.window.settings
 
     def _set_defaults(self):
         entry_date = default_entry_date()
@@ -1826,6 +1950,7 @@ class EntryPage(BasePage):
         self.hours_field.setText("4")
         self.start_field.setText("14:00")
         self.end_field.setText("18:00")
+        self.pause_field.setText("0")
         set_field_number(self.rate_field, last_rate(self.window.data, self.window.settings))
         self._update_mode()
 
@@ -1836,30 +1961,39 @@ class EntryPage(BasePage):
         set_form_row_visible(self.entry_form, self.end_field, use_time)
         self._update_summary()
 
-    def _selected_hours(self):
+    def _selected_duration(self):
         if self.mode_combo.currentIndex() == 1:
             return parse_positive_number(self.hours_field, "Timer")
         return calculate_hours_from_times(self.start_field.text(), self.end_field.text())
 
+    def _selected_hours_and_pause(self):
+        duration = self._selected_duration()
+        pause = parse_pause_hours(self.pause_field)
+        paid_hours = duration - pause
+        if paid_hours <= 0:
+            raise ValueError("Pause må ikke være lige så lang som eller længere end vagten.")
+        return duration, paid_hours, pause
+
     def _update_summary(self):
         try:
-            hours = self._selected_hours()
+            duration, hours, pause = self._selected_hours_and_pause()
             rate = parse_positive_number(self.rate_field, "Timeløn")
         except ValueError:
-            self.summary_label.setText("Udfyld timer og timeløn for at se beregningen.")
+            self.summary_label.setText("Udfyld timer, pause og timeløn for at se beregningen.")
             return
 
         brutto = hours * rate
         netto = ft.calculate_salary_breakdown_from_brutto(brutto)["netto"] if has_required_settings(self.settings) else None
+        pause_text = f" | Pause: {format_pause_minutes(pause)} min." if pause > 0 else ""
         self.summary_label.setText(
-            f"Vagt: {format_number(hours)} timer á {format_money(rate)}\n"
+            f"Vagt: {format_number(hours)} betalte timer á {format_money(rate)}{pause_text}\n"
             f"Brutto: {format_money(brutto)}  |  Netto: {format_money(netto)}"
         )
 
     def _save_entry(self):
         try:
             selected_date = parse_date_text(self.date_edit.text())
-            hours = self._selected_hours()
+            duration, hours, pause = self._selected_hours_and_pause()
             rate = parse_positive_number(self.rate_field, "Timeløn")
 
             start_time = None
@@ -1870,44 +2004,36 @@ class EntryPage(BasePage):
                 end_time = self.end_field.text().strip()
 
         except ValueError as error:
-            QMessageBox.warning(self, "Ugyldig indberetning", str(error))
+            QMessageBox.warning(self, "Ugyldig vagt", str(error))
             return
 
         key = date_to_key(selected_date)
-        exists = any(key in entry for entry in self.data)
+        exists = any(key in entry for entry in ft.load_data())
         if exists:
             answer = QMessageBox.question(
                 self,
-                "Overskriv indberetning",
-                f"Der findes allerede en indberetning for {key}. Vil du overskrive den?",
+                "Overskriv vagt",
+                f"Der findes allerede en vagt for {key}. Vil du overskrive den?",
             )
             if answer != QMessageBox.Yes:
                 return
 
         upsert_entry(
             selected_date,
-            hours,
+            duration,
             rate,
             start=start_time,
             slut=end_time,
+            pause=pause,
         )
+        self.saved_date = selected_date
 
         QMessageBox.information(
             self,
-            "Indberetning gemt",
-            f"{key} blev gemt med {format_number(hours)} timer á {format_money(rate)}.",
+            "Vagt gemt",
+            f"{key} blev gemt med {format_number(hours)} betalte timer á {format_money(rate)}.",
         )
-        self.window.refresh_all()
-
-    def _fill_history(self):
-        rows = entry_rows(self.data)
-        self.history_table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            self.history_table.setItem(row_index, 0, table_item(format_date(row["dato"])))
-            self.history_table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
-            self.history_table.setItem(row_index, 2, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
-        self.history_table.resizeRowsToContents()
-
+        self.accept()
 
 class CalculatorPage(BasePage):
     def __init__(self, window):
@@ -2044,7 +2170,7 @@ class PaymentsPage(BasePage):
         table_panel, table_layout = make_panel("Afsluttede lønsedler")
         content.addWidget(table_panel, 2)
         self.payments_table = QTableWidget()
-        setup_table(self.payments_table, ["Periode", "Timer", "Brutto", "Netto", "Total"])
+        setup_table(self.payments_table, ["Periode", "Vagter", "Timer", "Pause", "Brutto", "Netto", "Total"])
         self.payments_table.itemSelectionChanged.connect(self._update_detail)
         table_layout.addWidget(self.payments_table)
 
@@ -2068,15 +2194,19 @@ class PaymentsPage(BasePage):
 
         for row_index, period in enumerate(self.payments):
             total = period["netto"] + other_income
+            shift_count = len(period.get("shifts", [])) or int(period.get("vagter", 0))
             self.payments_table.setItem(row_index, 0, table_item(f"{month_title(period)}\n{format_period(period)}"))
-            self.payments_table.setItem(row_index, 1, table_item(format_number(period["timer"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.payments_table.setItem(row_index, 2, table_item(format_money(period["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.payments_table.setItem(row_index, 3, table_item(format_money(period["netto"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.payments_table.setItem(row_index, 4, table_item(format_money(total), Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 1, table_item(str(shift_count), Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 2, table_item(format_number(period["timer"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 3, table_item(format_pause_minutes(period.get("pause", 0)), Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 4, table_item(format_money(period["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 5, table_item(format_money(period["netto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 6, table_item(format_money(total), Qt.AlignRight | Qt.AlignVCenter))
 
         if self.payments:
             self.payments_table.resizeRowsToContents()
             self.payments_table.selectRow(0)
+            self._update_detail()
         else:
             self.detail_title.setText("Ingen afsluttede udbetalinger")
             self.detail_table.setRowCount(0)
@@ -2089,14 +2219,20 @@ class PaymentsPage(BasePage):
         other_income = ft.get_other_income(self.settings)
         total = period["netto"] + other_income
         avg_rate = period["brutto"] / period["timer"] if period["timer"] else None
+        shift_count = len(period.get("shifts", [])) or int(period.get("vagter", 0))
         self.detail_title.setText(month_title(period))
         rows = [
             ("Periode", format_period(period)),
-            ("Vagter", str(period["vagter"])),
-            ("Timer", f"{format_number(period['timer'])} t."),
-            ("Timeløn", format_money(avg_rate)),
+            ("Vagter", str(shift_count)),
+            ("Timer før pause", f"{format_number(period.get('varighed', period['timer'] + period.get('pause', 0)))} t."),
+            ("Pause", f"{format_pause_minutes(period.get('pause', 0))} min."),
+            ("Betalte timer", f"{format_number(period['timer'])} t."),
+            ("Gns. timeløn", format_money(avg_rate)),
             ("Brutto løn", format_money(period["brutto"])),
             ("AM-bidrag", f"-{format_money(period['am_bidrag'])}"),
+            ("Efter AM-bidrag", format_money(period.get("efter_am"))),
+            ("Fradrag", format_money(period.get("fradrag"))),
+            ("Skattegrundlag", format_money(period.get("skattegrundlag"))),
             ("Skat", f"-{format_money(period['skat'])}"),
             ("Netto løn", format_money(period["netto"])),
             ("Anden indkomst (netto)", format_money(other_income)),
@@ -2164,7 +2300,7 @@ class StatisticsPage(BasePage):
     def refresh(self):
         clear_layout(self.body_layout)
         if not self.data:
-            self.body_layout.addWidget(make_message("Der er ingen løndata endnu. Opret en indberetning først."))
+            self.body_layout.addWidget(make_message("Der er ingen løndata endnu. Tilføj en vagt først."))
             self.body_layout.addStretch()
             self._refresh_charts()
             return
@@ -2277,6 +2413,7 @@ class StatisticsPage(BasePage):
             "Vagter",
             ["Måling", "Værdi"],
             [
+                ["Pause i alt", f"{format_pause_minutes(stats['totals'].get('pause', 0))} min."],
                 ["Nuværende lønperiode", stats["current_period_label"]],
                 ["Vagter i nuværende lønperiode", stats["shift_counts"]["current_period"]],
                 ["Vagter pr. lønperiode i snit", format_number(stats["shift_counts"]["per_period"])],
@@ -2288,17 +2425,19 @@ class StatisticsPage(BasePage):
             label,
             format_date(shift["dato"]),
             format_number(shift["timer"]),
+            format_pause_minutes(shift.get("pause", 0)),
             format_money(shift["brutto"]),
             format_money(shift["netto"]),
         ]
 
     def _period_row(self, label, period):
         if period is None:
-            return [label, "N/A", "N/A", "N/A", "N/A"]
+            return [label, "N/A", "N/A", "N/A", "N/A", "N/A"]
         return [
             label,
             f"{month_title(period)} ({format_date(period['periode_start'])} - {format_date(period['periode_slut'])})",
             format_number(period["timer"]),
+            format_pause_minutes(period.get("pause", 0)),
             format_money(period["brutto"]),
             format_money(period["netto"]),
         ]
@@ -2306,7 +2445,7 @@ class StatisticsPage(BasePage):
     def _add_records(self, stats):
         self._add_table(
             "Rekorder",
-            ["Kategori", "Dato", "Timer", "Før skat", "Efter skat"],
+            ["Kategori", "Dato", "Timer", "Pause", "Før skat", "Efter skat"],
             [
                 self._shift_row("Længste vagt", stats["records"]["longest"]),
                 self._shift_row("Korteste vagt", stats["records"]["shortest"]),
@@ -2317,7 +2456,7 @@ class StatisticsPage(BasePage):
     def _add_periods(self, stats):
         self._add_table(
             "Lønperioder",
-            ["Måling", "Periode", "Timer", "Før skat", "Efter skat"],
+            ["Måling", "Periode", "Timer", "Pause", "Før skat", "Efter skat"],
             [
                 self._period_row("Bedst på timer", stats["periods"]["best_timer"]),
                 self._period_row("Bedst på brutto", stats["periods"]["best_brutto"]),
@@ -2401,12 +2540,14 @@ class HistoryPage(BasePage):
     def __init__(self, window):
         super().__init__(
             window,
-            "Historik",
-            "Alle registrerede vagter sorteret med nyeste først. Vælg en række for at redigere eller slette.",
+            "Vagter",
+            "Alle registrerede vagter sorteret med nyeste først. Tilføj, rediger, marker eller slet vagter her.",
         )
         self.rows = []
         self.selected_original_date = None
         self.selected_has_time = False
+        self.pending_select_date = None
+        self.pending_select_row = None
 
         top = QHBoxLayout()
         top.setSpacing(14)
@@ -2424,8 +2565,24 @@ class HistoryPage(BasePage):
 
         panel, layout = make_panel("Vagter")
         content.addWidget(panel, 2)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
+        layout.addLayout(toolbar)
+        add_button = QPushButton("Tilføj vagt")
+        add_button.clicked.connect(self._add_shift)
+        toolbar.addWidget(add_button)
+        toolbar.addStretch()
+        self.delete_checked_button = QPushButton("Slet markerede")
+        self.delete_checked_button.setObjectName("SecondaryButton")
+        self.delete_checked_button.clicked.connect(self._delete_checked_rows)
+        self.delete_checked_button.hide()
+        toolbar.addWidget(self.delete_checked_button)
+
         self.table = QTableWidget()
-        setup_table(self.table, ["Dato", "Timer", "Brutto"])
+        setup_table(self.table, ["", "Dato", "Timer", "Pause", "Brutto"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.setColumnWidth(0, 44)
         self.table.itemSelectionChanged.connect(self._load_selected_row)
         layout.addWidget(self.table)
 
@@ -2441,18 +2598,21 @@ class HistoryPage(BasePage):
         self.edit_start_field = make_text_input(placeholder="HH:MM")
         self.edit_end_field = make_text_input(placeholder="HH:MM")
         self.edit_rate_field = make_text_input(placeholder="fx 150")
+        self.edit_pause_field = make_text_input(placeholder="minutter")
 
         self.edit_date_field.textChanged.connect(self._update_edit_preview)
         self.edit_hours_field.textChanged.connect(self._update_edit_preview)
         self.edit_start_field.textChanged.connect(self._update_edit_preview)
         self.edit_end_field.textChanged.connect(self._update_edit_preview)
         self.edit_rate_field.textChanged.connect(self._update_edit_preview)
+        self.edit_pause_field.textChanged.connect(self._update_edit_preview)
 
         form.addRow("Dato", self.edit_date_field)
         form.addRow("Timer", self.edit_hours_field)
         form.addRow("Start", self.edit_start_field)
         form.addRow("Slut", self.edit_end_field)
         form.addRow("Timeløn", self.edit_rate_field)
+        form.addRow("Pause", self.edit_pause_field)
 
         self.edit_preview = QLabel("Vælg en vagt i tabellen.")
         self.edit_preview.setObjectName("PageSubtitle")
@@ -2473,23 +2633,94 @@ class HistoryPage(BasePage):
         self._update_edit_mode(False)
 
     def refresh(self):
+        previous_selected_date = self.selected_original_date
         self.rows = entry_rows(self.data)
         self.total_card.set_values(str(len(self.rows)), "Gemte vagter")
         self.hours_card.set_values(f"{format_number(sum(row['timer'] for row in self.rows))} t.", "Alle registreringer")
         self.gross_card.set_values(format_money(sum(row["brutto"] for row in self.rows)), "Før skat")
+
+        self.table.blockSignals(True)
         self.table.setRowCount(len(self.rows))
 
         for row_index, row in enumerate(self.rows):
-            self.table.setItem(row_index, 0, table_item(format_date(row["dato"])))
-            self.table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
-            self.table.setItem(row_index, 2, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self._set_check_widget(row_index)
+            self.table.setItem(row_index, 1, table_item(format_date(row["dato"])))
+            self.table.setItem(row_index, 2, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
+            self.table.setItem(row_index, 3, table_item(format_pause_minutes(row["pause"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.table.setItem(row_index, 4, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
 
         self.table.resizeRowsToContents()
+        self.table.resizeColumnToContents(0)
+        self.table.blockSignals(False)
+        self._update_checked_rows()
+        self._select_after_refresh(previous_selected_date)
 
-        if self.rows:
-            self.table.selectRow(0)
-        else:
+    def _set_check_widget(self, row_index):
+        checkbox = VisibleCheckBox()
+        checkbox.stateChanged.connect(self._update_checked_rows)
+
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.addWidget(checkbox)
+        self.table.setCellWidget(row_index, 0, wrapper)
+
+    def _row_index_for_date(self, target_date):
+        if target_date is None:
+            return None
+        for row_index, row in enumerate(self.rows):
+            if row["dato"] == target_date:
+                return row_index
+        return None
+
+    def _select_after_refresh(self, previous_selected_date):
+        self.table.clearSelection()
+
+        if not self.rows:
+            self.pending_select_date = None
+            self.pending_select_row = None
             self._clear_edit_fields()
+            return
+
+        selected_index = self._row_index_for_date(self.pending_select_date)
+
+        if selected_index is None and self.pending_select_row is not None:
+            selected_index = min(self.pending_select_row, len(self.rows) - 1)
+
+        if selected_index is None:
+            selected_index = self._row_index_for_date(previous_selected_date)
+
+        if selected_index is None:
+            selected_index = 0
+
+        self.pending_select_date = None
+        self.pending_select_row = None
+        self.table.selectRow(selected_index)
+
+    def _checked_row_indexes(self):
+        checked_rows = []
+        for row_index in range(self.table.rowCount()):
+            wrapper = self.table.cellWidget(row_index, 0)
+            checkbox = wrapper.findChild(QCheckBox) if wrapper is not None else None
+            if checkbox is not None and checkbox.isChecked():
+                checked_rows.append(row_index)
+        return checked_rows
+
+    def _update_checked_rows(self, state=None):
+        count = len(self._checked_row_indexes())
+        self.delete_checked_button.setVisible(count > 0)
+        if count == 1:
+            self.delete_checked_button.setText("Slet 1 markeret")
+        else:
+            self.delete_checked_button.setText(f"Slet {count} markerede")
+
+    def _add_shift(self):
+        dialog = ShiftEntryDialog(self, self.window)
+        if dialog.exec_() == QDialog.Accepted and dialog.saved_date is not None:
+            self.pending_select_date = dialog.saved_date
+            self.window.refresh_all()
 
     def _update_edit_mode(self, has_time):
         self.selected_has_time = bool(has_time)
@@ -2512,13 +2743,14 @@ class HistoryPage(BasePage):
 
         self.edit_date_field.setText(format_date(row["dato"]))
         set_field_number(self.edit_rate_field, row["timeløn"])
+        set_field_number(self.edit_pause_field, pause_minutes(row.get("pause", 0)))
 
         if has_time:
             self.edit_start_field.setText(str(row.get("start", "")))
             self.edit_end_field.setText(str(row.get("slut", "")))
             self.edit_hours_field.clear()
         else:
-            set_field_number(self.edit_hours_field, row["timer"])
+            set_field_number(self.edit_hours_field, row.get("varighed", row["timer"] + row.get("pause", 0)))
             self.edit_start_field.clear()
             self.edit_end_field.clear()
 
@@ -2533,6 +2765,7 @@ class HistoryPage(BasePage):
         self.edit_start_field.clear()
         self.edit_end_field.clear()
         self.edit_rate_field.clear()
+        self.edit_pause_field.clear()
 
         self._update_edit_mode(False)
         self.edit_preview.setText("Vælg en vagt i tabellen.")
@@ -2545,11 +2778,19 @@ class HistoryPage(BasePage):
             if not start or not slut:
                 raise ValueError("Start og slut skal udfyldes.")
 
-            hours = calculate_hours_from_times(start, slut)
-            return hours, start, slut
+            duration = calculate_hours_from_times(start, slut)
+            pause = parse_pause_hours(self.edit_pause_field)
+            hours = duration - pause
+            if hours <= 0:
+                raise ValueError("Pause må ikke være lige så lang som eller længere end vagten.")
+            return duration, hours, start, slut, pause
 
-        hours = parse_positive_number(self.edit_hours_field, "Timer")
-        return hours, None, None
+        duration = parse_positive_number(self.edit_hours_field, "Timer")
+        pause = parse_pause_hours(self.edit_pause_field)
+        hours = duration - pause
+        if hours <= 0:
+            raise ValueError("Pause må ikke være lige så lang som eller længere end vagten.")
+        return duration, hours, None, None, pause
 
     def _update_edit_preview(self):
         if self.selected_original_date is None:
@@ -2557,36 +2798,37 @@ class HistoryPage(BasePage):
 
         try:
             selected_date = parse_date_text(self.edit_date_field.text())
-            hours, start, slut = self._edited_hours_and_times()
+            duration, hours, start, slut, pause = self._edited_hours_and_times()
             rate = parse_positive_number(self.edit_rate_field, "Timeløn")
         except ValueError:
             if self.selected_has_time:
-                self.edit_preview.setText("Udfyld gyldig dato, start, slut og timeløn.")
+                self.edit_preview.setText("Udfyld gyldig dato, start, slut, pause og timeløn.")
             else:
-                self.edit_preview.setText("Udfyld gyldig dato, timer og timeløn.")
+                self.edit_preview.setText("Udfyld gyldig dato, timer, pause og timeløn.")
             return
 
         brutto = hours * rate
+        pause_text = f" | Pause: {format_pause_minutes(pause)} min." if pause > 0 else ""
 
         if self.selected_has_time:
             self.edit_preview.setText(
-                f"{format_date(selected_date)}: {start} - {slut} ({format_number(hours)} timer) á {format_money(rate)}\n"
+                f"{format_date(selected_date)}: {start} - {slut} ({format_number(hours)} betalte timer) á {format_money(rate)}{pause_text}\n"
                 f"Brutto: {format_money(brutto)}"
             )
         else:
             self.edit_preview.setText(
-                f"{format_date(selected_date)}: {format_number(hours)} timer á {format_money(rate)}\n"
+                f"{format_date(selected_date)}: {format_number(hours)} betalte timer á {format_money(rate)}{pause_text}\n"
                 f"Brutto: {format_money(brutto)}"
             )
 
     def _save_selected_row(self):
         if self.selected_original_date is None:
-            QMessageBox.information(self, "Ingen vagt valgt", "Vælg først en vagt i historiktabellen.")
+            QMessageBox.information(self, "Ingen vagt valgt", "Vælg først en vagt i tabellen.")
             return
 
         try:
             selected_date = parse_date_text(self.edit_date_field.text())
-            hours, start, slut = self._edited_hours_and_times()
+            duration, hours, start, slut, pause = self._edited_hours_and_times()
             rate = parse_positive_number(self.edit_rate_field, "Timeløn")
         except ValueError as error:
             QMessageBox.warning(self, "Ugyldig ændring", str(error))
@@ -2602,37 +2844,74 @@ class HistoryPage(BasePage):
             answer = QMessageBox.question(
                 self,
                 "Overskriv eksisterende dato",
-                f"Der findes allerede en anden indberetning for {format_date(selected_date)}. Vil du overskrive den?",
+                f"Der findes allerede en anden vagt for {format_date(selected_date)}. Vil du overskrive den?",
             )
             if answer != QMessageBox.Yes:
                 return
 
         upsert_entry(
             selected_date,
-            hours,
+            duration,
             rate,
             self.selected_original_date,
             start=start,
             slut=slut,
+            pause=pause,
         )
 
+        self.pending_select_date = selected_date
         self.window.refresh_all()
 
     def _delete_selected_row(self):
         if self.selected_original_date is None:
-            QMessageBox.information(self, "Ingen vagt valgt", "Vælg først en vagt i historiktabellen.")
+            QMessageBox.information(self, "Ingen vagt valgt", "Vælg først en vagt i tabellen.")
             return
 
+        selected_index = self.table.currentRow()
         answer = QMessageBox.question(
             self,
-            "Slet indberetning",
-            f"Vil du slette indberetningen for {format_date(self.selected_original_date)}?",
+            "Slet vagt",
+            f"Vil du slette vagten for {format_date(self.selected_original_date)}?",
         )
 
         if answer != QMessageBox.Yes:
             return
 
         delete_entry(self.selected_original_date)
+        self.pending_select_row = selected_index
+        self.window.refresh_all()
+
+    def _delete_checked_rows(self):
+        checked_indexes = self._checked_row_indexes()
+        if not checked_indexes:
+            return
+
+        checked_dates = {
+            self.rows[row_index]["dato"]
+            for row_index in checked_indexes
+            if 0 <= row_index < len(self.rows)
+        }
+        if not checked_dates:
+            return
+
+        count = len(checked_dates)
+        label = "vagt" if count == 1 else "vagter"
+        answer = QMessageBox.question(
+            self,
+            "Slet markerede vagter",
+            f"Vil du slette {count} markerede {label}?",
+        )
+
+        if answer != QMessageBox.Yes:
+            return
+
+        remaining_rows = [
+            row
+            for row in entry_rows(ft.load_data())
+            if row["dato"] not in checked_dates
+        ]
+        save_entry_rows(remaining_rows)
+        self.pending_select_row = min(checked_indexes)
         self.window.refresh_all()
 
 
@@ -2973,27 +3252,18 @@ class TutorialDialog(QDialog):
                 ),
             },
             {
-                "key": "entry",
-                "page": 1,
-                "title": "Indberet",
-                "text": (
-                    "Indberet bruges til at registrere en ny vagt.\n\n"
-                    "Du kan vælge start/slut eller skrive antal timer direkte. Timelønnen bruger din "
-                    "standardtimeløn, indtil du ændrer den eller har tidligere vagter."
-                ),
-            },
-            {
                 "key": "history",
-                "page": 2,
-                "title": "Historik",
+                "page": 1,
+                "title": "Vagter",
                 "text": (
-                    "Historik viser alle registrerede vagter.\n\n"
-                    "Her kan du rette fejl i gamle indberetninger eller slette en vagt."
+                    "Vagter viser alle registrerede vagter.\n\n"
+                    "Her kan du tilføje en ny vagt, angive pause i minutter, rette fejl i gamle vagter, "
+                    "markere flere vagter eller slette en vagt."
                 ),
             },
             {
                 "key": "budget",
-                "page": 3,
+                "page": 2,
                 "title": "Budget",
                 "text": (
                     "Budget er dine faste udgifter for perioden.\n\n"
@@ -3003,16 +3273,17 @@ class TutorialDialog(QDialog):
             },
             {
                 "key": "payments",
-                "page": 4,
+                "page": 3,
                 "title": "Lønsedler",
                 "text": (
                     "Lønsedler viser afsluttede lønperioder.\n\n"
-                    "Her kan du se timer, brutto, netto og total udbetaling for tidligere perioder."
+                    "Her kan du se vagter, betalte timer, pauser, brutto, netto og total udbetaling "
+                    "for tidligere perioder."
                 ),
             },
             {
                 "key": "statistics",
-                "page": 5,
+                "page": 4,
                 "title": "Statistik",
                 "text": (
                     "Statistik samler nøgletal og grafer.\n\n"
@@ -3021,7 +3292,7 @@ class TutorialDialog(QDialog):
             },
             {
                 "key": "calculator",
-                "page": 6,
+                "page": 5,
                 "title": "Lønberegner",
                 "text": (
                     "Lønberegneren er til hurtige beregninger.\n\n"
@@ -3030,7 +3301,7 @@ class TutorialDialog(QDialog):
             },
             {
                 "key": "settings",
-                "page": 7,
+                "page": 6,
                 "title": "Indstillinger",
                 "text": (
                     "Indstillinger styrer skat, fradrag, anden indkomst, standardtimeløn og lønperiode.\n\n"
@@ -3039,7 +3310,7 @@ class TutorialDialog(QDialog):
             },
             {
                 "key": "setup",
-                "page": 7,
+                "page": 6,
                 "title": "Dine grundoplysninger",
                 "text": (
                     "Udfyld de vigtigste tal. De gemmes i Indstillinger og bruges i resten af programmet.\n\n"
@@ -3051,7 +3322,7 @@ class TutorialDialog(QDialog):
                 "title": "Du er klar",
                 "text": (
                     "Tutorialen er færdig.\n\n"
-                    "Start med at indberette dine vagter og tilføje dine faste udgifter i Budget. "
+                    "Start med at tilføje dine vagter og dine faste udgifter i Budget. "
                     "Du kan altid starte tutorialen igen fra Indstillinger."
                 ),
             },
@@ -3359,7 +3630,7 @@ class TutorialDialog(QDialog):
         self._visual_title("Lønix samler løn, budget og rådighed ét sted")
         grid = QGridLayout()
         grid.setSpacing(10)
-        grid.addWidget(self._mini_card("Indberet", "Vagter", "#1f8a70", "Dato, timer og timeløn"), 0, 0)
+        grid.addWidget(self._mini_card("Vagter", "Tilføj", "#1f8a70", "Dato, timer, pause og timeløn"), 0, 0)
         grid.addWidget(self._mini_card("Beregn", "Netto", "#2563eb", "Skat og fradrag medregnes"), 0, 1)
         grid.addWidget(self._mini_card("Planlæg", "Budget", "#d97706", "Faste udgifter trækkes fra"), 0, 2)
         self.visual_layout.addLayout(grid)
@@ -3377,17 +3648,18 @@ class TutorialDialog(QDialog):
         self.visual_layout.addWidget(self._mini_row("Estimater", "Forventet netto, rådighed og timer"))
 
     def _visual_entry(self):
-        self._visual_title("Indberet registrerer én vagt ad gangen")
+        self._visual_title("Vagter registrerer én vagt ad gangen")
         rows = QVBoxLayout()
         rows.setSpacing(7)
         for left, right in [
             ("Dato", "03-05-2026"),
             ("Metode", "Start/slut"),
             ("Start og slut", "14:00 - 18:00"),
+            ("Pause", "30 min."),
             ("Timeløn", "150 kr."),
         ]:
             rows.addWidget(self._mini_row(left, right))
-        rows.addWidget(self._mini_row("Gem indberetning", "Tilføjes til historik og beregninger", True))
+        rows.addWidget(self._mini_row("Gem vagt", "Tilføjes til listen og beregninger", True))
         self.visual_layout.addLayout(rows)
 
     def _visual_payments(self):
@@ -3395,8 +3667,8 @@ class TutorialDialog(QDialog):
         rows = QVBoxLayout()
         rows.setSpacing(7)
         rows.addWidget(self._mini_row("April 2026", "Netto 8.240 kr. | Total 8.240 kr.", True))
-        rows.addWidget(self._mini_row("Marts 2026", "42 t. | Brutto 6.300 kr."))
-        rows.addWidget(self._mini_row("Detaljer", "AM-bidrag, skat og anden indkomst"))
+        rows.addWidget(self._mini_row("Marts 2026", "6 vagter | 42 t. | 90 min. pause"))
+        rows.addWidget(self._mini_row("Detaljer", "Betalte timer, pause, skat og total"))
         self.visual_layout.addLayout(rows)
 
     def _visual_statistics(self):
@@ -3420,13 +3692,13 @@ class TutorialDialog(QDialog):
         self.visual_layout.addLayout(rows)
 
     def _visual_history(self):
-        self._visual_title("Historik er dit redigerbare arkiv")
+        self._visual_title("Vagter samler tilføjelse og redigering")
         rows = QVBoxLayout()
         rows.setSpacing(7)
-        rows.addWidget(self._mini_row("03-05-2026", "7 t. | 150 kr.", True))
-        rows.addWidget(self._mini_row("02-05-2026", "4 t. | 150 kr."))
+        rows.addWidget(self._mini_row("Tilføj vagt", "Dato, timer, pause og timeløn", True))
+        rows.addWidget(self._mini_row("03-05-2026", "7 t. | Pause 30 min. | 150 kr."))
         rows.addWidget(self._mini_row("Rediger valgt vagt", "Ret dato, timer eller timeløn"))
-        rows.addWidget(self._mini_row("Slet", "Fjerner en fejlregistrering"))
+        rows.addWidget(self._mini_row("Slet markerede", "Brug checkbokse til flere vagter"))
         self.visual_layout.addLayout(rows)
 
     def _visual_calculator(self):
@@ -3444,7 +3716,7 @@ class TutorialDialog(QDialog):
         rows.setSpacing(7)
         rows.addWidget(self._mini_row("Skat og fradrag", "Bruges til netto løn"))
         rows.addWidget(self._mini_row("Anden indkomst", "Medregnes kun hvis beløbet er over 0"))
-        rows.addWidget(self._mini_row("Standard timeløn", "Forudfylder Indberet"))
+        rows.addWidget(self._mini_row("Standard timeløn", "Forudfylder Tilføj vagt"))
         rows.addWidget(self._mini_row("Lønperiode", "Bestemmer Overblik og estimater", True))
         self.visual_layout.addLayout(rows)
 
@@ -3452,10 +3724,10 @@ class TutorialDialog(QDialog):
         pass
 
     def _visual_done(self):
-        self._visual_title("Klar til første indberetning")
+        self._visual_title("Klar til første vagt")
         rows = QVBoxLayout()
         rows.setSpacing(7)
-        rows.addWidget(self._mini_row("Start", "Gå til Indberet og gem din første vagt", True))
+        rows.addWidget(self._mini_row("Start", "Gå til Vagter og gem din første vagt", True))
         rows.addWidget(self._mini_row("Budget", "Tilføj faste udgifter når du har dem"))
         rows.addWidget(self._mini_row("Genstart tutorial", "Findes altid under Indstillinger"))
         self.visual_layout.addLayout(rows)
@@ -3528,8 +3800,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         ensure_storage()
-        self.data = []
-        self.settings = {}
+        self.data = ft.load_data()
+        self.settings = ft.load_settings()
         self.pages = []
         self.nav_buttons = []
 
@@ -3537,7 +3809,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         window_size, minimum_size = bounded_window_sizes()
         self.setMinimumSize(minimum_size)
-        self.resize(window_size)
+        self.resize(saved_window_size(self.settings, window_size, minimum_size))
 
         root = QWidget()
         root.setObjectName("Content")
@@ -3584,8 +3856,7 @@ class MainWindow(QMainWindow):
         self.button_group.setExclusive(True)
 
         self._add_page(sidebar_layout, "Overblik", DashboardPage(self), primary=True)
-        self._add_page(sidebar_layout, "Indberet", EntryPage(self))
-        self._add_page(sidebar_layout, "Historik", HistoryPage(self))
+        self._add_page(sidebar_layout, "Vagter", HistoryPage(self))
         self._add_page(sidebar_layout, "Budget", BudgetPage(self))
         self._add_page(sidebar_layout, "Lønsedler", PaymentsPage(self))
         self._add_page(sidebar_layout, "Statistik", StatisticsPage(self))
@@ -3676,6 +3947,16 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._update_sidebar_width()
         self._position_tutorial_overlay()
+
+    def closeEvent(self, event):
+        try:
+            settings = dict(ft.load_settings())
+            settings[WINDOW_WIDTH_SETTINGS_KEY] = self.width()
+            settings[WINDOW_HEIGHT_SETTINGS_KEY] = self.height()
+            ft.save_settings(settings)
+        except (OSError, ValueError, TypeError):
+            pass
+        super().closeEvent(event)
 
     def _position_tutorial_overlay(self):
         if hasattr(self, "tutorial_overlay"):

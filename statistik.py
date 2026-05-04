@@ -44,7 +44,7 @@ def main():
     if not data:
         ft.error_message(
             sti="Hovedmenu > Statistik",
-            besked="Din data er tom. Venligst indberet dagsløn først.",
+            besked="Din data er tom. Tilføj en vagt først.",
             ugyldigt_valg=False,
             get_input=True,
         )
@@ -106,17 +106,18 @@ def print_stats(data=None, settings=None):
     )
 
     _print_table(
-        "Historik",
+        "Vagter",
         ["Måling", "Værdi"],
         [
             ["Timer i alt", _format_number(statistics["totals"]["timer"])],
+            ["Pause i alt", f"{_format_number(statistics['totals'].get('pause', 0) * 60)} min."],
             ["Løn i alt", _format_money_pair(statistics["totals"]["brutto"], statistics["totals"]["netto"])],
         ],
         right_align={1},
     )
 
     _print_table(
-        "Vagter",
+        "Vagtantal",
         ["Måling", "Værdi"],
         [
             ["Vagter i alt", statistics["shift_counts"]["total"]],
@@ -130,35 +131,35 @@ def print_stats(data=None, settings=None):
 
     _print_table(
         "Rekorder",
-        ["Kategori", "Dato", "Timer", "Før skat", "Efter skat"],
+        ["Kategori", "Dato", "Timer", "Pause", "Før skat", "Efter skat"],
         [
             _shift_row("Længste vagt", statistics["records"]["longest"]),
             _shift_row("Korteste vagt", statistics["records"]["shortest"]),
             _shift_row("Mest indbringende / højeste dag", statistics["records"]["highest_paid"]),
         ],
-        right_align={2, 3, 4},
+        right_align={2, 3, 4, 5},
     )
 
     _print_table(
         "Bedste lønperioder",
-        ["Måling", "Periode", "Timer", "Før skat", "Efter skat"],
+        ["Måling", "Periode", "Timer", "Pause", "Før skat", "Efter skat"],
         [
             _period_row("Timer", statistics["periods"]["best_timer"]),
             _period_row("Brutto", statistics["periods"]["best_brutto"]),
             _period_row("Netto", statistics["periods"]["best_netto"]),
         ],
-        right_align={2, 3, 4},
+        right_align={2, 3, 4, 5},
     )
 
     _print_table(
         "Dårligste lønperioder",
-        ["Måling", "Periode", "Timer", "Før skat", "Efter skat"],
+        ["Måling", "Periode", "Timer", "Pause", "Før skat", "Efter skat"],
         [
             _period_row("Timer", statistics["periods"]["worst_timer"]),
             _period_row("Brutto", statistics["periods"]["worst_brutto"]),
             _period_row("Netto", statistics["periods"]["worst_netto"]),
         ],
-        right_align={2, 3, 4},
+        right_align={2, 3, 4, 5},
     )
 
     if statistics["development"] is None:
@@ -289,6 +290,7 @@ def _build_statistics(data, settings):
 
     totals = {
         "timer": sum(shift["timer"] for shift in shifts),
+        "pause": sum(shift["pause"] for shift in shifts),
         "brutto": sum(shift["brutto"] for shift in shifts),
         "netto": sum(period["netto"] for period in periods),
     }
@@ -372,13 +374,17 @@ def _parse_shifts(data):
     for entry in data:
         dato_str, løn_info = next(iter(entry.items()))
         dato = datetime.strptime(dato_str, "%d-%m-%Y").date()
-        timer = float(løn_info.get("timer", 0))
+        varighed = ft.get_shift_duration_hours(løn_info)
+        pause = ft.get_shift_pause_hours(løn_info)
+        timer = ft.get_shift_paid_hours(løn_info)
         timeløn = float(løn_info.get("timeløn", 0))
 
         shifts.append(
             {
                 "dato": dato,
+                "varighed": varighed,
                 "timer": timer,
+                "pause": pause,
                 "timeløn": timeløn,
                 "brutto": timer * timeløn,
                 "netto": 0.0,
@@ -414,17 +420,24 @@ def _group_periods(shifts, settings):
             periods[period_key] = {
                 "periode_start": periode_start,
                 "periode_slut": periode_slut,
+                "varighed": 0.0,
                 "timer": 0.0,
+                "pause": 0.0,
                 "brutto": 0.0,
                 "netto": 0.0,
                 "am_bidrag": 0.0,
+                "efter_am": 0.0,
+                "fradrag": 0.0,
+                "skattegrundlag": 0.0,
                 "skat": 0.0,
                 "vagter": 0,
                 "shifts": [],
             }
 
         period = periods[period_key]
+        period["varighed"] += shift["varighed"]
         period["timer"] += shift["timer"]
+        period["pause"] += shift["pause"]
         period["brutto"] += shift["brutto"]
         period["vagter"] += 1
         period["shifts"].append(shift)
@@ -434,6 +447,9 @@ def _group_periods(shifts, settings):
         breakdown = ft.calculate_salary_breakdown_from_brutto(period["brutto"])
         period["netto"] = breakdown["netto"]
         period["am_bidrag"] = breakdown["am_bidrag"]
+        period["efter_am"] = breakdown["efter_am"]
+        period["fradrag"] = breakdown["fradrag"]
+        period["skattegrundlag"] = breakdown["skattegrundlag"]
         period["skat"] = breakdown["skat"]
 
         if period["brutto"] == 0:
@@ -454,9 +470,11 @@ def _group_years(shifts):
     for shift in shifts:
         year = shift["dato"].year
         if year not in years:
-            years[year] = {"år": year, "timer": 0.0, "brutto": 0.0, "netto": 0.0}
+            years[year] = {"år": year, "varighed": 0.0, "timer": 0.0, "pause": 0.0, "brutto": 0.0, "netto": 0.0}
 
+        years[year]["varighed"] += shift["varighed"]
         years[year]["timer"] += shift["timer"]
+        years[year]["pause"] += shift["pause"]
         years[year]["brutto"] += shift["brutto"]
         years[year]["netto"] += shift["netto"]
 
@@ -625,11 +643,12 @@ def _period_label(period):
 
 def _shift_row(label, shift):
     if shift is None:
-        return [label, _na(), _na(), _na(), _na()]
+        return [label, _na(), _na(), _na(), _na(), _na()]
     return [
         label,
         shift["dato"].strftime("%d-%m-%Y"),
         _format_number(shift["timer"]),
+        f"{_format_number(shift.get('pause', 0) * 60)} min.",
         _format_money(shift["brutto"]),
         _format_money(shift["netto"]),
     ]
@@ -637,11 +656,12 @@ def _shift_row(label, shift):
 
 def _period_row(label, period):
     if period is None:
-        return [label, _na(), _na(), _na(), _na()]
+        return [label, _na(), _na(), _na(), _na(), _na()]
     return [
         label,
         _period_label(period),
         _format_number(period["timer"]),
+        f"{_format_number(period.get('pause', 0) * 60)} min.",
         _format_money(period["brutto"]),
         _format_money(period["netto"]),
     ]

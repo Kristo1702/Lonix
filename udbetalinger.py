@@ -38,6 +38,8 @@ def build_udbetaling_overview(settings, udbetaling):
     periode_start = udbetaling.get("periode_start")
     periode_slut = udbetaling.get("periode_slut")
     timer = udbetaling.get("timer", 0)
+    pause = udbetaling.get("pause", 0)
+    vagter = udbetaling.get("vagter", 0)
     brutto = udbetaling.get("brutto", 0)
     netto_løn = udbetaling.get("netto", 0)
     anden_indkomst = ft.get_other_income(settings)
@@ -48,9 +50,11 @@ def build_udbetaling_overview(settings, udbetaling):
     print(Fore.WHITE + f"\n  {titel}")
     print(Fore.WHITE + "\n  ===== LØN =====")
     print(Fore.LIGHTBLACK_EX + f"  Periode: {periode_start.strftime('%d-%m-%Y')} - {periode_slut.strftime('%d-%m-%Y')}")
+    print(Fore.BLUE + f"  Vagter: {vagter}")
+    print(Fore.BLUE + f"  Pause: {_format_timer(pause * 60)} min.")
     if timer > 0:
         timeløn = brutto / timer
-        print(Fore.BLUE + f"  Timer: {_format_timer(timer)} á {timeløn:.0f} kr.")
+        print(Fore.BLUE + f"  Betalte timer: {_format_timer(timer)} á {timeløn:.0f} kr.")
     else:
         print(Fore.YELLOW + "  Ingen timer registreret")
     print(Fore.BLUE + f"  Brutto løn: {brutto:.0f} kr.")
@@ -81,7 +85,7 @@ def main():
     if not data:
         ft.error_message(
             sti="Hovedmenu > udbetalinger",
-            besked="Din data er tom. Venligst indberet dagsløn først.",
+            besked="Din data er tom. Tilføj en vagt først.",
             ugyldigt_valg=False,
             get_input=True
         )

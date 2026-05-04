@@ -308,6 +308,24 @@ def is_tutorial_completed(settings=None):
     return bool(settings.get(TUTORIAL_DONE_KEY, False))
 
 
+def get_shift_duration_hours(løn_info):
+    try:
+        return max(0.0, float(løn_info.get("timer", 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_shift_pause_hours(løn_info):
+    try:
+        return max(0.0, float(løn_info.get("pause", 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_shift_paid_hours(løn_info):
+    return max(0.0, get_shift_duration_hours(løn_info) - get_shift_pause_hours(løn_info))
+
+
 def calculate_budget_expenses(settings=None):
     return sum(category["beløb"] for category in get_budget_categories(settings))
 
@@ -391,7 +409,7 @@ def calculate_netto_salary():
     if not data:
         error_message(
             sti=None,
-            besked=Fore.RED + "Din data er tom. Venligst indberet dagsløn først." + Style.RESET_ALL,
+            besked=Fore.RED + "Din data er tom. Tilføj en vagt først." + Style.RESET_ALL,
             ugyldigt_valg=False,
             get_input=True,
         )
@@ -411,7 +429,7 @@ def calculate_netto_salary():
         dato_obj = datetime.strptime(dato_str, "%d-%m-%Y").date()
 
         if periode_start <= dato_obj <= periode_slut:
-            timer = løn_info.get("timer", 0)
+            timer = get_shift_paid_hours(løn_info)
             timeløn = løn_info.get("timeløn", 0)
             total_timer += timer
             total_brutto += timer * timeløn
@@ -435,7 +453,7 @@ def calculate_all_netto_salaries():
     if not data:
         error_message(
             sti=None,
-            besked=Fore.RED + "Din data er tom. Venligst indberet dagsløn først." + Style.RESET_ALL,
+            besked=Fore.RED + "Din data er tom. Tilføj en vagt først." + Style.RESET_ALL,
             ugyldigt_valg=False,
             get_input=True,
         )
@@ -456,19 +474,30 @@ def calculate_all_netto_salaries():
                 "periode_start": periode_start,
                 "periode_slut": periode_slut,
                 "timer": 0,
+                "pause": 0,
                 "brutto": 0,
+                "vagter": 0,
             }
 
-        timer = løn_info.get("timer", 0)
+        timer = get_shift_paid_hours(løn_info)
+        pause = get_shift_pause_hours(løn_info)
         timeløn = løn_info.get("timeløn", 0)
         brutto = timer * timeløn
 
         lønsedler[lønseddel_nøgle]["timer"] += timer
+        lønsedler[lønseddel_nøgle]["pause"] += pause
         lønsedler[lønseddel_nøgle]["brutto"] += brutto
+        lønsedler[lønseddel_nøgle]["vagter"] += 1
 
     sorterede_lønsedler = sorted(lønsedler.values(), key=lambda value: value["periode_start"], reverse=True)
     for lønseddel in sorterede_lønsedler:
-        lønseddel["netto"] = calculate_netto_salary_from_brutto(lønseddel["brutto"])
+        breakdown = calculate_salary_breakdown_from_brutto(lønseddel["brutto"])
+        lønseddel["netto"] = breakdown["netto"]
+        lønseddel["am_bidrag"] = breakdown["am_bidrag"]
+        lønseddel["efter_am"] = breakdown["efter_am"]
+        lønseddel["fradrag"] = breakdown["fradrag"]
+        lønseddel["skattegrundlag"] = breakdown["skattegrundlag"]
+        lønseddel["skat"] = breakdown["skat"]
 
     return sorterede_lønsedler
 
@@ -502,7 +531,7 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
     for entry in data:
         dato_str, løn_info = next(iter(entry.items()))
         dato_obj = datetime.strptime(dato_str, "%d-%m-%Y").date()
-        timer = float(løn_info.get("timer", 0))
+        timer = get_shift_paid_hours(løn_info)
         timeløn = float(løn_info.get("timeløn", 0))
         brutto = timer * timeløn
 
