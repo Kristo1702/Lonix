@@ -399,12 +399,6 @@ def format_money(value, decimals=0):
     return f"{format_number(value, decimals)} kr."
 
 
-def format_percent(value):
-    if value is None:
-        return "N/A"
-    return f"{format_number(value * 100)}%"
-
-
 def format_date(value):
     if value is None:
         return "N/A"
@@ -415,7 +409,13 @@ def parse_number_text(value):
     cleaned = value.strip().lower()
     for token in ["kr.", "kr", "t.", "timer", "time", "d.", "%"]:
         cleaned = cleaned.replace(token, "")
-    cleaned = cleaned.replace(" ", "").replace(",", ".")
+    cleaned = cleaned.replace(" ", "")
+
+    if "," in cleaned and "." in cleaned:
+        # Dansk format: 1.234,56
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    else:
+        cleaned = cleaned.replace(",", ".")
     if not cleaned:
         raise ValueError("Tomt talfelt")
     return float(cleaned)
@@ -696,7 +696,7 @@ def build_periods(data, settings):
 
 def table_item(value, align=Qt.AlignLeft | Qt.AlignVCenter):
     item = QTableWidgetItem(str(value))
-    item.setFlags(item.flags() ^ Qt.ItemIsEditable)
+    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
     item.setTextAlignment(align)
     return item
 
@@ -1513,7 +1513,7 @@ class DashboardPage(BasePage):
             self.estimate_strip.add_item(card)
 
         metrics_layout.addWidget(make_dashboard_separator())
-        self.stats_strip = DashboardMetricStrip("Stats", columns=3, embedded=True)
+        self.stats_strip = DashboardMetricStrip("Statistik (Ikke kun for denne periode)", columns=3, embedded=True)
         metrics_layout.addWidget(self.stats_strip)
         self.stat_average_card = DashboardMetricItem("Snit pr. vagt", accent="#475569")
         self.stat_week_card = DashboardMetricItem("Snit pr. uge", accent="#2563eb")

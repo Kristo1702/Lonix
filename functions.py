@@ -343,23 +343,37 @@ def get_salary_period_for_date(dato_obj, løn_start, løn_slut):
     løn_start = int(løn_start)
     løn_slut = int(løn_slut)
 
-    current_start = _safe_date(dato_obj.year, dato_obj.month, løn_start)
-    if løn_start > løn_slut:
-        next_year, next_month = _shift_month(dato_obj.year, dato_obj.month, 1)
-        current_end = _safe_date(next_year, next_month, løn_slut)
-    else:
-        current_end = _safe_date(dato_obj.year, dato_obj.month, løn_slut)
+    def make_period(year, month):
+        start = _safe_date(year, month, løn_start)
+
+        if løn_start > løn_slut:
+            end_year, end_month = _shift_month(year, month, 1)
+            end = _safe_date(end_year, end_month, løn_slut)
+        else:
+            end = _safe_date(year, month, løn_slut)
+
+        return start, end
+
+    current_start, current_end = make_period(dato_obj.year, dato_obj.month)
+
+    if current_start <= dato_obj <= current_end:
+        return current_start, current_end
 
     previous_year, previous_month = _shift_month(dato_obj.year, dato_obj.month, -1)
-    previous_start = _safe_date(previous_year, previous_month, løn_start)
-    if løn_start > løn_slut:
-        previous_end = _safe_date(dato_obj.year, dato_obj.month, løn_slut)
-    else:
-        previous_end = _safe_date(previous_year, previous_month, løn_slut)
+    previous_start, previous_end = make_period(previous_year, previous_month)
 
     if previous_start <= dato_obj <= previous_end:
         return previous_start, previous_end
-    return current_start, current_end
+
+    next_year, next_month = _shift_month(dato_obj.year, dato_obj.month, 1)
+    next_start, next_end = make_period(next_year, next_month)
+
+    if next_start <= dato_obj <= next_end:
+        return next_start, next_end
+
+    if dato_obj < current_start:
+        return previous_start, previous_end
+    return next_start, next_end
 
 
 def calculate_netto_salary():
