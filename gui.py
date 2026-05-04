@@ -1809,7 +1809,7 @@ class EntryPage(BasePage):
         history_panel, history_layout = make_panel("Alle registreringer")
         content.addWidget(history_panel, 1)
         self.history_table = QTableWidget()
-        setup_table(self.history_table, ["Dato", "Timer", "Timeløn", "Brutto"])
+        setup_table(self.history_table, ["Dato", "Timer", "Brutto"])
         history_layout.addWidget(self.history_table)
 
         self._set_defaults()
@@ -1905,8 +1905,7 @@ class EntryPage(BasePage):
         for row_index, row in enumerate(rows):
             self.history_table.setItem(row_index, 0, table_item(format_date(row["dato"])))
             self.history_table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
-            self.history_table.setItem(row_index, 2, table_item(format_money(row["timeløn"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.history_table.setItem(row_index, 3, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.history_table.setItem(row_index, 2, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
         self.history_table.resizeRowsToContents()
 
 
@@ -2407,6 +2406,7 @@ class HistoryPage(BasePage):
         )
         self.rows = []
         self.selected_original_date = None
+        self.selected_has_time = False
 
         top = QHBoxLayout()
         top.setSpacing(14)
@@ -2425,7 +2425,7 @@ class HistoryPage(BasePage):
         panel, layout = make_panel("Vagter")
         content.addWidget(panel, 2)
         self.table = QTableWidget()
-        setup_table(self.table, ["Dato", "Timer", "Timeløn", "Brutto"])
+        setup_table(self.table, ["Dato", "Timer", "Brutto"])
         self.table.itemSelectionChanged.connect(self._load_selected_row)
         layout.addWidget(self.table)
 
@@ -2434,15 +2434,24 @@ class HistoryPage(BasePage):
         form = QFormLayout()
         form.setVerticalSpacing(12)
         edit_layout.addLayout(form)
+        self.edit_form = form
 
         self.edit_date_field = make_text_input(placeholder="dd-mm-åååå")
         self.edit_hours_field = make_text_input(placeholder="fx 4,5")
+        self.edit_start_field = make_text_input(placeholder="HH:MM")
+        self.edit_end_field = make_text_input(placeholder="HH:MM")
         self.edit_rate_field = make_text_input(placeholder="fx 150")
+
         self.edit_date_field.textChanged.connect(self._update_edit_preview)
         self.edit_hours_field.textChanged.connect(self._update_edit_preview)
+        self.edit_start_field.textChanged.connect(self._update_edit_preview)
+        self.edit_end_field.textChanged.connect(self._update_edit_preview)
         self.edit_rate_field.textChanged.connect(self._update_edit_preview)
+
         form.addRow("Dato", self.edit_date_field)
         form.addRow("Timer", self.edit_hours_field)
+        form.addRow("Start", self.edit_start_field)
+        form.addRow("Slut", self.edit_end_field)
         form.addRow("Timeløn", self.edit_rate_field)
 
         self.edit_preview = QLabel("Vælg en vagt i tabellen.")
@@ -2461,22 +2470,33 @@ class HistoryPage(BasePage):
         button_row.addWidget(self.delete_button)
         edit_layout.addStretch()
 
+        self._update_edit_mode(False)
+
     def refresh(self):
         self.rows = entry_rows(self.data)
         self.total_card.set_values(str(len(self.rows)), "Gemte vagter")
         self.hours_card.set_values(f"{format_number(sum(row['timer'] for row in self.rows))} t.", "Alle registreringer")
         self.gross_card.set_values(format_money(sum(row["brutto"] for row in self.rows)), "Før skat")
         self.table.setRowCount(len(self.rows))
+
         for row_index, row in enumerate(self.rows):
             self.table.setItem(row_index, 0, table_item(format_date(row["dato"])))
             self.table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
-            self.table.setItem(row_index, 2, table_item(format_money(row["timeløn"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.table.setItem(row_index, 3, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.table.setItem(row_index, 2, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+
         self.table.resizeRowsToContents()
+
         if self.rows:
             self.table.selectRow(0)
         else:
             self._clear_edit_fields()
+
+    def _update_edit_mode(self, has_time):
+        self.selected_has_time = bool(has_time)
+
+        set_form_row_visible(self.edit_form, self.edit_hours_field, not self.selected_has_time)
+        set_form_row_visible(self.edit_form, self.edit_start_field, self.selected_has_time)
+        set_form_row_visible(self.edit_form, self.edit_end_field, self.selected_has_time)
 
     def _load_selected_row(self):
         selected = self.table.currentRow()
@@ -2486,42 +2506,87 @@ class HistoryPage(BasePage):
 
         row = self.rows[selected]
         self.selected_original_date = row["dato"]
+
+        has_time = bool(row.get("start") and row.get("slut"))
+        self._update_edit_mode(has_time)
+
         self.edit_date_field.setText(format_date(row["dato"]))
-        set_field_number(self.edit_hours_field, row["timer"])
         set_field_number(self.edit_rate_field, row["timeløn"])
+
+        if has_time:
+            self.edit_start_field.setText(str(row.get("start", "")))
+            self.edit_end_field.setText(str(row.get("slut", "")))
+            self.edit_hours_field.clear()
+        else:
+            set_field_number(self.edit_hours_field, row["timer"])
+            self.edit_start_field.clear()
+            self.edit_end_field.clear()
+
         self._update_edit_preview()
 
     def _clear_edit_fields(self):
         self.selected_original_date = None
+        self.selected_has_time = False
+
         self.edit_date_field.clear()
         self.edit_hours_field.clear()
+        self.edit_start_field.clear()
+        self.edit_end_field.clear()
         self.edit_rate_field.clear()
+
+        self._update_edit_mode(False)
         self.edit_preview.setText("Vælg en vagt i tabellen.")
+
+    def _edited_hours_and_times(self):
+        if self.selected_has_time:
+            start = self.edit_start_field.text().strip()
+            slut = self.edit_end_field.text().strip()
+
+            if not start or not slut:
+                raise ValueError("Start og slut skal udfyldes.")
+
+            hours = calculate_hours_from_times(start, slut)
+            return hours, start, slut
+
+        hours = parse_positive_number(self.edit_hours_field, "Timer")
+        return hours, None, None
 
     def _update_edit_preview(self):
         if self.selected_original_date is None:
             return
+
         try:
-            hours = parse_positive_number(self.edit_hours_field, "Timer")
-            rate = parse_positive_number(self.edit_rate_field, "Timeløn")
             selected_date = parse_date_text(self.edit_date_field.text())
+            hours, start, slut = self._edited_hours_and_times()
+            rate = parse_positive_number(self.edit_rate_field, "Timeløn")
         except ValueError:
-            self.edit_preview.setText("Udfyld gyldig dato, timer og timeløn.")
+            if self.selected_has_time:
+                self.edit_preview.setText("Udfyld gyldig dato, start, slut og timeløn.")
+            else:
+                self.edit_preview.setText("Udfyld gyldig dato, timer og timeløn.")
             return
 
         brutto = hours * rate
-        self.edit_preview.setText(
-            f"{format_date(selected_date)}: {format_number(hours)} timer á {format_money(rate)}\n"
-            f"Brutto: {format_money(brutto)}"
-        )
+
+        if self.selected_has_time:
+            self.edit_preview.setText(
+                f"{format_date(selected_date)}: {start} - {slut} ({format_number(hours)} timer) á {format_money(rate)}\n"
+                f"Brutto: {format_money(brutto)}"
+            )
+        else:
+            self.edit_preview.setText(
+                f"{format_date(selected_date)}: {format_number(hours)} timer á {format_money(rate)}\n"
+                f"Brutto: {format_money(brutto)}"
+            )
 
     def _save_selected_row(self):
         if self.selected_original_date is None:
             QMessageBox.information(self, "Ingen vagt valgt", "Vælg først en vagt i historiktabellen.")
             return
+
         try:
             selected_date = parse_date_text(self.edit_date_field.text())
-            hours = parse_positive_number(self.edit_hours_field, "Timer")
+            hours, start, slut = self._edited_hours_and_times()
             rate = parse_positive_number(self.edit_rate_field, "Timeløn")
         except ValueError as error:
             QMessageBox.warning(self, "Ugyldig ændring", str(error))
@@ -2532,6 +2597,7 @@ class HistoryPage(BasePage):
             for entry in self.data
             if parse_date_key(next(iter(entry.keys()))) != self.selected_original_date
         )
+
         if target_exists:
             answer = QMessageBox.question(
                 self,
@@ -2541,7 +2607,15 @@ class HistoryPage(BasePage):
             if answer != QMessageBox.Yes:
                 return
 
-        upsert_entry(selected_date, hours, rate, self.selected_original_date)
+        upsert_entry(
+            selected_date,
+            hours,
+            rate,
+            self.selected_original_date,
+            start=start,
+            slut=slut,
+        )
+
         self.window.refresh_all()
 
     def _delete_selected_row(self):
@@ -2554,8 +2628,10 @@ class HistoryPage(BasePage):
             "Slet indberetning",
             f"Vil du slette indberetningen for {format_date(self.selected_original_date)}?",
         )
+
         if answer != QMessageBox.Yes:
             return
+
         delete_entry(self.selected_original_date)
         self.window.refresh_all()
 
