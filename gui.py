@@ -16,7 +16,6 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -76,6 +75,25 @@ WINDOW_SCREEN_FILL_RATIO = 0.92
 BASE_SIDEBAR_WIDTH = 224
 MAX_SIDEBAR_WIDTH = 320
 SIDEBAR_WINDOW_RATIO = 0.18
+DASHBOARD_WIDGET_ORDER_KEY = "overblik widget rækkefølge"
+DASHBOARD_DEFAULT_WIDGET_ORDER = (
+    "goal",
+    "progress",
+    "process",
+    "estimates",
+    "stats",
+    "breakdown",
+    "recent",
+)
+DASHBOARD_WIDGET_TITLES = {
+    "goal": "Rådighedsmål",
+    "progress": "Forløb",
+    "process": "Process",
+    "estimates": "Estimater",
+    "stats": "Statistik",
+    "breakdown": "Lønberegning",
+    "recent": "Vagter i perioden",
+}
 
 MONTH_NAMES = {
     1: "Januar",
@@ -160,21 +178,22 @@ QLabel#PageTitle {
 QLabel#PageSubtitle {
     color: #64707d;
 }
-QFrame#Card, QGroupBox#Panel {
+QFrame#Card, QFrame#Panel {
     background: #ffffff;
     border: 1px solid #dde3ea;
     border-radius: 8px;
 }
-QGroupBox#Panel {
-    margin-top: 18px;
-    padding: 16px 14px 14px 14px;
-    font-weight: 700;
+QFrame#DashboardSection {
+    background: #ffffff;
+    border: 1px solid #dde3ea;
+    border-radius: 8px;
 }
-QGroupBox#Panel::title {
-    subcontrol-origin: margin;
-    left: 12px;
-    padding: 0 6px;
+QLabel#PanelTitle {
     color: #111827;
+    font-size: 12.5pt;
+    font-weight: 850;
+    background: transparent;
+    border: 0;
 }
 QLabel#MetricTitle {
     color: #66717e;
@@ -392,6 +411,24 @@ def ensure_storage():
 
 def has_required_settings(settings):
     return isinstance(settings, dict) and all(key in settings for key in REQUIRED_KEYS)
+
+
+def dashboard_widget_order(settings):
+    if not isinstance(settings, dict) or DASHBOARD_WIDGET_ORDER_KEY not in settings:
+        return list(DASHBOARD_DEFAULT_WIDGET_ORDER)
+
+    raw_order = settings.get(DASHBOARD_WIDGET_ORDER_KEY, [])
+    if not isinstance(raw_order, list):
+        return list(DASHBOARD_DEFAULT_WIDGET_ORDER)
+
+    seen = set()
+    order = []
+    for key in raw_order:
+        if key not in DASHBOARD_DEFAULT_WIDGET_ORDER or key in seen:
+            continue
+        seen.add(key)
+        order.append(key)
+    return order
 
 
 def parse_date_key(value):
@@ -865,35 +902,17 @@ def clear_layout(layout):
 
 
 def make_panel(title):
-    panel = QGroupBox(title)
+    panel = QFrame()
     panel.setObjectName("Panel")
     panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-    layout = QVBoxLayout(panel)
-    layout.setContentsMargins(16, 20, 16, 16)
-    layout.setSpacing(10)
-    return panel, layout
-
-
-def make_dashboard_panel(title):
-    panel = QFrame()
-    panel.setObjectName("DashboardSection")
-    panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-    panel.setStyleSheet(
-        """
-        QFrame#DashboardSection {
-            background: #ffffff;
-            border: 1px solid #dde3ea;
-            border-radius: 8px;
-        }
-        """
-    )
     layout = QVBoxLayout(panel)
     layout.setContentsMargins(16, 14, 16, 16)
     layout.setSpacing(12)
     if title:
-        heading = QLabel(title)
-        heading.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
-        layout.addWidget(heading)
+        title_label = QLabel(title)
+        title_label.setObjectName("PanelTitle")
+        title_label.setWordWrap(True)
+        layout.addWidget(title_label)
     return panel, layout
 
 
@@ -1079,9 +1098,10 @@ class DashboardMetricStrip(QWidget):
             layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(10 if embedded else 14)
 
-        heading = QLabel(title)
-        heading.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
-        layout.addWidget(heading)
+        if title:
+            heading = QLabel(title)
+            heading.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
+            layout.addWidget(heading)
 
         self.grid = QGridLayout()
         self.grid.setContentsMargins(0, 0, 0, 0)
@@ -1106,12 +1126,462 @@ class DashboardMetricStrip(QWidget):
             self.grid.setColumnStretch(column, 1)
 
 
-def make_dashboard_separator():
-    separator = QFrame()
-    separator.setFixedHeight(1)
-    separator.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-    separator.setStyleSheet("background: #d8e0e7; border: 0;")
-    return separator
+class DashboardIconButton(QPushButton):
+    def __init__(self, icon_name, tooltip="", checkable=False, parent=None):
+        super().__init__(parent)
+        self.icon_name = icon_name
+        self.setCheckable(checkable)
+        self.setFixedSize(42, 38)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setToolTip(tooltip)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        hovered = self.underMouse()
+        active = self.isDown() or self.isChecked()
+        if self.icon_name == "remove":
+            icon_color = QColor("#b91c1c")
+            hover_fill = QColor("#fef2f2")
+            active_fill = QColor("#fee2e2")
+            border = QColor("#f0c7c7")
+        else:
+            icon_color = QColor("#0f766e")
+            hover_fill = QColor("#edf7f4")
+            active_fill = QColor("#d9f0ea")
+            border = QColor("#c7d8d3")
+
+        button_rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        painter.setPen(QPen(border if hovered or active else QColor(0, 0, 0, 0), 1))
+        painter.setBrush(active_fill if active else (hover_fill if hovered else QColor(0, 0, 0, 0)))
+        painter.drawRoundedRect(button_rect, 7, 7)
+
+        painter.setPen(QPen(icon_color, 2.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        center = QPointF(self.width() / 2, self.height() / 2)
+
+        if self.icon_name == "add":
+            length = 12
+            painter.drawLine(QPointF(center.x() - length / 2, center.y()), QPointF(center.x() + length / 2, center.y()))
+            painter.drawLine(QPointF(center.x(), center.y() - length / 2), QPointF(center.x(), center.y() + length / 2))
+        elif self.icon_name == "remove":
+            length = 12
+            painter.drawLine(
+                QPointF(center.x() - length / 2, center.y() - length / 2),
+                QPointF(center.x() + length / 2, center.y() + length / 2),
+            )
+            painter.drawLine(
+                QPointF(center.x() + length / 2, center.y() - length / 2),
+                QPointF(center.x() - length / 2, center.y() + length / 2),
+            )
+        elif self.icon_name == "widgets":
+            painter.setPen(QPen(icon_color, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            size = 8
+            gap = 4
+            left = center.x() - size - gap / 2
+            top = center.y() - size - gap / 2
+            for row in range(2):
+                for column in range(2):
+                    rect = QRectF(left + column * (size + gap), top + row * (size + gap), size, size)
+                    painter.drawRoundedRect(rect, 2, 2)
+
+
+class DashboardDropIndicator(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(16)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        y = self.height() / 2
+        left = 6
+        right = self.width() - 6
+        color = QColor("#1f8a70")
+        painter.setPen(QPen(color, 2.4, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(left + 7, y), QPointF(right - 7, y))
+        painter.setBrush(color)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(left, y), 3.4, 3.4)
+        painter.drawEllipse(QPointF(right, y), 3.4, 3.4)
+
+
+class DashboardDragHandle(QWidget):
+    def __init__(self, frame):
+        super().__init__(frame)
+        self.frame = frame
+        self.pressed = False
+        self.dragging = False
+        self.press_global_pos = None
+        self.setFixedWidth(26)
+        self.setMinimumHeight(34)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip("Træk for at flytte widget")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#94a3b8"), 2, Qt.DotLine, Qt.RoundCap)
+        painter.setPen(pen)
+        center_x = self.width() / 2
+        top = 6
+        bottom = self.height() - 6
+        painter.drawLine(QPointF(center_x - 4, top), QPointF(center_x - 4, bottom))
+        painter.drawLine(QPointF(center_x + 4, top), QPointF(center_x + 4, bottom))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.frame.edit_mode:
+            self.pressed = True
+            self.dragging = False
+            self.press_global_pos = event.globalPos()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self.pressed or not self.frame.edit_mode:
+            super().mouseMoveEvent(event)
+            return
+
+        if not self.dragging:
+            distance = event.globalPos() - self.press_global_pos
+            if distance.manhattanLength() < QApplication.startDragDistance():
+                event.accept()
+                return
+            self.dragging = True
+            self.frame.start_drag(self.press_global_pos)
+
+        self.frame.drag_move(event.globalPos())
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.pressed:
+            if self.dragging:
+                self.frame.finish_drag()
+            self.pressed = False
+            self.dragging = False
+            self.press_global_pos = None
+            self.setCursor(Qt.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class DashboardWidgetFrame(QFrame):
+    def __init__(
+        self,
+        title,
+        key,
+        drag_start_callback,
+        drag_move_callback,
+        drag_finish_callback,
+        remove_callback,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.key = key
+        self.drag_start_callback = drag_start_callback
+        self.drag_move_callback = drag_move_callback
+        self.drag_finish_callback = drag_finish_callback
+        self.remove_callback = remove_callback
+        self.edit_mode = False
+        self.setObjectName("DashboardSection")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 16)
+        root.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        root.addLayout(header)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
+        title_label.setWordWrap(True)
+        header.addWidget(title_label, 1)
+
+        self.remove_button = DashboardIconButton("remove", "Fjern widget", parent=self)
+        self.remove_button.clicked.connect(lambda checked=False: self.remove_callback(self.key))
+        header.addWidget(self.remove_button)
+
+        self.drag_handle = DashboardDragHandle(self)
+        header.addWidget(self.drag_handle, 0, Qt.AlignTop)
+
+        self.content_layout = QVBoxLayout()
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(12)
+        root.addLayout(self.content_layout)
+
+        self.set_reorder_mode(False)
+
+    def addWidget(self, widget, stretch=0):
+        self.content_layout.addWidget(widget, stretch)
+
+    def addLayout(self, layout, stretch=0):
+        self.content_layout.addLayout(layout, stretch)
+
+    def set_reorder_mode(self, enabled):
+        self.edit_mode = enabled
+        self.drag_handle.setVisible(enabled)
+        self.remove_button.setVisible(enabled)
+
+    def set_drag_active(self, active):
+        if active:
+            self.setStyleSheet(
+                """
+                QFrame#DashboardSection {
+                    background: #f8fafc;
+                    border: 1px solid #1f8a70;
+                    border-radius: 8px;
+                }
+                """
+            )
+        else:
+            self.setStyleSheet("")
+
+    def start_drag(self, global_pos):
+        self.drag_start_callback(self.key, global_pos)
+
+    def drag_move(self, global_pos):
+        self.drag_move_callback(self.key, global_pos)
+
+    def finish_drag(self):
+        self.drag_finish_callback(self.key)
+
+
+class DashboardWidgetPreview(QFrame):
+    def __init__(self, key, title, select_callback, parent=None):
+        super().__init__(parent)
+        self.key = key
+        self.select_callback = select_callback
+        self.normal_margin = 8
+        self.hover_margin = 0
+        self.hover_height = 136
+        self.setObjectName("DashboardWidgetPreviewSlot")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(self.hover_height)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        slot_layout = QVBoxLayout(self)
+        slot_layout.setSpacing(0)
+        self.slot_layout = slot_layout
+
+        self.card = QFrame(self)
+        self.card.setObjectName("DashboardWidgetPreviewCard")
+        slot_layout.addWidget(self.card)
+
+        self.root = QVBoxLayout(self.card)
+        self.root.setContentsMargins(14, 12, 14, 12)
+        self.root.setSpacing(8)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #111827; font-size: 11pt; font-weight: 850;")
+        self.root.addWidget(title_label)
+
+        self.preview_layout = QVBoxLayout()
+        self.preview_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_layout.setSpacing(6)
+        self.root.addLayout(self.preview_layout)
+        self._build_preview()
+        self._set_hovered(False)
+
+    def enterEvent(self, event):
+        self._set_hovered(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._set_hovered(False)
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.select_callback(self.key)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _set_hovered(self, hovered):
+        margin = self.hover_margin if hovered else self.normal_margin
+        self.slot_layout.setContentsMargins(margin, margin, margin, margin)
+        self.setStyleSheet(
+            f"""
+            QFrame#DashboardWidgetPreviewSlot {{
+                background: transparent;
+                border: 0;
+            }}
+            QFrame#DashboardWidgetPreviewCard {{
+                background: {'#f8fffc' if hovered else '#ffffff'};
+                border: 1px solid {'#1f8a70' if hovered else '#dde3ea'};
+                border-radius: 8px;
+            }}
+            QFrame#DashboardWidgetPreviewCard QLabel {{
+                border: 0;
+                background: transparent;
+            }}
+            """
+        )
+
+    def _build_preview(self):
+        if self.key == "goal":
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(self._pill("NÅET", "#16a34a"))
+            row.addWidget(self._text_block("2.400 / 2.000 kr.", "Sidste periode vist ved siden af"), 1)
+            self.preview_layout.addLayout(row)
+        elif self.key == "progress":
+            self.preview_layout.addWidget(self._bar("Periodens forløb", 64))
+            self.preview_layout.addWidget(self._small_text("4 vagter · 3.200 kr. brutto"))
+        elif self.key == "process":
+            self.preview_layout.addLayout(self._metric_row([("Netto", "3.600"), ("Rådighed", "1.850"), ("Timer", "24,5")]))
+        elif self.key == "estimates":
+            self.preview_layout.addLayout(self._metric_row([("Netto", "5.900"), ("Rådighed", "2.150"), ("Timer", "38")]))
+        elif self.key == "stats":
+            self.preview_layout.addLayout(self._metric_row([("Snit", "720"), ("Uge", "1.450"), ("I alt", "18.400")]))
+        elif self.key == "breakdown":
+            self.preview_layout.addWidget(self._mini_row("AM-bidrag", "-288 kr."))
+            self.preview_layout.addWidget(self._mini_row("Netto løn", "3.312 kr."))
+        elif self.key == "recent":
+            self.preview_layout.addWidget(self._mini_row("05-05-2026", "6 t. · 900 kr."))
+            self.preview_layout.addWidget(self._mini_row("03-05-2026", "4 t. · 600 kr."))
+
+    def _metric_row(self, items):
+        row = QHBoxLayout()
+        row.setSpacing(7)
+        for title, value in items:
+            cell = QFrame()
+            cell.setStyleSheet("background: #f8fafc; border: 1px solid #e3e8ef; border-radius: 6px;")
+            layout = QVBoxLayout(cell)
+            layout.setContentsMargins(8, 6, 8, 6)
+            layout.setSpacing(1)
+            title_label = QLabel(title)
+            title_label.setStyleSheet("color: #64748b; font-size: 8pt; font-weight: 800;")
+            value_label = QLabel(value)
+            value_label.setStyleSheet("color: #111827; font-size: 11pt; font-weight: 850;")
+            layout.addWidget(title_label)
+            layout.addWidget(value_label)
+            row.addWidget(cell)
+        return row
+
+    def _bar(self, label, value):
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._small_text(label))
+        track = QFrame()
+        track.setFixedHeight(9)
+        track.setStyleSheet("background: #e2e8f0; border: 0; border-radius: 4px;")
+        track_layout = QHBoxLayout(track)
+        track_layout.setContentsMargins(0, 0, 0, 0)
+        fill = QFrame()
+        fill.setStyleSheet("background: #1f8a70; border: 0; border-radius: 4px;")
+        track_layout.addWidget(fill, max(1, value))
+        track_layout.addStretch(max(1, 100 - value))
+        layout.addWidget(track)
+        return wrapper
+
+    def _pill(self, text, color):
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignCenter)
+        label.setFixedWidth(64)
+        label.setStyleSheet(
+            f"background: {color}; color: white; border: 0; border-radius: 12px; padding: 5px; font-size: 8pt; font-weight: 850;"
+        )
+        return label
+
+    def _text_block(self, value, detail):
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+        value_label = QLabel(value)
+        value_label.setStyleSheet("color: #111827; font-size: 11pt; font-weight: 850;")
+        layout.addWidget(value_label)
+        layout.addWidget(self._small_text(detail))
+        return wrapper
+
+    def _small_text(self, text):
+        label = QLabel(text)
+        label.setStyleSheet("color: #64748b; font-size: 8.5pt;")
+        return label
+
+    def _mini_row(self, left, right):
+        row = QFrame()
+        row.setStyleSheet("background: #f8fafc; border: 1px solid #e3e8ef; border-radius: 6px;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 5, 8, 5)
+        left_label = QLabel(left)
+        left_label.setStyleSheet("color: #334155; font-size: 8.5pt; font-weight: 750;")
+        right_label = QLabel(right)
+        right_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        right_label.setStyleSheet("color: #111827; font-size: 8.5pt; font-weight: 850;")
+        layout.addWidget(left_label, 1)
+        layout.addWidget(right_label, 1)
+        return row
+
+
+class DashboardAddWidgetDialog(QDialog):
+    def __init__(self, parent, options):
+        super().__init__(parent)
+        self.selected_key = None
+        self.setModal(True)
+        self.setWindowTitle("Tilføj widget")
+        self.setWindowIcon(app_icon())
+        self.setMinimumWidth(500)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        if not options:
+            empty_label = QLabel("Der er ikke flere widgets at tilføje.")
+            empty_label.setWordWrap(True)
+            empty_label.setAlignment(Qt.AlignCenter)
+            empty_label.setStyleSheet("color: #64748b; padding: 26px;")
+            layout.addWidget(empty_label)
+        else:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setMaximumHeight(600)
+
+            body = QWidget()
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 0, 0, 0)
+            body_layout.setSpacing(10)
+            for key, title in options:
+                preview = DashboardWidgetPreview(key, title, self._select, self)
+                body_layout.addWidget(preview)
+            body_layout.addStretch()
+            scroll.setWidget(body)
+            layout.addWidget(scroll)
+
+        layout.addStretch()
+
+        cancel_button = QPushButton("Annuller")
+        cancel_button.setObjectName("SecondaryButton")
+        cancel_button.setCursor(Qt.PointingHandCursor)
+        cancel_button.clicked.connect(self.reject)
+        layout.addWidget(cancel_button)
+
+    def _select(self, key):
+        self.selected_key = key
+        self.accept()
 
 
 class GoalStatusCard(QWidget):
@@ -1180,7 +1650,7 @@ class GoalStatusCard(QWidget):
 
 
 class GoalHeaderWidget(QWidget):
-    def __init__(self):
+    def __init__(self, show_title=True):
         super().__init__()
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
@@ -1192,9 +1662,10 @@ class GoalHeaderWidget(QWidget):
         top.setSpacing(12)
         root.addLayout(top)
 
-        title = QLabel("Rådighedsmål")
-        title.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
-        top.addWidget(title)
+        if show_title:
+            title = QLabel("Rådighedsmål")
+            title.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
+            top.addWidget(title)
 
         self.status_pill = QLabel()
         self.status_pill.setAlignment(Qt.AlignCenter)
@@ -1571,25 +2042,57 @@ class DashboardPage(BasePage):
         )
         self.root.setAlignment(Qt.AlignTop)
 
-        self.goal_card = GoalHeaderWidget()
-        self.root.addWidget(self.goal_card)
+        self.widget_order = []
+        self.dashboard_widgets = {}
+        self.dragged_widget_key = None
+        self.drag_last_global_pos = None
+        self.drag_ghost = None
+        self.drag_ghost_offset = None
+        self.drag_scroll_delta = 0
+        self.drag_autoscroll_timer = QTimer(self)
+        self.drag_autoscroll_timer.setInterval(16)
+        self.drag_autoscroll_timer.timeout.connect(self._auto_scroll_drag)
 
-        progress_panel, progress_layout = make_dashboard_panel("Forløb")
-        progress_layout.setSpacing(12)
+        reorder_toolbar = QHBoxLayout()
+        reorder_toolbar.setContentsMargins(0, 0, 0, 0)
+        reorder_toolbar.setSpacing(8)
+        self.root.addLayout(reorder_toolbar)
+
+        reorder_toolbar.addStretch()
+
+        self.add_widget_button = DashboardIconButton("add", "Tilføj widget", parent=self)
+        self.add_widget_button.clicked.connect(self._show_add_widget_dialog)
+        self.add_widget_button.hide()
+        reorder_toolbar.addWidget(self.add_widget_button, 0, Qt.AlignRight)
+
+        self.reorder_button = DashboardIconButton("widgets", "Rediger widgets", checkable=True, parent=self)
+        self.reorder_button.toggled.connect(self._set_reorder_mode)
+        reorder_toolbar.addWidget(self.reorder_button, 0, Qt.AlignRight)
+
+        self.dashboard_layout = QVBoxLayout()
+        self.dashboard_layout.setContentsMargins(0, 0, 0, 0)
+        self.dashboard_layout.setSpacing(16)
+        self.root.addLayout(self.dashboard_layout)
+        self.drop_indicator = DashboardDropIndicator(self.page_body)
+
+        goal_panel = self._make_widget_frame("Rådighedsmål", "goal")
+        self.goal_card = GoalHeaderWidget(show_title=False)
+        goal_panel.addWidget(self.goal_card)
+        self.dashboard_widgets["goal"] = goal_panel
+
+        progress_panel = self._make_widget_frame("Forløb", "progress")
         self.period_progress = PeriodProgressWidget()
         self.progress_detail = QLabel()
         self.progress_detail.setObjectName("PageSubtitle")
         self.progress_detail.setWordWrap(True)
-        progress_layout.addWidget(self.period_progress)
-        progress_layout.addWidget(self.progress_detail)
-        self.root.addWidget(progress_panel)
+        progress_panel.addWidget(self.period_progress)
+        progress_panel.addWidget(self.progress_detail)
+        self.dashboard_widgets["progress"] = progress_panel
 
-        metrics_panel, metrics_layout = make_dashboard_panel("")
-        metrics_layout.setSpacing(14)
-        self.root.addWidget(metrics_panel)
-
-        self.summary_strip = DashboardMetricStrip("Process", columns=3, embedded=True)
-        metrics_layout.addWidget(self.summary_strip)
+        process_panel = self._make_widget_frame("Process", "process")
+        self.summary_strip = DashboardMetricStrip("", columns=3, embedded=True)
+        process_panel.addWidget(self.summary_strip)
+        self.dashboard_widgets["process"] = process_panel
 
         self.net_card = DashboardMetricItem("Netto løn", accent="#1f8a70")
         self.total_card = DashboardMetricItem("Total indkomst", accent="#2563eb")
@@ -1609,9 +2112,10 @@ class DashboardPage(BasePage):
         for card in self.summary_cards:
             self.summary_strip.add_item(card)
 
-        metrics_layout.addWidget(make_dashboard_separator())
-        self.estimate_strip = DashboardMetricStrip("Estimater", columns=3, embedded=True)
-        metrics_layout.addWidget(self.estimate_strip)
+        estimate_panel = self._make_widget_frame("Estimater", "estimates")
+        self.estimate_strip = DashboardMetricStrip("", columns=3, embedded=True)
+        estimate_panel.addWidget(self.estimate_strip)
+        self.dashboard_widgets["estimates"] = estimate_panel
         self.estimate_net_card = DashboardMetricItem("Netto løn", accent="#1f8a70")
         self.estimate_total_card = DashboardMetricItem("Total indkomst", accent="#2563eb")
         self.estimate_available_card = DashboardMetricItem("Til rådighed", accent="#d97706")
@@ -1625,9 +2129,10 @@ class DashboardPage(BasePage):
         for card in self.estimate_cards:
             self.estimate_strip.add_item(card)
 
-        metrics_layout.addWidget(make_dashboard_separator())
-        self.stats_strip = DashboardMetricStrip("Statistik (Ikke kun for denne periode)", columns=3, embedded=True)
-        metrics_layout.addWidget(self.stats_strip)
+        stats_panel = self._make_widget_frame("Statistik", "stats")
+        self.stats_strip = DashboardMetricStrip("", columns=3, embedded=True)
+        stats_panel.addWidget(self.stats_strip)
+        self.dashboard_widgets["stats"] = stats_panel
         self.stat_average_card = DashboardMetricItem("Snit pr. vagt", accent="#475569")
         self.stat_week_card = DashboardMetricItem("Snit pr. uge", accent="#2563eb")
         self.stat_total_net_card = DashboardMetricItem("Løn i alt", accent="#1f8a70")
@@ -1635,23 +2140,268 @@ class DashboardPage(BasePage):
         for card in self.stats_cards:
             self.stats_strip.add_item(card)
 
-        lower = QHBoxLayout()
-        lower.setSpacing(14)
-        self.root.addLayout(lower)
-
-        breakdown_panel, breakdown_layout = make_dashboard_panel("Lønberegning")
+        breakdown_panel = self._make_widget_frame("Lønberegning", "breakdown")
         self.breakdown_table = QTableWidget()
         setup_table(self.breakdown_table, ["Post", "Beløb"])
-        breakdown_layout.addWidget(self.breakdown_table)
-        lower.addWidget(breakdown_panel, 2, Qt.AlignTop)
+        breakdown_panel.addWidget(self.breakdown_table)
+        self.dashboard_widgets["breakdown"] = breakdown_panel
 
-        recent_panel, recent_layout = make_dashboard_panel("Vagter i perioden")
+        recent_panel = self._make_widget_frame("Vagter i perioden", "recent")
         self.recent_table = QTableWidget()
         setup_table(self.recent_table, ["Dato", "Timer", "Pause", "Brutto"])
-        recent_layout.addWidget(self.recent_table)
-        lower.addWidget(recent_panel, 3, Qt.AlignTop)
+        recent_panel.addWidget(self.recent_table)
+        self.dashboard_widgets["recent"] = recent_panel
+
+        self._apply_widget_order()
+
+    def _make_widget_frame(self, title, key):
+        return DashboardWidgetFrame(
+            title,
+            key,
+            self._start_widget_drag,
+            self._drag_widget,
+            self._finish_widget_drag,
+            self._remove_widget,
+            parent=self.page_body,
+        )
+
+    def _apply_widget_order(self):
+        self.widget_order = [
+            key
+            for key in dashboard_widget_order(self.settings)
+            if key in self.dashboard_widgets
+        ]
+        self._render_widget_order()
+
+    def _render_widget_order(self):
+        scroll_value = self.scroll_area.verticalScrollBar().value()
+        edit_mode = self.reorder_button.isChecked()
+        dragged_key = self.dragged_widget_key
+        visible_order = [key for key in self.widget_order if key != dragged_key]
+        drop_index = self.widget_order.index(dragged_key) if dragged_key in self.widget_order else None
+
+        for widget in self.dashboard_widgets.values():
+            self.dashboard_layout.removeWidget(widget)
+            widget.setVisible(False)
+        self.dashboard_layout.removeWidget(self.drop_indicator)
+        self.drop_indicator.hide()
+
+        for index, key in enumerate(visible_order):
+            if drop_index == index:
+                self.dashboard_layout.addWidget(self.drop_indicator)
+                self.drop_indicator.show()
+            widget = self.dashboard_widgets[key]
+            widget.set_reorder_mode(edit_mode)
+            self.dashboard_layout.addWidget(widget)
+            widget.setVisible(True)
+
+        if drop_index == len(visible_order):
+            self.dashboard_layout.addWidget(self.drop_indicator)
+            self.drop_indicator.show()
+
+        self._update_add_widget_button()
+        self._restore_scroll_position(scroll_value)
+
+    def _restore_scroll_position(self, value):
+        def restore():
+            bar = self.scroll_area.verticalScrollBar()
+            bar.setValue(max(bar.minimum(), min(value, bar.maximum())))
+
+        restore()
+        QTimer.singleShot(0, restore)
+
+    def _set_reorder_mode(self, enabled):
+        for widget in self.dashboard_widgets.values():
+            widget.set_reorder_mode(enabled)
+        self._update_add_widget_button()
+
+    def _hidden_widget_options(self):
+        return [
+            (key, DASHBOARD_WIDGET_TITLES[key])
+            for key in DASHBOARD_DEFAULT_WIDGET_ORDER
+            if key not in self.widget_order
+        ]
+
+    def _update_add_widget_button(self):
+        self.add_widget_button.setVisible(self.reorder_button.isChecked())
+        self.add_widget_button.setEnabled(True)
+
+    def _show_add_widget_dialog(self):
+        hidden_options = self._hidden_widget_options()
+        dialog = DashboardAddWidgetDialog(self, hidden_options)
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_key:
+            self._add_widget(dialog.selected_key)
+
+    def _add_widget(self, key):
+        if key not in DASHBOARD_DEFAULT_WIDGET_ORDER or key in self.widget_order:
+            return
+
+        self.widget_order.insert(0, key)
+        self._save_widget_order()
+        self._render_widget_order()
+
+    def _start_widget_drag(self, key, global_pos):
+        if not self.reorder_button.isChecked() or key not in self.widget_order:
+            return
+
+        self.dragged_widget_key = key
+        self.drag_last_global_pos = global_pos
+        self._create_drag_ghost(key, global_pos)
+        self._render_widget_order()
+        self._update_drag_order(global_pos)
+        self._update_auto_scroll(global_pos)
+
+    def _drag_widget(self, key, global_pos):
+        if key != self.dragged_widget_key:
+            return
+
+        self.drag_last_global_pos = global_pos
+        self._move_drag_ghost(global_pos)
+        self._update_drag_order(global_pos)
+        self._update_auto_scroll(global_pos)
+
+    def _finish_widget_drag(self, key):
+        if key != self.dragged_widget_key:
+            return
+
+        self._stop_auto_scroll()
+        self._clear_drag_ghost()
+        self.dragged_widget_key = None
+        self.drag_last_global_pos = None
+        self._save_widget_order()
+        self._render_widget_order()
+
+    def _update_drag_order(self, global_pos):
+        key = self.dragged_widget_key
+        if key not in self.widget_order:
+            return
+
+        target_index = self._drag_target_index(global_pos)
+        reordered = [widget_key for widget_key in self.widget_order if widget_key != key]
+        target_index = max(0, min(target_index, len(reordered)))
+        reordered.insert(target_index, key)
+        if reordered == self.widget_order:
+            return
+
+        self.widget_order = reordered
+        self._render_widget_order()
+
+    def _create_drag_ghost(self, key, global_pos):
+        self._clear_drag_ghost()
+        widget = self.dashboard_widgets[key]
+        pixmap = widget.grab()
+        if pixmap.isNull():
+            return
+
+        ghost_pixmap = QPixmap(pixmap.size())
+        ghost_pixmap.fill(Qt.transparent)
+        painter = QPainter(ghost_pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setOpacity(0.88)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.setOpacity(1)
+        painter.setPen(QPen(QColor("#1f8a70"), 2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(QRectF(1, 1, pixmap.width() - 2, pixmap.height() - 2), 8, 8)
+        painter.end()
+
+        self.drag_ghost_offset = global_pos - widget.mapToGlobal(widget.rect().topLeft())
+        ghost_parent = self.window if isinstance(self.window, QWidget) else self
+        self.drag_ghost = QLabel(ghost_parent)
+        self.drag_ghost.setPixmap(ghost_pixmap)
+        self.drag_ghost.setFixedSize(ghost_pixmap.size())
+        self.drag_ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._move_drag_ghost(global_pos)
+        self.drag_ghost.show()
+        self.drag_ghost.raise_()
+
+    def _move_drag_ghost(self, global_pos):
+        if self.drag_ghost is None or self.drag_ghost_offset is None:
+            return
+
+        top_left_global = global_pos - self.drag_ghost_offset
+        parent = self.drag_ghost.parentWidget()
+        self.drag_ghost.move(parent.mapFromGlobal(top_left_global))
+        self.drag_ghost.raise_()
+
+    def _clear_drag_ghost(self):
+        if self.drag_ghost is not None:
+            self.drag_ghost.hide()
+            self.drag_ghost.deleteLater()
+        self.drag_ghost = None
+        self.drag_ghost_offset = None
+
+    def _drag_target_index(self, global_pos):
+        cursor_y = self.page_body.mapFromGlobal(global_pos).y()
+        target_index = 0
+        for key in self.widget_order:
+            if key == self.dragged_widget_key:
+                continue
+            widget = self.dashboard_widgets[key]
+            center_y = widget.mapTo(self.page_body, widget.rect().center()).y()
+            if cursor_y > center_y:
+                target_index += 1
+        return target_index
+
+    def _update_auto_scroll(self, global_pos):
+        viewport = self.scroll_area.viewport()
+        cursor_pos = viewport.mapFromGlobal(global_pos)
+        threshold = 72
+        max_delta = 22
+        delta = 0
+
+        if cursor_pos.y() < threshold:
+            distance = threshold - max(cursor_pos.y(), 0)
+            delta = -max(3, int(max_delta * min(distance / threshold, 1)))
+        elif cursor_pos.y() > viewport.height() - threshold:
+            distance = threshold - max(viewport.height() - cursor_pos.y(), 0)
+            delta = max(3, int(max_delta * min(distance / threshold, 1)))
+
+        self.drag_scroll_delta = delta
+        if delta and not self.drag_autoscroll_timer.isActive():
+            self.drag_autoscroll_timer.start()
+        elif not delta:
+            self._stop_auto_scroll()
+
+    def _auto_scroll_drag(self):
+        if self.dragged_widget_key is None or not self.drag_scroll_delta:
+            self._stop_auto_scroll()
+            return
+
+        bar = self.scroll_area.verticalScrollBar()
+        previous_value = bar.value()
+        bar.setValue(previous_value + self.drag_scroll_delta)
+        if bar.value() == previous_value:
+            self._stop_auto_scroll()
+            return
+
+        if self.drag_last_global_pos is not None:
+            self._update_drag_order(self.drag_last_global_pos)
+
+    def _stop_auto_scroll(self):
+        self.drag_scroll_delta = 0
+        if self.drag_autoscroll_timer.isActive():
+            self.drag_autoscroll_timer.stop()
+
+    def _remove_widget(self, key):
+        if key not in self.widget_order:
+            return
+
+        self.widget_order = [widget_key for widget_key in self.widget_order if widget_key != key]
+        self._save_widget_order()
+        self._render_widget_order()
+
+    def _save_widget_order(self):
+        try:
+            new_settings = dict(self.settings) if isinstance(self.settings, dict) else ft.load_settings()
+            new_settings[DASHBOARD_WIDGET_ORDER_KEY] = list(self.widget_order)
+            ft.save_settings(new_settings)
+            self.window.settings = ft.load_settings()
+        except (OSError, ValueError, TypeError) as error:
+            QMessageBox.warning(self, "Rækkefølge kunne ikke gemmes", str(error))
 
     def refresh(self):
+        self._apply_widget_order()
         if not has_required_settings(self.settings):
             self._show_missing_settings()
             return
@@ -2979,27 +3729,12 @@ class BudgetPage(BasePage):
         )
         self.categories = []
 
-        actual_panel, actual_layout = make_panel("Faktiske tal")
-        actual_grid = QGridLayout()
-        actual_grid.setSpacing(14)
-        actual_layout.addLayout(actual_grid)
-        self.current_income_card = MetricCard("Indkomst nu", accent="#1f8a70")
-        self.current_expenses_card = MetricCard("Samlede udgifter", accent="#2563eb")
-        self.current_remaining_card = MetricCard("Rådighed nu", accent="#d97706")
-        for index, card in enumerate([self.current_income_card, self.current_expenses_card, self.current_remaining_card]):
-            actual_grid.addWidget(card, 0, index)
-        self.root.addWidget(actual_panel)
-
-        estimate_panel, estimate_layout = make_panel("Estimater")
-        estimate_grid = QGridLayout()
-        estimate_grid.setSpacing(14)
-        estimate_layout.addLayout(estimate_grid)
-        self.estimated_income_card = MetricCard("Estimeret indkomst", accent="#1f8a70")
-        self.estimated_expenses_card = MetricCard("Samlede udgifter", accent="#2563eb")
-        self.estimated_remaining_card = MetricCard("Estimeret rådighed", accent="#d97706")
-        for index, card in enumerate([self.estimated_income_card, self.estimated_expenses_card, self.estimated_remaining_card]):
-            estimate_grid.addWidget(card, 0, index)
-        self.root.addWidget(estimate_panel)
+        self.total_expenses_label = QLabel()
+        self.total_expenses_label.setWordWrap(True)
+        self.total_expenses_label.setStyleSheet(
+            "color: #111827; font-size: 26pt; font-weight: 900; padding: 6px 0 10px 0;"
+        )
+        self.root.addWidget(self.total_expenses_label)
 
         table_panel, table_layout = make_panel("Budgetposter")
         self.root.addWidget(table_panel, 1)
@@ -3026,48 +3761,16 @@ class BudgetPage(BasePage):
     def refresh(self):
         self.categories = self._categories_from_settings()
         self._fill_table()
-        self._update_cards()
+        self._update_total_label()
 
     def _categories_from_settings(self):
         return ft.get_budget_categories(self.settings)
 
-    def _current_income(self):
-        if not has_required_settings(self.settings):
-            return None
-        summary = current_period_summary(self.data, self.settings)
-        return summary["netto"] + ft.get_other_income(self.settings)
-
-    def _estimated_income(self):
-        if not has_required_settings(self.settings):
-            return None
-        forecast = ft.calculate_salary_forecast(self.data, self.settings)
-        if not forecast:
-            return None
-        return forecast.get("estimated_total_income")
-
     def _budget_total(self):
         return sum(item["beløb"] for item in self.categories)
 
-    def _update_cards(self):
-        budget_total = self._budget_total()
-        current_income = self._current_income()
-        estimated_income = self._estimated_income()
-        current_remaining = current_income - budget_total if current_income is not None else None
-        estimated_remaining = estimated_income - budget_total if estimated_income is not None else None
-        disposable_goal = ft.get_disposable_income_goal(self.settings)
-
-        self.current_income_card.set_values(format_money(current_income), "Registreret netto + anden indkomst")
-        self.current_expenses_card.set_values(format_money(budget_total), f"{len(self.categories)} budgetposter")
-        self.current_remaining_card.set_values(format_money(current_remaining), "Indkomst nu minus faste udgifter")
-        self.estimated_income_card.set_values(format_money(estimated_income), "For hele lønperioden")
-        self.estimated_expenses_card.set_values(format_money(budget_total), "Samme faste udgifter i estimatet")
-        if estimated_remaining is None:
-            self.estimated_remaining_card.set_values("N/A", f"Mål: {format_money(disposable_goal)}")
-        else:
-            self.estimated_remaining_card.set_values(
-                format_money(estimated_remaining),
-                f"Mål: {format_money(disposable_goal)} | Forskel: {signed_money(estimated_remaining - disposable_goal)}",
-            )
+    def _update_total_label(self):
+        self.total_expenses_label.setText(f"Samlede udgifter: {format_money(self._budget_total())}")
 
     def _fill_table(self):
         self.table.setRowCount(len(self.categories))
