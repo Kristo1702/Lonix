@@ -3,7 +3,7 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 
-from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, QTimer
+from PyQt5.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer
 from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -82,17 +82,24 @@ DASHBOARD_DEFAULT_WIDGET_ORDER = (
     "process",
     "estimates",
     "stats",
+    "budget",
     "breakdown",
     "recent",
 )
+DASHBOARD_AVAILABLE_WIDGET_ORDER = DASHBOARD_DEFAULT_WIDGET_ORDER + (
+    "salary_calculator",
+)
+DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY = "overblik budget widget tilføjet"
 DASHBOARD_WIDGET_TITLES = {
     "goal": "Rådighedsmål",
     "progress": "Forløb",
     "process": "Process",
     "estimates": "Estimater",
     "stats": "Statistik",
+    "budget": "Budget",
     "breakdown": "Lønberegning",
     "recent": "Vagter i perioden",
+    "salary_calculator": "Lønberegner",
 }
 
 MONTH_NAMES = {
@@ -424,10 +431,13 @@ def dashboard_widget_order(settings):
     seen = set()
     order = []
     for key in raw_order:
-        if key not in DASHBOARD_DEFAULT_WIDGET_ORDER or key in seen:
+        if key not in DASHBOARD_AVAILABLE_WIDGET_ORDER or key in seen:
             continue
         seen.add(key)
         order.append(key)
+    if not settings.get(DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY, False) and "budget" not in order:
+        insert_index = order.index("stats") + 1 if "stats" in order else len(order)
+        order.insert(insert_index, "budget")
     return order
 
 
@@ -1451,12 +1461,18 @@ class DashboardWidgetPreview(QFrame):
             self.preview_layout.addLayout(self._metric_row([("Netto", "5.900"), ("Rådighed", "2.150"), ("Timer", "38")]))
         elif self.key == "stats":
             self.preview_layout.addLayout(self._metric_row([("Snit", "720"), ("Uge", "1.450"), ("I alt", "18.400")]))
+        elif self.key == "budget":
+            self.preview_layout.addWidget(self._mini_row("Husleje", "5.200 kr."))
+            self.preview_layout.addWidget(self._mini_row("Abonnementer", "249 kr."))
         elif self.key == "breakdown":
             self.preview_layout.addWidget(self._mini_row("AM-bidrag", "-288 kr."))
             self.preview_layout.addWidget(self._mini_row("Netto løn", "3.312 kr."))
         elif self.key == "recent":
             self.preview_layout.addWidget(self._mini_row("05-05-2026", "6 t. · 900 kr."))
             self.preview_layout.addWidget(self._mini_row("03-05-2026", "4 t. · 600 kr."))
+        elif self.key == "salary_calculator":
+            self.preview_layout.addLayout(self._metric_row([("Brutto", "3.000"), ("Netto", "1.920")]))
+            self.preview_layout.addWidget(self._small_text("Brutto eller timer + timeløn"))
 
     def _metric_row(self, items):
         row = QHBoxLayout()
@@ -1897,6 +1913,220 @@ class PeriodProgressWidget(QWidget):
         )
 
 
+class DashboardBudgetWidget(QWidget):
+    VISIBLE_ROWS = 5
+    ROW_HEIGHT = 32
+    ROW_SPACING = 6
+    CLICK_MOVE_TOLERANCE = 6
+
+    def __init__(self, open_budget_callback):
+        super().__init__()
+        self.open_budget_callback = open_budget_callback
+        self.click_start_global_pos = None
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(10)
+
+        self.total_label = QLabel("Samlede udgifter: 0 kr.")
+        self.total_label.setStyleSheet("color: #111827; font-size: 16pt; font-weight: 900;")
+        root.addWidget(self.total_label)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setMaximumHeight(self._scroll_height(self.VISIBLE_ROWS))
+        self._register_click_target(self.scroll.viewport())
+        root.addWidget(self.scroll)
+
+        self.body = QWidget()
+        self._register_click_target(self.body)
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(self.ROW_SPACING)
+        self.scroll.setWidget(self.body)
+
+    def update_budget(self, categories):
+        clear_layout(self.body_layout)
+        budget_total = sum(item["beløb"] for item in categories)
+        self.total_label.setText(f"Samlede udgifter: {format_money(budget_total)}")
+
+        if not categories:
+            empty = QLabel("Ingen budgetposter endnu.")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet("color: #64748b; background: #f8fafc; border: 1px solid #e3e8ef; border-radius: 7px; padding: 18px;")
+            self._register_click_target(empty)
+            self.body_layout.addWidget(empty)
+            self.scroll.setFixedHeight(64)
+            return
+
+        for category in categories:
+            row = self._row(category["navn"], format_money(category["beløb"]))
+            self.body_layout.addWidget(row)
+        self.body_layout.addStretch()
+
+        self.scroll.setFixedHeight(self._scroll_height(min(self.VISIBLE_ROWS, len(categories))))
+
+    def _scroll_height(self, visible_rows):
+        return (visible_rows * self.ROW_HEIGHT) + max(0, visible_rows - 1) * self.ROW_SPACING + 4
+
+    def _register_click_target(self, widget):
+        widget.setCursor(Qt.PointingHandCursor)
+        widget.setProperty("budgetClickTarget", True)
+        widget.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched.property("budgetClickTarget"):
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self.click_start_global_pos = event.globalPos()
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self._is_click_release(event):
+                    self.open_budget_callback()
+                    return True
+                self.click_start_global_pos = None
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.click_start_global_pos = event.globalPos()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._is_click_release(event):
+            self.open_budget_callback()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _is_click_release(self, event):
+        if self.click_start_global_pos is None:
+            return False
+        moved = (event.globalPos() - self.click_start_global_pos).manhattanLength()
+        self.click_start_global_pos = None
+        return moved <= self.CLICK_MOVE_TOLERANCE
+
+    def _row(self, left, right):
+        row = QFrame()
+        row.setFixedHeight(self.ROW_HEIGHT)
+        self._register_click_target(row)
+        row.setStyleSheet(
+            """
+            QFrame {
+                background: #f8fafc;
+                border: 1px solid #e3e8ef;
+                border-radius: 7px;
+            }
+            QLabel {
+                background: transparent;
+                border: 0;
+            }
+            """
+        )
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(10)
+        left_label = QLabel(left)
+        self._register_click_target(left_label)
+        left_label.setStyleSheet("color: #334155; font-weight: 750;")
+        right_label = QLabel(right)
+        self._register_click_target(right_label)
+        right_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        right_label.setStyleSheet("color: #111827; font-weight: 850;")
+        layout.addWidget(left_label, 1)
+        layout.addWidget(right_label, 0)
+        return row
+
+
+class DashboardSalaryCalculatorWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.settings = {}
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(10)
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        root.addLayout(form)
+
+        self.gross_field = make_text_input(placeholder="Brutto løn")
+        self.hours_field = make_text_input(placeholder="Timer")
+        self.rate_field = make_text_input(placeholder="Timeløn")
+        for field in [self.gross_field, self.hours_field, self.rate_field]:
+            field.textChanged.connect(self._calculate)
+
+        form.addWidget(QLabel("Brutto"), 0, 0)
+        form.addWidget(self.gross_field, 0, 1, 1, 3)
+        form.addWidget(QLabel("Timer"), 1, 0)
+        form.addWidget(self.hours_field, 1, 1)
+        form.addWidget(QLabel("Timeløn"), 1, 2)
+        form.addWidget(self.rate_field, 1, 3)
+
+        self.net_label = QLabel("Netto løn: N/A")
+        self.net_label.setStyleSheet("color: #111827; font-size: 17pt; font-weight: 900;")
+        root.addWidget(self.net_label)
+
+        self.detail_label = QLabel("Brug bruttofeltet eller timer + timeløn.")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet("color: #64748b;")
+        root.addWidget(self.detail_label)
+
+    def set_settings(self, settings):
+        self.settings = settings if isinstance(settings, dict) else {}
+        self._calculate()
+
+    def _calculate(self):
+        if not has_required_settings(self.settings):
+            self.net_label.setText("Netto løn: N/A")
+            self.detail_label.setText("Indstillinger mangler.")
+            return
+
+        try:
+            gross = self._gross_value()
+        except ValueError as error:
+            self.net_label.setText("Netto løn: N/A")
+            self.detail_label.setText(str(error))
+            return
+
+        if gross is None:
+            self.net_label.setText("Netto løn: N/A")
+            self.detail_label.setText("Brug bruttofeltet eller timer + timeløn.")
+            return
+
+        breakdown = ft.calculate_salary_breakdown(
+            gross,
+            self.settings.get("skat", 0),
+            self.settings.get("fradrag", 0),
+            self.settings.get("am bidrag", 0),
+        )
+        self.net_label.setText(f"Netto løn: {format_money(breakdown['netto'])}")
+        self.detail_label.setText(
+            f"Brutto: {format_money(gross)} · Skat: {format_number(float(self.settings.get('skat', 0)) * 100)}%"
+        )
+
+    def _gross_value(self):
+        gross_text = self.gross_field.text().strip()
+        if gross_text:
+            return parse_positive_number(self.gross_field, "Brutto løn", allow_zero=True)
+
+        hours_text = self.hours_field.text().strip()
+        rate_text = self.rate_field.text().strip()
+        if not hours_text and not rate_text:
+            return None
+        if not hours_text or not rate_text:
+            raise ValueError("Udfyld både timer og timeløn.")
+
+        hours = parse_positive_number(self.hours_field, "Timer", allow_zero=True)
+        rate = parse_positive_number(self.rate_field, "Timeløn", allow_zero=True)
+        return hours * rate
+
+
 class LineChart(QWidget):
     def __init__(self):
         super().__init__()
@@ -2140,6 +2370,11 @@ class DashboardPage(BasePage):
         for card in self.stats_cards:
             self.stats_strip.add_item(card)
 
+        budget_panel = self._make_widget_frame("Budget", "budget")
+        self.budget_widget = DashboardBudgetWidget(self._go_to_budget_page)
+        budget_panel.addWidget(self.budget_widget)
+        self.dashboard_widgets["budget"] = budget_panel
+
         breakdown_panel = self._make_widget_frame("Lønberegning", "breakdown")
         self.breakdown_table = QTableWidget()
         setup_table(self.breakdown_table, ["Post", "Beløb"])
@@ -2151,6 +2386,11 @@ class DashboardPage(BasePage):
         setup_table(self.recent_table, ["Dato", "Timer", "Pause", "Brutto"])
         recent_panel.addWidget(self.recent_table)
         self.dashboard_widgets["recent"] = recent_panel
+
+        calculator_panel = self._make_widget_frame("Lønberegner", "salary_calculator")
+        self.salary_calculator_widget = DashboardSalaryCalculatorWidget()
+        calculator_panel.addWidget(self.salary_calculator_widget)
+        self.dashboard_widgets["salary_calculator"] = calculator_panel
 
         self._apply_widget_order()
 
@@ -2218,7 +2458,7 @@ class DashboardPage(BasePage):
     def _hidden_widget_options(self):
         return [
             (key, DASHBOARD_WIDGET_TITLES[key])
-            for key in DASHBOARD_DEFAULT_WIDGET_ORDER
+            for key in DASHBOARD_AVAILABLE_WIDGET_ORDER
             if key not in self.widget_order
         ]
 
@@ -2233,12 +2473,18 @@ class DashboardPage(BasePage):
             self._add_widget(dialog.selected_key)
 
     def _add_widget(self, key):
-        if key not in DASHBOARD_DEFAULT_WIDGET_ORDER or key in self.widget_order:
+        if key not in DASHBOARD_AVAILABLE_WIDGET_ORDER or key in self.widget_order:
             return
 
         self.widget_order.insert(0, key)
         self._save_widget_order()
         self._render_widget_order()
+
+    def _go_to_budget_page(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, BudgetPage):
+                self.window.go_to_page(index)
+                return
 
     def _start_widget_drag(self, key, global_pos):
         if not self.reorder_button.isChecked() or key not in self.widget_order:
@@ -2395,6 +2641,7 @@ class DashboardPage(BasePage):
         try:
             new_settings = dict(self.settings) if isinstance(self.settings, dict) else ft.load_settings()
             new_settings[DASHBOARD_WIDGET_ORDER_KEY] = list(self.widget_order)
+            new_settings[DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY] = True
             ft.save_settings(new_settings)
             self.window.settings = ft.load_settings()
         except (OSError, ValueError, TypeError) as error:
@@ -2402,6 +2649,9 @@ class DashboardPage(BasePage):
 
     def refresh(self):
         self._apply_widget_order()
+        budget_categories = ft.get_budget_categories(self.settings)
+        self.budget_widget.update_budget(budget_categories)
+        self.salary_calculator_widget.set_settings(self.settings)
         if not has_required_settings(self.settings):
             self._show_missing_settings()
             return
@@ -2495,6 +2745,8 @@ class DashboardPage(BasePage):
         self.estimate_strip.set_visible_items(estimate_cards)
 
     def _show_missing_settings(self):
+        self.budget_widget.update_budget(ft.get_budget_categories(self.settings))
+        self.salary_calculator_widget.set_settings(self.settings)
         self._arrange_cards(True)
         for card in [
             self.net_card,
