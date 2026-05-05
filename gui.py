@@ -83,10 +83,11 @@ DASHBOARD_DEFAULT_WIDGET_ORDER = (
     "estimates",
     "stats",
     "budget",
+)
+
+DASHBOARD_AVAILABLE_WIDGET_ORDER = DASHBOARD_DEFAULT_WIDGET_ORDER + (
     "breakdown",
     "recent",
-)
-DASHBOARD_AVAILABLE_WIDGET_ORDER = DASHBOARD_DEFAULT_WIDGET_ORDER + (
     "salary_calculator",
 )
 DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY = "overblik budget widget tilføjet"
@@ -97,7 +98,7 @@ DASHBOARD_WIDGET_TITLES = {
     "estimates": "Estimater",
     "stats": "Statistik",
     "budget": "Budget",
-    "breakdown": "Lønberegning",
+    "breakdown": "Skatteopdeling",
     "recent": "Vagter i perioden",
     "salary_calculator": "Lønberegner",
 }
@@ -129,6 +130,12 @@ QMainWindow, QWidget#Content {
 QWidget#Sidebar {
     background: #1f2933;
 }
+QFrame#SidebarSeparator {
+    background: #4b5563;
+    border: 0;
+    min-height: 1px;
+    max-height: 1px;
+}
 QFrame#BrandPanel {
     background: rgba(255, 255, 255, 0.07);
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -148,9 +155,8 @@ QPushButton#PrimaryNavButton {
     background: transparent;
     color: #f8fafc;
     border: 0;
-    border-left: 3px solid #2dd4bf;
-    border-radius: 0;
-    padding: 11px 14px 11px 11px;
+    border-radius: 7px;
+    padding: 11px 14px;
     text-align: left;
     font-weight: 750;
 }
@@ -158,8 +164,8 @@ QPushButton#PrimaryNavButton:hover {
     background: rgba(255, 255, 255, 0.05);
 }
 QPushButton#PrimaryNavButton:checked {
-    background: rgba(255, 255, 255, 0.07);
-    color: #ffffff;
+    background: #1f8a70;
+    color: white;
 }
 QPushButton#NavButton {
     background: transparent;
@@ -367,9 +373,6 @@ QTabBar::tab {
 QTabBar::tab:selected {
     background: #1f8a70;
     color: white;
-}
-QTabWidget#CalculatorTabs QTabBar::tab {
-    min-width: 128px;
 }
 QScrollBar:vertical {
     background: transparent;
@@ -1917,33 +1920,39 @@ class DashboardBudgetWidget(QWidget):
     VISIBLE_ROWS = 5
     ROW_HEIGHT = 32
     ROW_SPACING = 6
-    CLICK_MOVE_TOLERANCE = 6
 
     def __init__(self, open_budget_callback):
         super().__init__()
         self.open_budget_callback = open_budget_callback
-        self.click_start_global_pos = None
-        self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(10)
+        root.addLayout(header)
+
         self.total_label = QLabel("Samlede udgifter: 0 kr.")
         self.total_label.setStyleSheet("color: #111827; font-size: 16pt; font-weight: 900;")
-        root.addWidget(self.total_label)
+        header.addWidget(self.total_label, 1)
+
+        self.open_budget_button = QPushButton("Gå til budget")
+        self.open_budget_button.setObjectName("InlineButton")
+        self.open_budget_button.setCursor(Qt.PointingHandCursor)
+        self.open_budget_button.clicked.connect(self.open_budget_callback)
+        header.addWidget(self.open_budget_button, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setMaximumHeight(self._scroll_height(self.VISIBLE_ROWS))
-        self._register_click_target(self.scroll.viewport())
         root.addWidget(self.scroll)
 
         self.body = QWidget()
-        self._register_click_target(self.body)
         self.body_layout = QVBoxLayout(self.body)
         self.body_layout.setContentsMargins(0, 0, 0, 0)
         self.body_layout.setSpacing(self.ROW_SPACING)
@@ -1957,8 +1966,10 @@ class DashboardBudgetWidget(QWidget):
         if not categories:
             empty = QLabel("Ingen budgetposter endnu.")
             empty.setAlignment(Qt.AlignCenter)
-            empty.setStyleSheet("color: #64748b; background: #f8fafc; border: 1px solid #e3e8ef; border-radius: 7px; padding: 18px;")
-            self._register_click_target(empty)
+            empty.setStyleSheet(
+                "color: #64748b; background: #f8fafc; border: 1px solid #e3e8ef; "
+                "border-radius: 7px; padding: 18px;"
+            )
             self.body_layout.addWidget(empty)
             self.scroll.setFixedHeight(64)
             return
@@ -1966,52 +1977,16 @@ class DashboardBudgetWidget(QWidget):
         for category in categories:
             row = self._row(category["navn"], format_money(category["beløb"]))
             self.body_layout.addWidget(row)
-        self.body_layout.addStretch()
 
+        self.body_layout.addStretch()
         self.scroll.setFixedHeight(self._scroll_height(min(self.VISIBLE_ROWS, len(categories))))
 
     def _scroll_height(self, visible_rows):
         return (visible_rows * self.ROW_HEIGHT) + max(0, visible_rows - 1) * self.ROW_SPACING + 4
 
-    def _register_click_target(self, widget):
-        widget.setCursor(Qt.PointingHandCursor)
-        widget.setProperty("budgetClickTarget", True)
-        widget.installEventFilter(self)
-
-    def eventFilter(self, watched, event):
-        if watched.property("budgetClickTarget"):
-            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-                self.click_start_global_pos = event.globalPos()
-            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
-                if self._is_click_release(event):
-                    self.open_budget_callback()
-                    return True
-                self.click_start_global_pos = None
-        return super().eventFilter(watched, event)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.click_start_global_pos = event.globalPos()
-        super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self._is_click_release(event):
-            self.open_budget_callback()
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def _is_click_release(self, event):
-        if self.click_start_global_pos is None:
-            return False
-        moved = (event.globalPos() - self.click_start_global_pos).manhattanLength()
-        self.click_start_global_pos = None
-        return moved <= self.CLICK_MOVE_TOLERANCE
-
     def _row(self, left, right):
         row = QFrame()
         row.setFixedHeight(self.ROW_HEIGHT)
-        self._register_click_target(row)
         row.setStyleSheet(
             """
             QFrame {
@@ -2025,20 +2000,23 @@ class DashboardBudgetWidget(QWidget):
             }
             """
         )
+
         layout = QHBoxLayout(row)
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(10)
+
         left_label = QLabel(left)
-        self._register_click_target(left_label)
         left_label.setStyleSheet("color: #334155; font-weight: 750;")
+
         right_label = QLabel(right)
-        self._register_click_target(right_label)
         right_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         right_label.setStyleSheet("color: #111827; font-weight: 850;")
+
         layout.addWidget(left_label, 1)
         layout.addWidget(right_label, 0)
-        return row
 
+        return row
+    
 
 class DashboardSalaryCalculatorWidget(QWidget):
     def __init__(self):
@@ -2375,7 +2353,7 @@ class DashboardPage(BasePage):
         budget_panel.addWidget(self.budget_widget)
         self.dashboard_widgets["budget"] = budget_panel
 
-        breakdown_panel = self._make_widget_frame("Lønberegning", "breakdown")
+        breakdown_panel = self._make_widget_frame("Skatteopdeling", "breakdown")
         self.breakdown_table = QTableWidget()
         setup_table(self.breakdown_table, ["Post", "Beløb"])
         breakdown_panel.addWidget(self.breakdown_table)
@@ -3050,14 +3028,32 @@ class CalculatorPage(BasePage):
         self.root.addLayout(content, 1)
 
         input_panel, input_layout = make_panel("Input")
-        input_panel.setMinimumWidth(380)
+        input_panel.setMinimumWidth(430)
         content.addWidget(input_panel, 0)
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("CalculatorTabs")
         self.tabs.setUsesScrollButtons(False)
-        self.tabs.tabBar().setExpanding(True)
+        self.tabs.tabBar().setExpanding(False)
         input_layout.addWidget(self.tabs)
+
+        calculator_tab_bar = self.tabs.tabBar()
+        calculator_tab_bar.setStyleSheet("""
+        QTabBar::tab {
+            background: #e7ecef;
+            border-radius: 7px;
+            padding: 10px 18px;
+            margin-right: 8px;
+            min-width: 130px;
+            color: #42505f;
+            font-weight: 700;
+        }
+
+        QTabBar::tab:selected {
+            background: #1f8a70;
+            color: white;
+        }
+        """)
 
         brutto_tab = QWidget()
         brutto_form = QFormLayout(brutto_tab)
@@ -3076,8 +3072,7 @@ class CalculatorPage(BasePage):
         self.calc_rate_field.textChanged.connect(self._calculate)
         hours_form.addRow("Timer", self.calc_hours_field)
         hours_form.addRow("Timeløn", self.calc_rate_field)
-        self.tabs.addTab(hours_tab, "Timer + timeløn")
-        self.tabs.tabBar().setMinimumWidth(290)
+        self.tabs.addTab(hours_tab, "Timer")
         self.tabs.currentChanged.connect(self._calculate)
 
         tax_form = QFormLayout()
@@ -4188,7 +4183,7 @@ class TutorialDialog(QDialog):
 
         self.steps = [
             {
-                "key": "Velkommen!",
+                "key": "welcome",
                 "title": "Velkommen til Lønix",
                 "text": (
                     "Denne korte tutorial hjælper dig med at sætte programmet op.\n\n"
@@ -4202,8 +4197,10 @@ class TutorialDialog(QDialog):
                 "title": "Overblik",
                 "text": (
                     "Overblik viser den aktuelle lønperiode.\n\n"
-                    "Her ser du registreret netto løn, timer, brutto løn, rådighedsbeløb efter budget "
-                    "og estimater for resten af perioden."
+                    "Siden består af widgets, som viser forskellige dele af din økonomi: løn, timer, budget, "
+                    "rådighedsbeløb, estimater og statistik.\n\n"
+                    "Du kan personliggøre Overblik ved at trykke på widget-knappen øverst til højre. "
+                    "Her kan du flytte, fjerne og tilføje widgets, så forsiden passer til det du bruger mest."
                 ),
             },
             {
@@ -4285,7 +4282,7 @@ class TutorialDialog(QDialog):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 22, 24, 18)
-        root.setSpacing(14)
+        root.setSpacing(10)
 
         header = QHBoxLayout()
         header.setSpacing(12)
@@ -4301,7 +4298,7 @@ class TutorialDialog(QDialog):
         self.body_label = QLabel()
         self.body_label.setObjectName("PageSubtitle")
         self.body_label.setWordWrap(True)
-        self.body_label.setMinimumHeight(82)
+        self.body_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         root.addWidget(self.body_label)
 
         self.visual_frame = QFrame()
@@ -4462,10 +4459,10 @@ class TutorialDialog(QDialog):
 
         if is_setup_step:
             self.visual_frame.hide()
-            self.body_label.setMinimumHeight(48)
+            self.body_label.setMinimumHeight(0)
         else:
             self.visual_frame.show()
-            self.body_label.setMinimumHeight(82)
+            self.body_label.setMinimumHeight(0)
             self.visual_frame.setMinimumHeight(190)
             self.visual_frame.setMaximumHeight(16777215)
             self._set_visual(step["key"])
@@ -4592,7 +4589,7 @@ class TutorialDialog(QDialog):
         self.visual_layout.addWidget(self._mini_bar("Rådighed gennem perioden", 62))
 
     def _visual_overview(self):
-        self._visual_title("Overblik viser status nu og estimater separat")
+        self._visual_title("Overblik består af widgets, du kan tilpasse")
         grid = QGridLayout()
         grid.setSpacing(10)
         grid.addWidget(self._mini_card("Netto løn nu", "3.600 kr.", "#1f8a70"), 0, 0)
@@ -4600,7 +4597,7 @@ class TutorialDialog(QDialog):
         grid.addWidget(self._mini_card("Timer", "24,5 t.", "#7c3aed"), 0, 2)
         self.visual_layout.addLayout(grid)
         self.visual_layout.addWidget(self._mini_bar("Periodens forløb", 40))
-        self.visual_layout.addWidget(self._mini_row("Estimater", "Forventet netto, rådighed og timer"))
+        self.visual_layout.addWidget(self._mini_row("Widgets", "Flyt, fjern og tilføj efter behov", True))
 
     def _visual_entry(self):
         self._visual_title("Vagter registrerer én vagt ad gangen")
@@ -4661,7 +4658,7 @@ class TutorialDialog(QDialog):
         grid = QGridLayout()
         grid.setSpacing(10)
         grid.addWidget(self._mini_card("Bruttoløn", "3.000 kr.", "#2563eb"), 0, 0)
-        grid.addWidget(self._mini_card("Timer + timeløn", "20 t. x 150", "#7c3aed"), 0, 1)
+        grid.addWidget(self._mini_card("Timer", "20 t. x 150", "#7c3aed"), 0, 1)
         grid.addWidget(self._mini_card("Netto", "1.795 kr.", "#1f8a70", "Beregnet ud fra dine satser"), 1, 0, 1, 2)
         self.visual_layout.addLayout(grid)
 
@@ -4811,6 +4808,12 @@ class MainWindow(QMainWindow):
         self.button_group.setExclusive(True)
 
         self._add_page(sidebar_layout, "Overblik", DashboardPage(self), primary=True)
+        overview_separator = QFrame()
+        overview_separator.setObjectName("SidebarSeparator")
+        overview_separator.setFixedHeight(1)
+        sidebar_layout.addSpacing(6)
+        sidebar_layout.addWidget(overview_separator)
+        sidebar_layout.addSpacing(6)
         self._add_page(sidebar_layout, "Vagter", HistoryPage(self))
         self._add_page(sidebar_layout, "Budget", BudgetPage(self))
         self._add_page(sidebar_layout, "Lønsedler", PaymentsPage(self))
