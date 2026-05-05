@@ -1764,7 +1764,7 @@ class PeriodProgressWidget(QWidget):
         self.progress_ratio = 0
         self.hovered_index = None
         self.marker_rects = []
-        self.setMinimumHeight(168)
+        self.setMinimumHeight(184)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
@@ -1789,23 +1789,48 @@ class PeriodProgressWidget(QWidget):
         self.setToolTip(message)
         self.update()
 
+    def _track_geometry(self, rect):
+        track_left = rect.left() + 18
+        track_right = rect.right() - 18
+        track_width = max(1, track_right - track_left)
+        track_y = rect.top() + 104
+        track_height = 18
+        return track_left, track_right, track_width, track_y, track_height
+
+
+    def _x_for_date(self, value, track_left, track_width, total_days):
+        day_index = min(max((value - self.period_start).days, 0), total_days - 1)
+        ratio = day_index / max(1, total_days - 1)
+        return track_left + (track_width * ratio)
+
+
+    def _week_markers(self):
+        if not self.period_start or not self.period_end:
+            return []
+
+        markers = []
+
+        current = self.period_start
+        while current <= self.period_end:
+            # Vis altid periodens første dag som starten på den første viste uge-del.
+            if current == self.period_start or current.weekday() == 0:
+                week_number = current.isocalendar().week
+                markers.append((current, f"Uge {week_number}"))
+            current += timedelta(days=1)
+
+        return markers
+
     def _marker_data(self, rect):
         if not self.period_start or not self.period_end:
             return []
 
         total_days = max(1, (self.period_end - self.period_start).days + 1)
-        track_left = rect.left() + 18
-        track_right = rect.right() - 18
-        track_width = max(1, track_right - track_left)
-        track_y = rect.top() + 92
-        max_brutto = max([row["brutto"] for row in self.rows] or [1])
+        track_left, _, track_width, track_y, _ = self._track_geometry(rect)
         marker_width = max(2.5, min(5, int(track_width / max(total_days, 1) * 0.28)))
 
         markers = []
         for index, row in enumerate(self.rows):
-            day_index = min(max((row["dato"] - self.period_start).days, 0), total_days - 1)
-            ratio = day_index / max(1, total_days - 1)
-            x = track_left + (track_width * ratio)
+            x = self._x_for_date(row["dato"], track_left, track_width, total_days)
             marker = QRectF(x - marker_width / 2, track_y + 3, marker_width, 12)
             markers.append((index, row, marker, x))
         return markers
@@ -1872,26 +1897,60 @@ class PeriodProgressWidget(QWidget):
             f"{len(self.rows)} vagter · {format_money(total_brutto)} brutto",
         )
 
-        track_left = rect.left() + 18
-        track_right = rect.right() - 18
-        track_width = max(1, track_right - track_left)
-        track_y = rect.top() + 92
-        track_height = 18
+        track_left, track_right, track_width, track_y, track_height = self._track_geometry(rect)
 
+        # Ugemarkører
+        week_markers = []
+        painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        for week_date, week_label in self._week_markers():
+            x = self._x_for_date(week_date, track_left, track_width, total_days)
+            week_markers.append((x, week_label))
+
+            painter.setPen(QPen(QColor("#cbd5e1"), 1))
+            painter.drawLine(
+                int(x),
+                int(track_y - 16),
+                int(x),
+                int(track_y + track_height + 4),
+            )
+
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(
+                QRectF(x - 34, track_y - 36, 68, 16),
+                Qt.AlignCenter,
+                week_label,
+            )
+
+        # Progressbar
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor("#e5eaf0"))
         painter.drawRoundedRect(QRectF(track_left, track_y, track_width, track_height), 9, 9)
+
         painter.setBrush(QColor("#1f8a70"))
         painter.drawRoundedRect(QRectF(track_left, track_y, track_width * self.progress_ratio, track_height), 9, 9)
 
+        # I dag-markør
         if self.today:
-            today_index = min(max((self.today - self.period_start).days, 0), total_days - 1)
-            today_x = track_left + (track_width * (today_index / max(1, total_days - 1)))
+            today_x = self._x_for_date(self.today, track_left, track_width, total_days)
+
+            overlaps_week_label = any(abs(today_x - week_x) < 44 for week_x, _ in week_markers)
+            today_label_y = track_y - 54 if overlaps_week_label else track_y - 38
+
             painter.setPen(QPen(QColor("#0f172a"), 2))
-            painter.drawLine(int(today_x), int(track_y - 10), int(today_x), int(track_y + track_height + 18))
+            painter.drawLine(
+                int(today_x),
+                int(track_y - 24),
+                int(today_x),
+                int(track_y + track_height + 10),
+            )
+
             painter.setPen(QColor("#0f172a"))
             painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
-            painter.drawText(QRectF(today_x - 30, track_y + track_height + 18, 60, 18), Qt.AlignCenter, "I dag")
+            painter.drawText(
+                QRectF(today_x - 30, today_label_y, 60, 18),
+                Qt.AlignCenter,
+                "I dag",
+            )
 
         self.marker_rects = self._marker_data(rect)
         for index, row, marker, x in self.marker_rects:
