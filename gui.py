@@ -161,6 +161,53 @@ QLabel#SidebarLabel {
     font-size: 9pt;
     font-weight: 700;
 }
+QComboBox#SidebarJobCombo {
+    background: #111827;
+    color: #f8fafc;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 7px 34px 7px 10px;
+    min-height: 26px;
+    font-weight: 700;
+}
+QComboBox#SidebarJobCombo:hover {
+    background: #162033;
+    border: 1px solid #475569;
+}
+QComboBox#SidebarJobCombo:focus {
+    border: 1px solid #2dd4bf;
+}
+QComboBox#SidebarJobCombo::drop-down {
+    width: 30px;
+    border-left: 1px solid #334155;
+    border-top-right-radius: 8px;
+    border-bottom-right-radius: 8px;
+    background: #182233;
+}
+QComboBox#SidebarJobCombo::drop-down:hover {
+    background: #223047;
+}
+QPushButton#SidebarAddJobButton {
+    background: #2dd4bf;
+    color: #0f172a;
+    border: 1px solid #5eead4;
+    border-radius: 8px;
+    padding: 0;
+    min-width: 38px;
+    max-width: 38px;
+    min-height: 38px;
+    max-height: 38px;
+    font-size: 16pt;
+    font-weight: 900;
+}
+QPushButton#SidebarAddJobButton:hover {
+    background: #5eead4;
+    border: 1px solid #99f6e4;
+}
+QPushButton#SidebarAddJobButton:pressed {
+    background: #14b8a6;
+    border: 1px solid #2dd4bf;
+}
 QLabel#PageTitle {
     font-size: 22pt;
     font-weight: 750;
@@ -262,26 +309,55 @@ QComboBox::down-arrow {
     border: 0;
 }
 QListView#ModernComboPopup {
-    background: #ffffff;
-    border: 1px solid #cfd8e3;
-    border-radius: 8px;
-    padding: 5px;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 7px;
     outline: 0;
+    color: #f8fafc;
     selection-background-color: transparent;
-    selection-color: #111827;
+    selection-color: #f8fafc;
 }
 QListView#ModernComboPopup::item {
-    min-height: 30px;
-    padding: 6px 10px;
-    border-radius: 6px;
-    color: #1f2933;
+    min-height: 34px;
+    padding: 8px 12px;
+    margin: 2px 0;
+    border-radius: 7px;
+    color: #dbeafe;
+    background: transparent;
+    font-weight: 700;
 }
 QListView#ModernComboPopup::item:hover {
-    background: #f1f5f9;
+    background: #1e293b;
+    color: #ffffff;
 }
 QListView#ModernComboPopup::item:selected {
-    background: #e5f3ef;
-    color: #111827;
+    background: #134e4a;
+    color: #ffffff;
+}
+QListView#ModernComboPopup::item:selected:hover {
+    background: #115e59;
+}
+QListView#ModernComboPopup QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 6px 2px 6px 2px;
+}
+QListView#ModernComboPopup QScrollBar::handle:vertical {
+    background: #475569;
+    border-radius: 4px;
+    min-height: 26px;
+}
+QListView#ModernComboPopup QScrollBar::handle:vertical:hover {
+    background: #64748b;
+}
+QListView#ModernComboPopup QScrollBar::add-line:vertical,
+QListView#ModernComboPopup QScrollBar::sub-line:vertical,
+QListView#ModernComboPopup QScrollBar::add-page:vertical,
+QListView#ModernComboPopup QScrollBar::sub-page:vertical {
+    background: transparent;
+    border: 0;
+    height: 0;
 }
 QLineEdit:focus, QComboBox:focus {
     border: 1px solid #1f8a70;
@@ -543,6 +619,42 @@ class ModernComboBox(QComboBox):
         popup.setFocusPolicy(Qt.NoFocus)
         popup.setEditTriggers(QAbstractItemView.NoEditTriggers)
         popup.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+
+        popup.setStyleSheet(
+            """
+            QListView#ModernComboPopup {
+                background: #0f172a;
+                border: 1px solid #334155;
+                border-radius: 10px;
+                padding: 7px;
+                outline: 0;
+                color: #f8fafc;
+                selection-background-color: transparent;
+                selection-color: #f8fafc;
+            }
+            QListView#ModernComboPopup::item {
+                min-height: 34px;
+                padding: 8px 12px;
+                margin: 2px 0;
+                border-radius: 7px;
+                color: #dbeafe;
+                background: transparent;
+                font-weight: 700;
+            }
+            QListView#ModernComboPopup::item:hover {
+                background: #1e293b;
+                color: #ffffff;
+            }
+            QListView#ModernComboPopup::item:selected {
+                background: #134e4a;
+                color: #ffffff;
+            }
+            QListView#ModernComboPopup::item:selected:hover {
+                background: #115e59;
+            }
+            """
+        )
+
         self.setView(popup)
 
     def paintEvent(self, event):
@@ -561,6 +673,7 @@ class ModernComboBox(QComboBox):
 
     def showPopup(self):
         self.view().setMinimumWidth(self.width())
+        self.view().setMaximumWidth(self.width())
         super().showPopup()
         QTimer.singleShot(0, self._move_popup_below_field)
 
@@ -569,9 +682,48 @@ class ModernComboBox(QComboBox):
         if popup is None or not popup.isVisible():
             return
 
-        popup_width = max(self.width(), self.view().sizeHintForColumn(0) + 34)
-        popup.resize(popup_width, popup.height())
+        popup_width = self.width()
+        visible_items = min(self.count(), self.maxVisibleItems())
+        row_height = max(self.view().sizeHintForRow(0), 36)
+        popup_height = (row_height * visible_items) + 18
+
+        popup.resize(popup_width, popup_height)
         popup.move(self.mapToGlobal(self.rect().bottomLeft()) + QPointF(0, 4).toPoint())
+
+
+class SidebarAddButton(QPushButton):
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("SidebarAddJobButton")
+        self.setToolTip("Tilføj profil")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(40, 40)
+        self.setText("")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        if self.isDown():
+            background = QColor("#14b8a6")
+            border = QColor("#2dd4bf")
+        elif self.underMouse():
+            background = QColor("#5eead4")
+            border = QColor("#99f6e4")
+        else:
+            background = QColor("#2dd4bf")
+            border = QColor("#5eead4")
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(border, 1.2))
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 8, 8)
+
+        painter.setPen(QPen(QColor("#0f172a"), 3.0, Qt.SolidLine, Qt.RoundCap))
+        center = rect.center()
+        arm = 6
+        painter.drawLine(QPointF(center.x() - arm, center.y()), QPointF(center.x() + arm, center.y()))
+        painter.drawLine(QPointF(center.x(), center.y() - arm), QPointF(center.x(), center.y() + arm))
 
 
 class VisibleCheckBox(QCheckBox):
@@ -1657,10 +1809,6 @@ class DashboardPage(BasePage):
         lower.addWidget(recent_panel, 3, Qt.AlignTop)
 
     def refresh(self):
-        if getattr(self.window, "is_combined", False):
-            self._show_combined_overview()
-            return
-
         if not has_required_settings(self.settings):
             self._show_missing_settings()
             return
@@ -1731,111 +1879,6 @@ class DashboardPage(BasePage):
         self._update_stats(summary)
         self._fill_breakdown(summary["breakdown"])
         self._fill_recent(summary["rows"])
-
-    def _show_combined_overview(self):
-        contexts = getattr(self.window, "job_contexts", [])
-        if not contexts:
-            self._show_missing_settings()
-            return
-
-        self._arrange_cards(True)
-        today = datetime.now().date()
-        summaries = []
-        recent_rows = []
-        for context in contexts:
-            settings = context["settings"]
-            data = context["data"]
-            if not has_required_settings(settings):
-                continue
-            summary = current_period_summary(data, settings, today)
-            forecast = ft.calculate_salary_forecast(data, settings, today)
-            other_income = ft.get_other_income(settings)
-            budget_expenses = ft.calculate_budget_expenses(settings)
-            for row in summary["rows"]:
-                row = dict(row)
-                row["job"] = context["name"]
-                recent_rows.append(row)
-            summaries.append(
-                {
-                    "name": context["name"],
-                    "summary": summary,
-                    "forecast": forecast,
-                    "other_income": other_income,
-                    "budget_expenses": budget_expenses,
-                }
-            )
-
-        if not summaries:
-            self._show_missing_settings()
-            return
-
-        current_netto = sum(item["summary"]["netto"] for item in summaries)
-        current_brutto = sum(item["summary"]["brutto"] for item in summaries)
-        current_hours = sum(item["summary"]["timer"] for item in summaries)
-        other_income = sum(item["other_income"] for item in summaries)
-        budget_expenses = sum(item["budget_expenses"] for item in summaries)
-        current_total_income = current_netto + other_income
-        current_available = current_total_income - budget_expenses
-
-        estimated_netto = sum(
-            item["forecast"].get("estimated_netto")
-            if item["forecast"] and item["forecast"].get("estimated_netto") is not None
-            else item["summary"]["netto"]
-            for item in summaries
-        )
-        estimated_brutto = sum(
-            item["forecast"].get("estimated_brutto")
-            if item["forecast"] and item["forecast"].get("estimated_brutto") is not None
-            else item["summary"]["brutto"]
-            for item in summaries
-        )
-        estimated_hours = sum(
-            item["forecast"].get("estimated_hours")
-            if item["forecast"] and item["forecast"].get("estimated_hours") is not None
-            else item["summary"]["timer"]
-            for item in summaries
-        )
-        estimated_total_income = estimated_netto + other_income
-        estimated_available = estimated_total_income - budget_expenses
-
-        self.net_card.set_values(format_money(current_netto), "Samlet registreret netto")
-        self.total_card.set_values(format_money(current_total_income), "Netto løn nu + anden indkomst")
-        self.available_card.set_values(format_money(current_available), f"Efter udgifter: {format_money(budget_expenses)}")
-        self.hours_card.set_values(f"{format_number(current_hours)} t.", f"{len(recent_rows)} vagter på tværs af jobs")
-        self.gross_card.set_values(format_money(current_brutto), "Samlet før skat")
-        self.period_card.set_values(f"{len(summaries)} jobs", "Kombineret visning")
-
-        self.estimate_net_card.set_values(format_money(estimated_netto), "Næste udbetaling samlet")
-        self.estimate_total_card.set_values(format_money(estimated_total_income), "Estimeret netto + anden indkomst")
-        self.estimate_available_card.set_values(format_money(estimated_available), f"Efter faste udgifter: {format_money(budget_expenses)}")
-        self.estimate_hours_card.set_values(f"{format_number(estimated_hours)} t.", f"Estimeret brutto: {format_money(estimated_brutto)}")
-
-        self.period_progress.clear("Kombineret visning summerer jobs med hver sin lønperiode.")
-        self.progress_detail.setText(
-            f"Kombineret overblik for {len(summaries)} jobs. "
-            f"Estimeret udbetaling næste gang: {format_money(estimated_total_income)}."
-        )
-        self.goal_card.set_status(
-            "neutral",
-            format_money(estimated_available),
-            "Kombineret estimeret rådighedsbeløb efter faste udgifter.",
-            None,
-        )
-        self.stat_average_card.set_values(format_money(current_netto / len(recent_rows) if recent_rows else None), "Samlet snit pr. vagt")
-        self.stat_week_card.set_values(format_money(estimated_netto), "Estimeret samlet netto")
-        self.stat_total_net_card.set_values(format_money(current_total_income), "Registreret udbetaling nu")
-        self._fill_breakdown_rows(
-            [
-                ("Registreret netto løn", format_money(current_netto)),
-                ("Anden indkomst (netto)", format_money(other_income)),
-                ("Registreret udbetaling", format_money(current_total_income)),
-                ("Estimeret netto løn", format_money(estimated_netto)),
-                ("Estimeret udbetaling", format_money(estimated_total_income)),
-                ("Samlede faste udgifter", f"-{format_money(budget_expenses)}"),
-                ("Estimeret rådighedsbeløb", format_money(estimated_available)),
-            ]
-        )
-        self._fill_recent(sorted(recent_rows, key=lambda row: row["dato"], reverse=True))
 
     def _arrange_cards(self, show_other_income):
         summary_cards = [
@@ -2308,19 +2351,6 @@ class PaymentsPage(BasePage):
         self.payments = []
 
     def refresh(self):
-        if getattr(self.window, "is_combined", False):
-            self.payments = []
-            self.payments_table.setEnabled(False)
-            self.detail_table.setEnabled(False)
-            self.payments_table.setRowCount(0)
-            self.detail_title.setText("Lønsedler er slået fra i Kombineret")
-            rows = [("Status", "Vælg et enkelt job for at se lønsedler.")]
-            self.detail_table.setRowCount(len(rows))
-            for row_index, (label, value) in enumerate(rows):
-                self.detail_table.setItem(row_index, 0, table_item(label))
-                self.detail_table.setItem(row_index, 1, table_item(value))
-            return
-
         self.payments_table.setEnabled(True)
         self.detail_table.setEnabled(True)
         _, complete_periods = build_periods(self.data, self.settings)
@@ -2771,11 +2801,6 @@ class HistoryPage(BasePage):
     def refresh(self):
         previous_selected_date = self.selected_original_date
         self.rows = entry_rows(self.data)
-        combined = getattr(self.window, "is_combined", False)
-        self.add_shift_button.setEnabled(not combined)
-        self.save_edit_button.setEnabled(not combined)
-        self.delete_button.setEnabled(not combined)
-        self.delete_checked_button.setEnabled(not combined)
         self.total_card.set_values(str(len(self.rows)), "Gemte vagter")
         self.hours_card.set_values(f"{format_number(sum(row['timer'] for row in self.rows))} t.", "Alle registreringer")
         self.gross_card.set_values(format_money(sum(row["brutto"] for row in self.rows)), "Før skat")
@@ -2858,9 +2883,6 @@ class HistoryPage(BasePage):
             self.delete_checked_button.setText(f"Slet {count} markerede")
 
     def _add_shift(self):
-        if getattr(self.window, "is_combined", False):
-            QMessageBox.information(self, "Kombineret visning", "Vælg et enkelt job for at tilføje en vagt.")
-            return
         dialog = ShiftEntryDialog(self, self.window)
         if dialog.exec_() == QDialog.Accepted and dialog.saved_date is not None:
             self.pending_select_date = dialog.saved_date
@@ -2966,9 +2988,6 @@ class HistoryPage(BasePage):
             )
 
     def _save_selected_row(self):
-        if getattr(self.window, "is_combined", False):
-            QMessageBox.information(self, "Kombineret visning", "Vælg et enkelt job for at redigere vagter.")
-            return
         if self.selected_original_date is None:
             QMessageBox.information(self, "Ingen vagt valgt", "Vælg først en vagt i tabellen.")
             return
@@ -3010,9 +3029,6 @@ class HistoryPage(BasePage):
         self.window.refresh_all()
 
     def _delete_selected_row(self):
-        if getattr(self.window, "is_combined", False):
-            QMessageBox.information(self, "Kombineret visning", "Vælg et enkelt job for at slette vagter.")
-            return
         if self.selected_original_date is None:
             QMessageBox.information(self, "Ingen vagt valgt", "Vælg først en vagt i tabellen.")
             return
@@ -3032,9 +3048,6 @@ class HistoryPage(BasePage):
         self.window.refresh_all()
 
     def _delete_checked_rows(self):
-        if getattr(self.window, "is_combined", False):
-            QMessageBox.information(self, "Kombineret visning", "Vælg et enkelt job for at slette vagter.")
-            return
         checked_indexes = self._checked_row_indexes()
         if not checked_indexes:
             return
@@ -3126,36 +3139,50 @@ class BudgetEntryDialog(QDialog):
 class JobDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
-        self.setWindowTitle("Tilføj job")
+        self.setWindowTitle("Tilføj profil")
         self.setModal(True)
         self.setWindowIcon(app_icon())
-        self.setMinimumSize(430, 430)
+        self.setMinimumSize(500, 560)
+        self.resize(540, 600)
         self.job_id = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
 
+        intro = QLabel(
+            "Opret en ny profil med egne vagter, indstillinger, budget og beregninger."
+        )
+        intro.setObjectName("PageSubtitle")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
         form = QFormLayout()
         form.setVerticalSpacing(12)
         layout.addLayout(form)
 
-        self.name_field = make_text_input(placeholder="fx Netto")
-        self.fradrag_field = make_text_input(placeholder="fx 0")
+        self.name_field = make_text_input(placeholder="fx Total Service")
         self.tax_field = make_text_input(placeholder="fx 40")
         self.am_field = make_text_input(placeholder="fx 8")
+        self.fradrag_field = make_text_input(placeholder="fx 0")
+        self.other_income_field = make_text_input(placeholder="fx 0")
+        self.goal_field = make_text_input(placeholder="fx 2000")
+        self.default_rate_field = make_text_input(placeholder="fx 150")
         self.start_day_field = make_text_input(placeholder="1-31")
         self.end_day_field = make_text_input(placeholder="1-31")
 
-        form.addRow("Jobnavn", self.name_field)
-        form.addRow("Fradrag", self.fradrag_field)
+        form.addRow("Profilnavn", self.name_field)
         form.addRow("Skat %", self.tax_field)
         form.addRow("AM-bidrag %", self.am_field)
+        form.addRow("Fradrag", self.fradrag_field)
+        form.addRow("Anden indkomst (netto)", self.other_income_field)
+        form.addRow("Ønsket rådighedsbeløb", self.goal_field)
+        form.addRow("Standard timeløn", self.default_rate_field)
         form.addRow("Lønperiode starter d.", self.start_day_field)
         form.addRow("Lønperiode slutter d.", self.end_day_field)
 
         buttons = QDialogButtonBox()
-        save_button = buttons.addButton("Opret job", QDialogButtonBox.AcceptRole)
+        save_button = buttons.addButton("Opret profil", QDialogButtonBox.AcceptRole)
         cancel_button = buttons.addButton("Annuller", QDialogButtonBox.RejectRole)
         save_button.clicked.connect(self.accept)
         cancel_button.clicked.connect(self.reject)
@@ -3174,26 +3201,44 @@ class JobDialog(QDialog):
     def accept(self):
         name = self.name_field.text().strip()
         if not name:
-            QMessageBox.warning(self, "Ugyldigt job", "Jobnavn skal udfyldes.")
+            QMessageBox.warning(self, "Ugyldig profil", "Profilnavn skal udfyldes.")
             return
 
         try:
             tax_value = self._required_number(self.tax_field, "Skat", allow_zero=True)
             am_value = self._required_number(self.am_field, "AM-bidrag", allow_zero=True)
+
             settings = ft.default_settings(name)
             settings.update(
                 {
                     "skat": tax_value / 100 if tax_value > 1 else tax_value,
-                    "fradrag": self._required_number(self.fradrag_field, "Fradrag", allow_zero=True),
                     "am bidrag": am_value / 100 if am_value > 1 else am_value,
+                    "fradrag": self._required_number(self.fradrag_field, "Fradrag", allow_zero=True),
+                    "anden indkomst netto": self._required_number(
+                        self.other_income_field,
+                        "Anden indkomst",
+                        allow_zero=True,
+                    ),
+                    "ønsket rådighedsbeløb": self._required_number(
+                        self.goal_field,
+                        "Ønsket rådighedsbeløb",
+                        allow_zero=True,
+                    ),
+                    "standard timeløn": self._required_number(
+                        self.default_rate_field,
+                        "Standard timeløn",
+                        allow_zero=False,
+                    ),
                     "løn start": self._required_int(self.start_day_field, "Lønperiode starter"),
                     "løn slut": self._required_int(self.end_day_field, "Lønperiode slutter"),
                     ft.TUTORIAL_DONE_KEY: True,
                 }
             )
+
             self.job_id = ft.create_job(name, settings=settings, switch_to=True)
+
         except ValueError as error:
-            QMessageBox.warning(self, "Ugyldigt job", str(error))
+            QMessageBox.warning(self, "Ugyldig profil", str(error))
             return
 
         super().accept()
@@ -3316,9 +3361,6 @@ class BudgetPage(BasePage):
         return new_settings
 
     def _save_budget(self):
-        if getattr(self.window, "is_combined", False):
-            QMessageBox.information(self, "Kombineret visning", "Vælg et enkelt job for at ændre budget.")
-            return
         ft.save_settings(self._settings_with_budget())
         self.window.refresh_all()
 
@@ -3415,9 +3457,6 @@ class SettingsPage(BasePage):
         self.end_day_field.setText(str(int(settings.get("løn slut", 14))))
 
     def _save_settings(self):
-        if getattr(self.window, "is_combined", False):
-            QMessageBox.information(self, "Kombineret visning", "Vælg et enkelt job for at ændre indstillinger.")
-            return
         try:
             tax = parse_positive_number(self.tax_field, "Skat", allow_zero=True)
             am = parse_positive_number(self.am_field, "AM-bidrag", allow_zero=True)
@@ -3487,12 +3526,12 @@ class TutorialDialog(QDialog):
                 ),
             },
             {
-                "key": "jobs",
-                "title": "Jobs",
+                "key": "Profiler",
+                "title": "Profiler",
                 "text": (
-                    "Øverst i sidebaren vælger du hvilket job du arbejder med.\n\n"
-                    "Knappen Tilføj job opretter et separat job med egne vagter, egne indstillinger og eget budget. "
-                    "Hvis du har flere jobs, kan Kombineret vise den samlede forventede udbetaling."
+                    "Øverst i sidebaren vælger du hvilken profil du arbejder med.\n\n"
+                    "Knappen Tilføj profil opretter en separat profil med egne vagter, egne indstillinger og eget budget. "
+                    "Skift mellem dine profiler i dropdown-menuen."
                 ),
             },
             {
@@ -3554,11 +3593,10 @@ class TutorialDialog(QDialog):
             },
             {
                 "key": "setup",
-                "page": 6,
-                "title": "Dine grundoplysninger",
+                "title": "Opret din første profil",
                 "text": (
-                    "Udfyld de vigtigste tal. De gemmes i Indstillinger og bruges i resten af programmet.\n\n"
-                    "Lad et felt stå tomt, hvis du vil bruge standardværdien i feltets placeholder."
+                    "Opret din profil med profilnavn, skat, fradrag, AM-bidrag, standardtimeløn og lønperiode.\n\n"
+                    "Disse oplysninger gemmes på profilen og bruges til lønberegning, overblik, budget og statistik."
                 ),
             },
             {
@@ -3663,13 +3701,12 @@ class TutorialDialog(QDialog):
         root.setContentsMargins(18, 16, 18, 18)
         root.setSpacing(14)
 
-        title = QLabel("Grundoplysninger")
+        title = QLabel("Opret profil")
         title.setObjectName("SetupTitle")
         root.addWidget(title)
 
         hint = QLabel(
-            "Udfyld dine vigtigste tal her. Felterne bliver gemt i Indstillinger, "
-            "når du trykker Næste."
+            "Udfyld profilnavn og de vigtigste tal her. Profilen oprettes, når du trykker Næste."
         )
         hint.setObjectName("SetupHint")
         hint.setWordWrap(True)
@@ -3681,6 +3718,8 @@ class TutorialDialog(QDialog):
         grid.setVerticalSpacing(12)
         root.addLayout(grid)
 
+        self.setup_job_name = make_text_input(placeholder="fx Netto")
+        self.setup_am = make_text_input(placeholder="8%")
         self.setup_other_income = make_text_input(placeholder="0 kr")
         self.setup_tax = make_text_input(placeholder="40%")
         self.setup_fradrag = make_text_input(placeholder="0 kr")
@@ -3690,9 +3729,11 @@ class TutorialDialog(QDialog):
         self.setup_rate = make_text_input(placeholder="150 kr")
 
         fields = [
-            ("Anden indkomst netto", self.setup_other_income),
+            ("Profilnavn", self.setup_job_name),
             ("Skatteprocent", self.setup_tax),
+            ("AM-bidrag", self.setup_am),
             ("Fradrag", self.setup_fradrag),
+            ("Anden indkomst netto", self.setup_other_income),
             ("Ønsket rådighedsbeløb", self.setup_goal),
             ("Lønperiode startdag", self.setup_start),
             ("Lønperiode slutdag", self.setup_end),
@@ -3725,11 +3766,13 @@ class TutorialDialog(QDialog):
         grid.setColumnStretch(1, 1)
 
         return wrapper
-
+    
     def _fill_existing_values(self):
         settings = self.window.settings
+        self.setup_job_name.setText(str(settings.get(ft.JOB_NAME_KEY, "")))
         set_field_number(self.setup_other_income, ft.get_other_income(settings))
         set_field_number(self.setup_tax, float(settings.get("skat", 0.4)) * 100)
+        set_field_number(self.setup_am, float(settings.get("am bidrag", 0.08)) * 100)
         set_field_number(self.setup_fradrag, float(settings.get("fradrag", 0)))
         set_field_number(self.setup_goal, ft.get_disposable_income_goal(settings))
         self.setup_start.setText(str(int(settings.get("løn start", 15))))
@@ -3882,13 +3925,12 @@ class TutorialDialog(QDialog):
         self.visual_layout.addWidget(self._mini_bar("Rådighed gennem perioden", 62))
 
     def _visual_jobs(self):
-        self._visual_title("Hvert job har sine egne filer og beregninger")
+        self._visual_title("Hver profil har sine egne vagter, indstillinger og budget")
         rows = QVBoxLayout()
         rows.setSpacing(7)
-        rows.addWidget(self._mini_row("Jobvælger", "Vælg hvilket job der er aktivt", True))
-        rows.addWidget(self._mini_row("Tilføj job", "Navn, fradrag, skat, AM og lønperiode"))
-        rows.addWidget(self._mini_row("Egne filer", "data/job/oplysninger.txt og løn.txt"))
-        rows.addWidget(self._mini_row("Kombineret", "Samlet næste udbetaling på tværs af jobs"))
+        rows.addWidget(self._mini_row("Profilvælger", "Vælg hvilken profil der er aktiv", True))
+        rows.addWidget(self._mini_row("Tilføj profil", "Navn, fradrag, skat, AM og lønperiode"))
+        rows.addWidget(self._mini_row("Egne filer", "data/profil/oplysninger.txt og løn.txt"))
         self.visual_layout.addLayout(rows)
 
     def _visual_overview(self):
@@ -3998,16 +4040,27 @@ class TutorialDialog(QDialog):
         return parse_int_field(field, label, 1, 31)
 
     def _save_setup_step(self):
+        name = self.setup_job_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Ugyldig profil", "Profilnavn skal udfyldes.")
+            return False
+
         try:
             tax_value = self._field_number(self.setup_tax, 40, "Skatteprocent", allow_zero=True)
-            am_value = float(self.window.settings.get("am bidrag", 0.08))
-            new_settings = dict(self.window.settings) if isinstance(self.window.settings, dict) else {}
-            new_settings.update(
+            am_value = self._field_number(self.setup_am, 8, "AM-bidrag", allow_zero=True)
+
+            settings = ft.default_settings(name)
+            settings.update(
                 {
                     "skat": tax_value / 100 if tax_value > 1 else tax_value,
                     "fradrag": self._field_number(self.setup_fradrag, 0, "Fradrag", allow_zero=True),
-                    "am bidrag": am_value,
-                    "anden indkomst netto": self._field_number(self.setup_other_income, 0, "Anden indkomst", allow_zero=True),
+                    "am bidrag": am_value / 100 if am_value > 1 else am_value,
+                    "anden indkomst netto": self._field_number(
+                        self.setup_other_income,
+                        0,
+                        "Anden indkomst",
+                        allow_zero=True,
+                    ),
                     "ønsket rådighedsbeløb": self._field_number(
                         self.setup_goal,
                         2000,
@@ -4017,13 +4070,17 @@ class TutorialDialog(QDialog):
                     "standard timeløn": self._field_number(self.setup_rate, 150, "Timeløn", allow_zero=False),
                     "løn start": self._field_int(self.setup_start, 15, "Lønperiode start"),
                     "løn slut": self._field_int(self.setup_end, 14, "Lønperiode slut"),
+                    ft.TUTORIAL_DONE_KEY: True,
                 }
             )
+
+            ft.create_job(name, settings=settings, switch_to=True)
+
         except ValueError as error:
             QMessageBox.warning(self, "Ugyldige oplysninger", str(error))
             return False
 
-        ft.save_settings(new_settings)
+        self.window._load_job_selector()
         self.window.refresh_all()
         return True
 
@@ -4112,16 +4169,23 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(brand_panel)
         sidebar_layout.addSpacing(18)
 
-        job_label = QLabel("Job")
+        job_label = QLabel("Profil")
         job_label.setObjectName("SidebarLabel")
         sidebar_layout.addWidget(job_label)
+
+        job_row = QHBoxLayout()
+        job_row.setSpacing(8)
+        sidebar_layout.addLayout(job_row)
+
         self.job_combo = ModernComboBox()
+        self.job_combo.setObjectName("SidebarJobCombo")
         self.job_combo.currentIndexChanged.connect(self._change_job)
-        sidebar_layout.addWidget(self.job_combo)
-        self.add_job_button = QPushButton("Tilføj job")
-        self.add_job_button.setObjectName("SecondaryButton")
+        job_row.addWidget(self.job_combo, 1)
+
+        self.add_job_button = SidebarAddButton()
         self.add_job_button.clicked.connect(self._add_job)
-        sidebar_layout.addWidget(self.add_job_button)
+        job_row.addWidget(self.add_job_button, 0)
+
         sidebar_layout.addSpacing(12)
 
         self.stack = QStackedWidget()
@@ -4216,34 +4280,19 @@ class MainWindow(QMainWindow):
         return button
 
     def refresh_all(self):
-        self.is_combined = ft.is_combined_job()
-        if self.is_combined:
-            self.job_contexts = [
-                {
-                    "id": job["id"],
-                    "name": job["name"],
-                    "data": ft.load_data(job["id"]),
-                    "settings": ft.load_settings(job["id"]),
-                }
-                for job in ft.list_jobs()
-            ]
-            self.data = []
-            for context in self.job_contexts:
-                self.data.extend(context["data"])
-            self.settings = ft.load_settings(ft.COMBINED_JOB_ID)
-        else:
-            active_job_id = ft.get_active_job_id()
-            active_job = next((job for job in ft.list_jobs() if job["id"] == active_job_id), None)
-            self.data = ft.load_data(active_job_id)
-            self.settings = ft.load_settings(active_job_id)
-            self.job_contexts = [
-                {
-                    "id": active_job_id,
-                    "name": active_job["name"] if active_job else active_job_id,
-                    "data": self.data,
-                    "settings": self.settings,
-                }
-            ]
+        active_job_id = ft.get_active_job_id()
+        active_job = next((job for job in ft.list_jobs() if job["id"] == active_job_id), None)
+        self.data = ft.load_data(active_job_id)
+        self.settings = ft.load_settings(active_job_id)
+        self.job_contexts = [
+            {
+                "id": active_job_id,
+                "name": active_job["name"] if active_job else active_job_id,
+                "data": self.data,
+                "settings": self.settings,
+            }
+        ]
+
         self._update_combined_navigation()
         for page in self.pages:
             page.refresh()
@@ -4255,8 +4304,6 @@ class MainWindow(QMainWindow):
         active_job_id = ft.get_active_job_id()
         for job in jobs:
             self.job_combo.addItem(job["name"], job["id"])
-        if len(jobs) > 1:
-            self.job_combo.addItem(ft.COMBINED_JOB_NAME, ft.COMBINED_JOB_ID)
         index = self.job_combo.findData(active_job_id)
         if index < 0:
             index = 0
@@ -4275,8 +4322,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Kunne ikke skifte job", str(error))
             self._load_job_selector()
             return
-        if job_id == ft.COMBINED_JOB_ID and hasattr(self, "payments_button") and self.payments_button.isChecked():
-            self.go_to_page(0)
         self.refresh_all()
 
     def _add_job(self):
@@ -4288,12 +4333,8 @@ class MainWindow(QMainWindow):
     def _update_combined_navigation(self):
         if not hasattr(self, "payments_button"):
             return
-        self.payments_button.setEnabled(not self.is_combined)
-        self.payments_button.setToolTip(
-            "Lønsedler vises kun for et enkelt job." if self.is_combined else ""
-        )
-        if self.is_combined and self.payments_button.isChecked():
-            self.go_to_page(0)
+        self.payments_button.setEnabled(True)
+        self.payments_button.setToolTip("")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -4302,17 +4343,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            if getattr(self, "is_combined", False):
-                for job in ft.list_jobs():
-                    settings = dict(ft.load_settings(job["id"]))
-                    settings[WINDOW_WIDTH_SETTINGS_KEY] = self.width()
-                    settings[WINDOW_HEIGHT_SETTINGS_KEY] = self.height()
-                    ft.save_settings(settings, job["id"])
-            else:
-                settings = dict(ft.load_settings())
-                settings[WINDOW_WIDTH_SETTINGS_KEY] = self.width()
-                settings[WINDOW_HEIGHT_SETTINGS_KEY] = self.height()
-                ft.save_settings(settings)
+            settings = dict(ft.load_settings())
+            settings[WINDOW_WIDTH_SETTINGS_KEY] = self.width()
+            settings[WINDOW_HEIGHT_SETTINGS_KEY] = self.height()
+            ft.save_settings(settings)
         except (OSError, ValueError, TypeError):
             pass
         super().closeEvent(event)
@@ -4324,12 +4358,6 @@ class MainWindow(QMainWindow):
     def go_to_page(self, index):
         if index < 0 or index >= len(self.pages):
             return
-        if (
-            getattr(self, "is_combined", False)
-            and hasattr(self, "payments_button")
-            and index == self.nav_buttons.index(self.payments_button)
-        ):
-            return
         self.stack.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
         if self._tutorial_dialog is not None:
@@ -4337,15 +4365,10 @@ class MainWindow(QMainWindow):
 
     def _maybe_start_tutorial(self):
         self.refresh_all()
-        if getattr(self, "is_combined", False):
-            return
         if not ft.is_tutorial_completed(self.settings):
             self.start_tutorial(force=False)
 
     def start_tutorial(self, force=False):
-        if getattr(self, "is_combined", False):
-            QMessageBox.information(self, "Kombineret visning", "Vælg et enkelt job for at starte tutorialen.")
-            return
         if self._tutorial_dialog is not None:
             self._tutorial_dialog.raise_()
             self._tutorial_dialog.activateWindow()
