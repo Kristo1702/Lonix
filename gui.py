@@ -2338,6 +2338,7 @@ class DashboardPage(BasePage):
             self.estimate_strip.add_item(card)
 
         stats_panel = self._make_widget_frame("Statistik", "stats")
+        stats_panel.addLayout(self._make_dashboard_link_row("Gå til statistik", self._go_to_statistics_page))
         self.stats_strip = DashboardMetricStrip("", columns=3, embedded=True)
         stats_panel.addWidget(self.stats_strip)
         self.dashboard_widgets["stats"] = stats_panel
@@ -2360,12 +2361,14 @@ class DashboardPage(BasePage):
         self.dashboard_widgets["breakdown"] = breakdown_panel
 
         recent_panel = self._make_widget_frame("Vagter i perioden", "recent")
+        recent_panel.addLayout(self._make_dashboard_link_row("Gå til vagter", self._go_to_history_page))
         self.recent_table = QTableWidget()
         setup_table(self.recent_table, ["Dato", "Timer", "Pause", "Brutto"])
         recent_panel.addWidget(self.recent_table)
         self.dashboard_widgets["recent"] = recent_panel
 
         calculator_panel = self._make_widget_frame("Lønberegner", "salary_calculator")
+        calculator_panel.addLayout(self._make_dashboard_link_row("Gå til lønberegner", self._go_to_calculator_page))
         self.salary_calculator_widget = DashboardSalaryCalculatorWidget()
         calculator_panel.addWidget(self.salary_calculator_widget)
         self.dashboard_widgets["salary_calculator"] = calculator_panel
@@ -2458,12 +2461,46 @@ class DashboardPage(BasePage):
         self._save_widget_order()
         self._render_widget_order()
 
+    def _make_dashboard_link_row(self, text, callback):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        row.addStretch()
+
+        button = QPushButton(text)
+        button.setObjectName("InlineButton")
+        button.setCursor(Qt.PointingHandCursor)
+        button.clicked.connect(callback)
+
+        row.addWidget(button, 0, Qt.AlignRight | Qt.AlignVCenter)
+        return row
+
     def _go_to_budget_page(self):
         for index, page in enumerate(getattr(self.window, "pages", [])):
             if isinstance(page, BudgetPage):
                 self.window.go_to_page(index)
                 return
 
+    def _go_to_history_page(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, HistoryPage):
+                self.window.go_to_page(index)
+                return
+
+
+    def _go_to_statistics_page(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, StatisticsPage):
+                self.window.go_to_page(index)
+                return
+
+
+    def _go_to_calculator_page(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, CalculatorPage):
+                self.window.go_to_page(index)
+                return
+        
     def _start_widget_drag(self, key, global_pos):
         if not self.reorder_button.isChecked() or key not in self.widget_order:
             return
