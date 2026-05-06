@@ -185,6 +185,7 @@ QPushButton#PrimaryNavButton {
     border: 0;
     border-radius: 7px;
     padding: 9px 16px 9px 18px;
+    font-size: 10pt;
     text-align: left;
     font-weight: 750;
 }
@@ -201,6 +202,7 @@ QPushButton#NavButton {
     border: 0;
     border-radius: 7px;
     padding: 9px 16px 9px 18px;
+    font-size: 10pt;
     text-align: left;
     font-weight: 600;
 }
@@ -253,7 +255,8 @@ QPushButton {
     color: #ffffff;
     border: 0;
     border-radius: 7px;
-    padding: 9px 14px;
+    padding: 5px 9px;
+    font-size: 9pt;
     font-weight: 700;
 }
 QPushButton:hover {
@@ -278,7 +281,8 @@ QPushButton#InlineButton {
     color: #1f8a70;
     border: 1px solid #cfd8e3;
     border-radius: 6px;
-    padding: 5px 9px;
+    padding: 3px 7px;
+    font-size: 9pt;
     font-weight: 700;
 }
 QPushButton#InlineButton:hover {
@@ -662,9 +666,9 @@ BasePushButton = QPushButton
 class AnimatedButton(BasePushButton):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._button_inset = 2
+        self._button_inset = 1
         self._button_inset_animation = QPropertyAnimation(self, b"buttonInset", self)
-        self._button_inset_animation.setDuration(120)
+        self._button_inset_animation.setDuration(100)
         self._button_inset_animation.setEasingCurve(QEasingCurve.OutCubic)
 
     @pyqtProperty(int)
@@ -673,19 +677,19 @@ class AnimatedButton(BasePushButton):
 
     @buttonInset.setter
     def buttonInset(self, value):
-        self._button_inset = max(0, min(3, int(value)))
+        self._button_inset = max(0, min(2, int(value)))
         self.update()
 
     def sizeHint(self):
         size = super().sizeHint()
         if self._generic_animation_enabled():
-            size += QSize(18, 10)
+            size += QSize(4, 2)
         return size
 
     def minimumSizeHint(self):
         size = super().minimumSizeHint()
         if self._generic_animation_enabled():
-            size += QSize(18, 10)
+            size += QSize(4, 2)
         return size
 
     def _generic_animation_enabled(self):
@@ -702,21 +706,21 @@ class AnimatedButton(BasePushButton):
         self._button_inset_animation.start()
 
     def enterEvent(self, event):
-        self._animate_inset(0, 130, QEasingCurve.OutBack)
+        self._animate_inset(0, 105, QEasingCurve.OutCubic)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self._animate_inset(2, 110, QEasingCurve.OutCubic)
+        self._animate_inset(1, 95, QEasingCurve.OutCubic)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._animate_inset(3, 70, QEasingCurve.OutCubic)
+            self._animate_inset(2, 55, QEasingCurve.OutCubic)
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._animate_inset(0 if self.underMouse() else 2, 150, QEasingCurve.OutBack)
+            self._animate_inset(0 if self.underMouse() else 1, 120, QEasingCurve.OutCubic)
         super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
@@ -733,7 +737,7 @@ class AnimatedButton(BasePushButton):
 
         label_option = QStyleOptionButton()
         self.initStyleOption(label_option)
-        label_option.rect = self.rect().adjusted(8, 0, -8, 0)
+        label_option.rect = self.rect().adjusted(4, 0, -4, 0)
         painter.drawControl(QStyle.CE_PushButtonLabel, label_option)
 
 
