@@ -1857,35 +1857,60 @@ class DashboardWidgetPreview(QFrame):
     def __init__(self, key, title, select_callback, parent=None):
         super().__init__(parent)
         self.key = key
+        self.title = title
         self.select_callback = select_callback
-        self.normal_margin = 8
-        self.hover_margin = 0
-        self.hover_height = 136
+        self.hovered = False
+
         self.setObjectName("DashboardWidgetPreviewSlot")
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(self.hover_height)
+        self.setFixedHeight(152)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         slot_layout = QVBoxLayout(self)
+        slot_layout.setContentsMargins(0, 0, 0, 0)
         slot_layout.setSpacing(0)
-        self.slot_layout = slot_layout
 
-        self.card = QFrame(self)
+        self.card = QFrame()
         self.card.setObjectName("DashboardWidgetPreviewCard")
+        self.card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         slot_layout.addWidget(self.card)
 
         self.root = QVBoxLayout(self.card)
         self.root.setContentsMargins(14, 12, 14, 12)
-        self.root.setSpacing(8)
+        self.root.setSpacing(9)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        self.root.addLayout(header)
 
         title_label = QLabel(title)
-        title_label.setStyleSheet("color: #111827; font-size: 11pt; font-weight: 850;")
-        self.root.addWidget(title_label)
+        title_label.setStyleSheet("color: #0f172a; font-size: 11.5pt; font-weight: 900;")
+        title_label.setWordWrap(False)
+        header.addWidget(title_label, 1)
+
+        add_hint = QLabel("Tilføj")
+        add_hint.setAlignment(Qt.AlignCenter)
+        add_hint.setStyleSheet(
+            """
+            QLabel {
+                color: #0f766e;
+                background: #ecfdf5;
+                border: 1px solid #bbf7d0;
+                border-radius: 11px;
+                padding: 3px 9px;
+                font-size: 8.5pt;
+                font-weight: 850;
+            }
+            """
+        )
+        header.addWidget(add_hint, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         self.preview_layout = QVBoxLayout()
         self.preview_layout.setContentsMargins(0, 0, 0, 0)
-        self.preview_layout.setSpacing(6)
-        self.root.addLayout(self.preview_layout)
+        self.preview_layout.setSpacing(7)
+        self.root.addLayout(self.preview_layout, 1)
+
         self._build_preview()
         self._set_hovered(False)
 
@@ -1905,129 +1930,322 @@ class DashboardWidgetPreview(QFrame):
         super().mouseReleaseEvent(event)
 
     def _set_hovered(self, hovered):
-        margin = self.hover_margin if hovered else self.normal_margin
-        self.slot_layout.setContentsMargins(margin, margin, margin, margin)
+        self.hovered = hovered
         self.setStyleSheet(
             f"""
             QFrame#DashboardWidgetPreviewSlot {{
                 background: transparent;
                 border: 0;
+                padding: 0;
             }}
             QFrame#DashboardWidgetPreviewCard {{
                 background: {'#f8fffc' if hovered else '#ffffff'};
-                border: 1px solid {'#1f8a70' if hovered else '#dde3ea'};
-                border-radius: 8px;
+                border: 1px solid {'#1f8a70' if hovered else '#dbe3ec'};
+                border-radius: 9px;
             }}
             QFrame#DashboardWidgetPreviewCard QLabel {{
-                border: 0;
                 background: transparent;
+                border: 0;
             }}
             """
         )
 
     def _build_preview(self):
         if self.key == "goal":
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            row.addWidget(self._pill("NÅET", "#16a34a"))
-            row.addWidget(self._text_block("2.400 / 2.000 kr.", "Sidste periode vist ved siden af"), 1)
-            self.preview_layout.addLayout(row)
+            self.preview_layout.addLayout(
+                self._metric_row(
+                    [
+                        ("Rådighed", "2.400 kr.", "#1f8a70"),
+                        ("Mål", "2.000 kr.", "#d97706"),
+                        ("Status", "Nået", "#16a34a"),
+                    ]
+                )
+            )
+            self.preview_layout.addWidget(self._note("Viser om du er på vej mod dit rådighedsmål."))
+
         elif self.key == "progress":
-            self.preview_layout.addWidget(self._bar("Periodens tidslinje", 64))
-            self.preview_layout.addWidget(self._small_text("4 vagter · 3.200 kr. brutto"))
+            self.preview_layout.addWidget(self._progress_preview("22 / 30 dage", 73))
+            self.preview_layout.addLayout(
+                self._mini_stats(
+                    [
+                        ("Vagter", "4"),
+                        ("Brutto", "600 kr."),
+                        ("Tilbage", "8 dage"),
+                    ]
+                )
+            )
+
         elif self.key == "process":
-            self.preview_layout.addLayout(self._metric_row([("Netto", "3.600"), ("Rådighed", "1.850"), ("Timer", "24,5")]))
+            self.preview_layout.addLayout(
+                self._metric_row(
+                    [
+                        ("Netto", "3.312 kr.", "#1f8a70"),
+                        ("Rådighed", "1.850 kr.", "#d97706"),
+                        ("Timer", "22 t.", "#7c3aed"),
+                    ]
+                )
+            )
+            self.preview_layout.addWidget(self._note("Nuværende lønperiode indtil videre."))
+
         elif self.key == "estimates":
-            self.preview_layout.addLayout(self._metric_row([("Netto", "5.900"), ("Rådighed", "2.150"), ("Timer", "38")]))
+            self.preview_layout.addLayout(
+                self._metric_row(
+                    [
+                        ("Est. netto", "4.920 kr.", "#1f8a70"),
+                        ("Est. rådighed", "2.150 kr.", "#d97706"),
+                        ("Est. timer", "32 t.", "#7c3aed"),
+                    ]
+                )
+            )
+            self.preview_layout.addWidget(self._note("Forventer slutresultatet for perioden."))
+
         elif self.key == "stats":
-            self.preview_layout.addLayout(self._metric_row([("Snit", "720"), ("Uge", "1.450"), ("I alt", "18.400")]))
+            self.preview_layout.addLayout(
+                self._metric_row(
+                    [
+                        ("Snit/vagt", "331 kr.", "#475569"),
+                        ("Snit/uge", "77 kr.", "#2563eb"),
+                        ("I alt", "1.408 kr.", "#1f8a70"),
+                    ]
+                )
+            )
+            self.preview_layout.addWidget(self._note("Hurtige nøgletal direkte på forsiden."))
+
         elif self.key == "budget":
-            self.preview_layout.addWidget(self._mini_row("Husleje", "5.200 kr."))
-            self.preview_layout.addWidget(self._mini_row("Abonnementer", "249 kr."))
+            self.preview_layout.addLayout(
+                self._metric_row(
+                    [
+                        ("Udgifter", "0 kr.", "#d97706"),
+                        ("Poster", "0", "#475569"),
+                        ("Budget", "Åbn", "#1f8a70"),
+                    ]
+                )
+            )
+            self.preview_layout.addWidget(self._note("Faste udgifter brugt i rådighedsberegningen."))
+
         elif self.key == "breakdown":
-            self.preview_layout.addWidget(self._mini_row("AM-bidrag", "-288 kr."))
-            self.preview_layout.addWidget(self._mini_row("Netto løn", "3.312 kr."))
+            self.preview_layout.addWidget(self._list_row("AM-bidrag", "-288 kr.", "#dc2626"))
+            self.preview_layout.addWidget(self._list_row("Netto løn", "3.312 kr.", "#1f8a70"))
+            self.preview_layout.addWidget(self._note("Viser skatteopdeling for lønperioden."))
+
         elif self.key == "recent":
-            self.preview_layout.addWidget(self._mini_row("05-05-2026", "6 t. · 900 kr."))
-            self.preview_layout.addWidget(self._mini_row("03-05-2026", "4 t. · 600 kr."))
+            self.preview_layout.addWidget(self._list_row("05-05-2026", "6 t. · 900 kr.", "#2563eb"))
+            self.preview_layout.addWidget(self._list_row("03-05-2026", "4 t. · 600 kr.", "#2563eb"))
+            self.preview_layout.addWidget(self._note("Seneste vagter i den aktuelle periode."))
+
         elif self.key == "salary_calculator":
-            self.preview_layout.addLayout(self._metric_row([("Brutto", "3.000"), ("Netto", "1.920")]))
-            self.preview_layout.addWidget(self._small_text("Brutto eller timer + timeløn"))
+            self.preview_layout.addLayout(
+                self._calculator_preview()
+            )
+            self.preview_layout.addWidget(self._note("Brutto eller timer + timeløn → netto."))
 
     def _metric_row(self, items):
         row = QHBoxLayout()
-        row.setSpacing(7)
-        for title, value in items:
-            cell = QFrame()
-            cell.setStyleSheet("background: #f8fafc; border: 1px solid #e3e8ef; border-radius: 6px;")
-            layout = QVBoxLayout(cell)
-            layout.setContentsMargins(8, 6, 8, 6)
-            layout.setSpacing(1)
-            title_label = QLabel(title)
-            title_label.setStyleSheet("color: #64748b; font-size: 8pt; font-weight: 800;")
-            value_label = QLabel(value)
-            value_label.setStyleSheet("color: #111827; font-size: 11pt; font-weight: 850;")
-            layout.addWidget(title_label)
-            layout.addWidget(value_label)
-            row.addWidget(cell)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        for title, value, accent in items:
+            row.addWidget(self._metric_chip(title, value, accent), 1)
+
         return row
 
-    def _bar(self, label, value):
-        wrapper = QWidget()
+    def _metric_chip(self, title, value, accent):
+        chip = QFrame()
+        chip.setFixedHeight(58)
+        chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        chip.setStyleSheet(
+            f"""
+            QFrame {{
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: 0;
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(chip)
+        layout.setContentsMargins(9, 7, 9, 7)
+        layout.setSpacing(2)
+
+        accent_bar = QFrame()
+        accent_bar.setFixedHeight(3)
+        accent_bar.setStyleSheet(f"background: {accent}; border: 0; border-radius: 1px;")
+        layout.addWidget(accent_bar)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #64748b; font-size: 8pt; font-weight: 800;")
+        title_label.setWordWrap(False)
+        layout.addWidget(title_label)
+
+        value_label = QLabel(value)
+        value_label.setStyleSheet("color: #0f172a; font-size: 10.5pt; font-weight: 900;")
+        value_label.setWordWrap(False)
+        layout.addWidget(value_label)
+
+        return chip
+
+    def _progress_preview(self, label, percent):
+        wrapper = QFrame()
+        wrapper.setFixedHeight(54)
+        wrapper.setStyleSheet(
+            """
+            QFrame {
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }
+            QLabel {
+                background: transparent;
+                border: 0;
+            }
+            """
+        )
+
         layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        layout.addWidget(self._small_text(label))
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+
+        label_widget = QLabel(label)
+        label_widget.setStyleSheet("color: #0f172a; font-size: 9pt; font-weight: 900;")
+        top.addWidget(label_widget)
+
+        percent_label = QLabel(f"{percent}%")
+        percent_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        percent_label.setStyleSheet("color: #64748b; font-size: 8.5pt; font-weight: 800;")
+        top.addWidget(percent_label)
+
+        layout.addLayout(top)
+
         track = QFrame()
         track.setFixedHeight(9)
         track.setStyleSheet("background: #e2e8f0; border: 0; border-radius: 4px;")
+
         track_layout = QHBoxLayout(track)
         track_layout.setContentsMargins(0, 0, 0, 0)
+        track_layout.setSpacing(0)
+
         fill = QFrame()
         fill.setStyleSheet("background: #1f8a70; border: 0; border-radius: 4px;")
-        track_layout.addWidget(fill, max(1, value))
-        track_layout.addStretch(max(1, 100 - value))
+        track_layout.addWidget(fill, max(1, percent))
+        track_layout.addStretch(max(1, 100 - percent))
+
         layout.addWidget(track)
+
         return wrapper
 
-    def _pill(self, text, color):
-        label = QLabel(text)
-        label.setAlignment(Qt.AlignCenter)
-        label.setFixedWidth(64)
-        label.setStyleSheet(
-            f"background: {color}; color: white; border: 0; border-radius: 12px; padding: 5px; font-size: 8pt; font-weight: 850;"
+    def _mini_stats(self, items):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(7)
+
+        for title, value in items:
+            row.addWidget(self._tiny_stat(title, value), 1)
+
+        return row
+
+    def _tiny_stat(self, title, value):
+        box = QFrame()
+        box.setFixedHeight(30)
+        box.setStyleSheet(
+            """
+            QFrame {
+                background: #f1f5f9;
+                border: 1px solid #e2e8f0;
+                border-radius: 7px;
+            }
+            QLabel {
+                background: transparent;
+                border: 0;
+            }
+            """
         )
-        return label
 
-    def _text_block(self, value, detail):
-        wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(1)
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #64748b; font-size: 8pt; font-weight: 800;")
         value_label = QLabel(value)
-        value_label.setStyleSheet("color: #111827; font-size: 11pt; font-weight: 850;")
-        layout.addWidget(value_label)
-        layout.addWidget(self._small_text(detail))
-        return wrapper
+        value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        value_label.setStyleSheet("color: #0f172a; font-size: 8.5pt; font-weight: 900;")
 
-    def _small_text(self, text):
-        label = QLabel(text)
-        label.setStyleSheet("color: #64748b; font-size: 8.5pt;")
-        return label
+        layout.addWidget(title_label, 1)
+        layout.addWidget(value_label, 0)
 
-    def _mini_row(self, left, right):
+        return box
+
+    def _list_row(self, left, right, accent):
         row = QFrame()
-        row.setStyleSheet("background: #f8fafc; border: 1px solid #e3e8ef; border-radius: 6px;")
+        row.setFixedHeight(32)
+        row.setStyleSheet(
+            f"""
+            QFrame {{
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 7px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: 0;
+            }}
+            """
+        )
+
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(8, 5, 8, 5)
+        layout.setContentsMargins(9, 5, 9, 5)
+        layout.setSpacing(8)
+
+        dot = QFrame()
+        dot.setFixedSize(7, 7)
+        dot.setStyleSheet(f"background: {accent}; border: 0; border-radius: 3px;")
+        layout.addWidget(dot, 0, Qt.AlignVCenter)
+
         left_label = QLabel(left)
-        left_label.setStyleSheet("color: #334155; font-size: 8.5pt; font-weight: 750;")
+        left_label.setStyleSheet("color: #334155; font-size: 8.8pt; font-weight: 850;")
+        left_label.setWordWrap(False)
+
         right_label = QLabel(right)
         right_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        right_label.setStyleSheet("color: #111827; font-size: 8.5pt; font-weight: 850;")
+        right_label.setStyleSheet("color: #0f172a; font-size: 8.8pt; font-weight: 900;")
+        right_label.setWordWrap(False)
+
         layout.addWidget(left_label, 1)
         layout.addWidget(right_label, 1)
+
         return row
+
+    def _calculator_preview(self):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        row.addWidget(self._metric_chip("Brutto", "3.000 kr.", "#2563eb"), 1)
+        row.addWidget(self._arrow_label(), 0)
+        row.addWidget(self._metric_chip("Netto", "1.920 kr.", "#1f8a70"), 1)
+
+        return row
+
+    def _arrow_label(self):
+        label = QLabel("→")
+        label.setAlignment(Qt.AlignCenter)
+        label.setFixedWidth(22)
+        label.setStyleSheet("color: #94a3b8; font-size: 15pt; font-weight: 900;")
+        return label
+
+    def _note(self, text):
+        label = QLabel(text)
+        label.setStyleSheet("color: #64748b; font-size: 8.5pt;")
+        label.setWordWrap(False)
+        label.setMinimumHeight(18)
+        return label
 
 
 class DashboardAddWidgetDialog(QDialog):
@@ -2037,7 +2255,7 @@ class DashboardAddWidgetDialog(QDialog):
         self.setModal(True)
         self.setWindowTitle("Tilføj widget")
         self.setWindowIcon(app_icon())
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(560)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -2054,12 +2272,12 @@ class DashboardAddWidgetDialog(QDialog):
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.NoFrame)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            scroll.setMaximumHeight(600)
+            scroll.setMaximumHeight(640)
 
             body = QWidget()
             body_layout = QVBoxLayout(body)
             body_layout.setContentsMargins(0, 0, 0, 0)
-            body_layout.setSpacing(10)
+            body_layout.setSpacing(12)
             for key, title in options:
                 preview = DashboardWidgetPreview(key, title, self._select, self)
                 body_layout.addWidget(preview)
