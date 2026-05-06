@@ -5,8 +5,11 @@ from datetime import date, datetime, timedelta
 
 from PyQt5.QtCore import (
     QEasingCurve,
+    QPoint,
     QPointF,
+    QParallelAnimationGroup,
     QPropertyAnimation,
+    QRect,
     QRectF,
     QSize,
     Qt,
@@ -1785,7 +1788,7 @@ class DashboardWidgetFrame(QFrame):
         self.remove_callback = remove_callback
         self.edit_mode = False
         self.setObjectName("DashboardSection")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 16)
@@ -2773,8 +2776,36 @@ class BasePage(QWidget):
     def refresh(self):
         pass
 
+class CompactScrollPage(BasePage):
+    def __init__(self, window, title, subtitle):
+        super().__init__(window, title, subtitle)
 
-class DashboardPage(BasePage):
+        # Vigtigt:
+        # BasePage bruger setWidgetResizable(True), hvilket tvinger page_body
+        # til at fylde hele scroll-området. Det giver tom plads nederst,
+        # når indholdet er lavere end vinduet.
+        self.scroll_area.setWidgetResizable(False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_compact_body_size()
+
+    def _sync_compact_body_size(self):
+        viewport_width = self.scroll_area.viewport().width()
+
+        if viewport_width <= 0:
+            return
+
+        self.page_body.setFixedWidth(viewport_width)
+
+        self.root.invalidate()
+        self.root.activate()
+
+        height = self.page_body.sizeHint().height()
+        self.page_body.setFixedHeight(height)
+
+
+class DashboardPage(CompactScrollPage):
     def __init__(self, window):
         super().__init__(
             window,
@@ -2790,6 +2821,7 @@ class DashboardPage(BasePage):
         self.drag_ghost = None
         self.drag_ghost_offset = None
         self.drag_scroll_delta = 0
+        self.dashboard_layout_animation = None
         self.drag_autoscroll_timer = QTimer(self)
         self.drag_autoscroll_timer.setInterval(16)
         self.drag_autoscroll_timer.timeout.connect(self._auto_scroll_drag)
@@ -2810,11 +2842,17 @@ class DashboardPage(BasePage):
         self.reorder_button.toggled.connect(self._set_reorder_mode)
         reorder_toolbar.addWidget(self.reorder_button, 0, Qt.AlignRight)
 
-        self.dashboard_layout = QVBoxLayout()
+        self.dashboard_container = QWidget()
+        self.dashboard_container.setObjectName("DashboardContainer")
+        self.dashboard_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        self.dashboard_layout = QVBoxLayout(self.dashboard_container)
         self.dashboard_layout.setContentsMargins(0, 0, 0, 0)
         self.dashboard_layout.setSpacing(16)
-        self.root.addLayout(self.dashboard_layout)
-        self.drop_indicator = DashboardDropIndicator(self.page_body)
+
+        self.root.addWidget(self.dashboard_container, 0, Qt.AlignTop)
+
+        self.drop_indicator = DashboardDropIndicator(self.dashboard_container)
 
         goal_panel = self._make_widget_frame("Rådighedsmål", "goal")
         self.goal_card = GoalHeaderWidget(show_title=False)
@@ -2928,12 +2966,15 @@ class DashboardPage(BasePage):
         ]
         self._render_widget_order()
 
-    def _render_widget_order(self):
+    def _render_widget_order(self, animate=False, extra_start_geometries=None):
         scroll_value = self.scroll_area.verticalScrollBar().value()
         edit_mode = self.reorder_button.isChecked()
         dragged_key = self.dragged_widget_key
         visible_order = [key for key in self.widget_order if key != dragged_key]
         drop_index = self.widget_order.index(dragged_key) if dragged_key in self.widget_order else None
+        start_geometries = self._capture_dashboard_geometries() if animate else {}
+        if extra_start_geometries:
+            start_geometries.update(extra_start_geometries)
 
         for widget in self.dashboard_widgets.values():
             self.dashboard_layout.removeWidget(widget)
@@ -2955,7 +2996,98 @@ class DashboardPage(BasePage):
             self.drop_indicator.show()
 
         self._update_add_widget_button()
+
+        self.dashboard_container.updateGeometry()
+        self._sync_compact_body_size()
+
         self._restore_scroll_position(scroll_value)
+
+        if animate:
+            self._animate_dashboard_reflow(start_geometries)
+
+    def _dashboard_reflow_widgets(self):
+        return list(self.dashboard_widgets.values()) + [self.drop_indicator]
+
+    def _capture_dashboard_geometries(self):
+        self.dashboard_layout.activate()
+        self.page_body.layout().activate()
+        geometries = {}
+        for widget in self._dashboard_reflow_widgets():
+            if widget.isVisible():
+                geometries[widget] = QRect(widget.geometry())
+        return geometries
+
+    def _stop_dashboard_reflow_animation(self):
+        if self.dashboard_layout_animation is not None:
+            self.dashboard_layout_animation.stop()
+            self.dashboard_layout_animation.deleteLater()
+            self.dashboard_layout_animation = None
+
+            self.dashboard_layout.invalidate()
+            self.dashboard_layout.activate()
+            self.dashboard_container.updateGeometry()
+
+            self.page_body.layout().invalidate()
+            self.page_body.layout().activate()
+
+    def _animate_dashboard_reflow(self, start_geometries):
+        self._stop_dashboard_reflow_animation()
+
+        self.dashboard_layout.activate()
+        self.dashboard_container.updateGeometry()
+        self.page_body.layout().activate()
+        QApplication.processEvents()
+
+        end_geometries = self._capture_dashboard_geometries()
+
+        animation_group = QParallelAnimationGroup(self)
+
+        for widget, end_geometry in end_geometries.items():
+            start_geometry = start_geometries.get(widget)
+            if start_geometry is None:
+                continue
+
+            start_pos = start_geometry.topLeft()
+            end_pos = end_geometry.topLeft()
+
+            if start_pos == end_pos:
+                continue
+
+            widget.move(start_pos)
+            widget.raise_()
+            self.dashboard_container.raise_()
+
+            animation = QPropertyAnimation(widget, b"pos", animation_group)
+            animation.setStartValue(start_pos)
+            animation.setEndValue(end_pos)
+            animation.setDuration(170)
+            animation.setEasingCurve(QEasingCurve.OutCubic)
+            animation_group.addAnimation(animation)
+
+        if animation_group.animationCount() == 0:
+            animation_group.deleteLater()
+            return
+
+        self.dashboard_layout_animation = animation_group
+        animation_group.finished.connect(lambda: self._finish_dashboard_reflow_animation(animation_group))
+        animation_group.start()
+
+    def _finish_dashboard_reflow_animation(self, animation_group):
+        if self.dashboard_layout_animation is animation_group:
+            self.dashboard_layout_animation = None
+
+        for widget in self._dashboard_reflow_widgets():
+            if widget.isVisible():
+                widget.updateGeometry()
+
+        self.dashboard_layout.invalidate()
+        self.dashboard_layout.activate()
+        self.dashboard_container.updateGeometry()
+
+        self.page_body.layout().invalidate()
+        self.page_body.layout().activate()
+
+        animation_group.deleteLater()
 
     def _restore_scroll_position(self, value):
         def restore():
@@ -3042,7 +3174,7 @@ class DashboardPage(BasePage):
         self.dragged_widget_key = key
         self.drag_last_global_pos = global_pos
         self._create_drag_ghost(key, global_pos)
-        self._render_widget_order()
+        self._render_widget_order(animate=True)
         self._update_drag_order(global_pos)
         self._update_auto_scroll(global_pos)
 
@@ -3060,11 +3192,12 @@ class DashboardPage(BasePage):
             return
 
         self._stop_auto_scroll()
+        finish_start_geometries = self._drag_finish_start_geometries(key)
         self._clear_drag_ghost()
         self.dragged_widget_key = None
         self.drag_last_global_pos = None
         self._save_widget_order()
-        self._render_widget_order()
+        self._render_widget_order(animate=True, extra_start_geometries=finish_start_geometries)
 
     def _update_drag_order(self, global_pos):
         key = self.dragged_widget_key
@@ -3079,7 +3212,14 @@ class DashboardPage(BasePage):
             return
 
         self.widget_order = reordered
-        self._render_widget_order()
+        self._render_widget_order(animate=True)
+
+    def _drag_finish_start_geometries(self, key):
+        if self.drag_ghost is None or key not in self.dashboard_widgets:
+            return {}
+
+        top_left = self.dashboard_container.mapFromGlobal(self.drag_ghost.mapToGlobal(QPoint(0, 0)))
+        return {self.dashboard_widgets[key]: QRect(top_left, self.drag_ghost.size())}
 
     def _create_drag_ghost(self, key, global_pos):
         self._clear_drag_ghost()
@@ -3127,15 +3267,19 @@ class DashboardPage(BasePage):
         self.drag_ghost_offset = None
 
     def _drag_target_index(self, global_pos):
-        cursor_y = self.page_body.mapFromGlobal(global_pos).y()
+        cursor_y = self.dashboard_container.mapFromGlobal(global_pos).y()
         target_index = 0
+
         for key in self.widget_order:
             if key == self.dragged_widget_key:
                 continue
+
             widget = self.dashboard_widgets[key]
-            center_y = widget.mapTo(self.page_body, widget.rect().center()).y()
+            center_y = widget.mapTo(self.dashboard_container, widget.rect().center()).y()
+
             if cursor_y > center_y:
                 target_index += 1
+
         return target_index
 
     def _update_auto_scroll(self, global_pos):
@@ -3272,6 +3416,9 @@ class DashboardPage(BasePage):
         self._fill_breakdown(summary["breakdown"])
         self._fill_recent(summary["rows"])
 
+        self.dashboard_container.updateGeometry()
+        self._sync_compact_body_size()
+
     def _arrange_cards(self, show_other_income):
         summary_cards = [
             self.net_card,
@@ -3321,6 +3468,9 @@ class DashboardPage(BasePage):
         fit_table_height(self.breakdown_table, 0, max_rows=8, min_rows=1)
         fit_table_height(self.recent_table, 0, max_rows=20, min_rows=1, bottom_padding=0)
 
+        self.dashboard_container.updateGeometry()
+        self._sync_compact_body_size()
+
     def _last_complete_period_info(self, other_income, budget_expenses):
         _, complete_periods = build_periods(self.data, self.settings)
         if not complete_periods:
@@ -3369,7 +3519,7 @@ class DashboardPage(BasePage):
         elif estimated_available is not None and estimated_available >= disposable_goal:
             self.goal_card.set_status(
                 "warning",
-                f"{format_money(estimated_available)} est. / {format_money(disposable_goal)}",
+                f"{format_money(estimated_available)} estimeret / {format_money(disposable_goal)}",
                 f"Estimatet når målet. Nu: {format_money(available_now)} af {format_money(disposable_goal)}.",
                 previous_period,
             )
@@ -3384,7 +3534,7 @@ class DashboardPage(BasePage):
             estimated_text = format_money(estimated_available) if estimated_available is not None else "N/A"
             self.goal_card.set_status(
                 "danger",
-                f"{estimated_text} est. / {format_money(disposable_goal)}",
+                f"{estimated_text} estimeret / {format_money(disposable_goal)}",
                 f"Estimatet er under målet på {format_money(disposable_goal)}.",
                 previous_period,
             )
