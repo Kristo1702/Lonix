@@ -3,7 +3,17 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 
-from PyQt5.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer
+from PyQt5.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtProperty,
+)
 from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -27,6 +37,9 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QStyle,
+    QStyleOptionButton,
+    QStylePainter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -93,8 +106,8 @@ DASHBOARD_AVAILABLE_WIDGET_ORDER = DASHBOARD_DEFAULT_WIDGET_ORDER + (
 DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY = "overblik budget widget tilføjet"
 DASHBOARD_WIDGET_TITLES = {
     "goal": "Rådighedsmål",
-    "progress": "Forløb",
-    "process": "Process",
+    "progress": "Tidslinje",
+    "process": "Løn indtil videre",
     "estimates": "Estimater",
     "stats": "Statistik",
     "budget": "Budget",
@@ -117,6 +130,21 @@ MONTH_NAMES = {
     11: "November",
     12: "December",
 }
+SHIFT_TABLE_MONTH_NAMES = {
+    1: "januar",
+    2: "februar",
+    3: "marts",
+    4: "april",
+    5: "maj",
+    6: "juni",
+    7: "juli",
+    8: "august",
+    9: "september",
+    10: "oktober",
+    11: "november",
+    12: "december",
+}
+SHIFT_TABLE_TIME_COLUMN_WIDTH = 176
 
 APP_STYLE = """
 * {
@@ -480,6 +508,16 @@ def format_date(value):
     return value.strftime("%d-%m-%Y")
 
 
+def format_shift_table_date(value):
+    if value is None:
+        return "N/A"
+    month_name = SHIFT_TABLE_MONTH_NAMES.get(value.month, str(value.month))
+    text = f"{value.day:02d} {month_name}"
+    if value <= datetime.now().date() - timedelta(days=365):
+        text = f"{text} {value.year}"
+    return text
+
+
 def parse_number_text(value):
     cleaned = value.strip().lower()
     for token in ["kr.", "kr", "t.", "timer", "time", "d.", "%"]:
@@ -618,6 +656,73 @@ class ModernComboBox(QComboBox):
         popup.move(self.mapToGlobal(self.rect().bottomLeft()) + QPointF(0, 4).toPoint())
 
 
+BasePushButton = QPushButton
+
+
+class AnimatedButton(BasePushButton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._button_inset = 2
+        self._button_inset_animation = QPropertyAnimation(self, b"buttonInset", self)
+        self._button_inset_animation.setDuration(120)
+        self._button_inset_animation.setEasingCurve(QEasingCurve.OutCubic)
+
+    @pyqtProperty(int)
+    def buttonInset(self):
+        return self._button_inset
+
+    @buttonInset.setter
+    def buttonInset(self, value):
+        self._button_inset = max(0, min(5, int(value)))
+        self.update()
+
+    def _generic_animation_enabled(self):
+        return not bool(self.property("skipGenericButtonAnimation"))
+
+    def _animate_inset(self, target, duration=120, easing=QEasingCurve.OutCubic):
+        if not self._generic_animation_enabled() or not self.isEnabled():
+            return
+        self._button_inset_animation.stop()
+        self._button_inset_animation.setStartValue(self._button_inset)
+        self._button_inset_animation.setEndValue(target)
+        self._button_inset_animation.setDuration(duration)
+        self._button_inset_animation.setEasingCurve(easing)
+        self._button_inset_animation.start()
+
+    def enterEvent(self, event):
+        self._animate_inset(0, 130, QEasingCurve.OutBack)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._animate_inset(2, 110, QEasingCurve.OutCubic)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._animate_inset(4, 70, QEasingCurve.OutCubic)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._animate_inset(0 if self.underMouse() else 2, 150, QEasingCurve.OutBack)
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        if not self._generic_animation_enabled():
+            super().paintEvent(event)
+            return
+
+        painter = QStylePainter(self)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        inset = self._button_inset
+        option.rect = self.rect().adjusted(inset, inset, -inset, -inset)
+        painter.drawControl(QStyle.CE_PushButton, option)
+
+
+QPushButton = AnimatedButton
+
+
 class VisibleCheckBox(QCheckBox):
     def __init__(self):
         super().__init__()
@@ -664,6 +769,30 @@ def format_period(period):
     return f"{format_date(period['periode_start'])} - {format_date(period['periode_slut'])}"
 
 
+def format_short_date(value):
+    if value is None:
+        return "N/A"
+    return value.strftime("%d-%m")
+
+
+def format_short_date_with_month(value, include_year=False):
+    if value is None:
+        return "N/A"
+    month_name = SHIFT_TABLE_MONTH_NAMES.get(value.month, str(value.month))
+    text = f"{value.day:02d} {month_name}"
+    if include_year:
+        text = f"{text} {value.year}"
+    return text
+
+
+def format_period_without_year(period):
+    include_year = period["periode_slut"] <= datetime.now().date() - timedelta(days=365)
+    return (
+        f"{format_short_date_with_month(period['periode_start'], include_year)} - "
+        f"{format_short_date_with_month(period['periode_slut'], include_year)}"
+    )
+
+
 def month_title(period):
     month_name = MONTH_NAMES.get(period["periode_slut"].month, str(period["periode_slut"].month))
     return f"{month_name} {period['periode_slut'].year}"
@@ -688,7 +817,7 @@ def average_or_none(values):
     return sum(values) / len(values) if values else None
 
 
-def entry_rows(data):
+def entry_rows(data, settings=None):
     rows = []
     for entry in data:
         dato_str, info = next(iter(entry.items()))
@@ -714,6 +843,35 @@ def entry_rows(data):
             row["slut"] = str(info.get("slut"))
 
         rows.append(row)
+
+    try:
+        settings = settings if settings is not None else ft.load_settings()
+        if has_required_settings(settings):
+            periods = {}
+            for row in rows:
+                period_key = ft.get_salary_period_for_date(
+                    row["dato"],
+                    settings.get("løn start"),
+                    settings.get("løn slut"),
+                )
+                periods.setdefault(period_key, []).append(row)
+
+            for period_rows in periods.values():
+                period_brutto = sum(row["brutto"] for row in period_rows)
+                period_netto = ft.calculate_salary_breakdown(
+                    period_brutto,
+                    settings.get("skat", 0),
+                    settings.get("fradrag", 0),
+                    settings.get("am bidrag", 0),
+                )["netto"]
+                for row in period_rows:
+                    row["netto"] = period_netto * (row["brutto"] / period_brutto) if period_brutto else 0.0
+    except (OSError, ValueError, TypeError):
+        for row in rows:
+            row["netto"] = 0.0
+
+    for row in rows:
+        row.setdefault("netto", 0.0)
 
     return sorted(rows, key=lambda row: row["dato"], reverse=True)
 
@@ -783,7 +941,7 @@ def delete_entry(entry_date):
 
 
 def last_rate(data, settings=None):
-    rows = entry_rows(data)
+    rows = entry_rows(data, settings)
     if not rows:
         return ft.get_default_hourly_rate(settings)
     return rows[0]["timeløn"]
@@ -802,7 +960,7 @@ def current_period_summary(data, settings, today=None):
 
     rows = [
         row
-        for row in entry_rows(data)
+        for row in entry_rows(data, settings)
         if periode_start <= row["dato"] <= periode_slut
     ]
     timer = sum(row["timer"] for row in rows)
@@ -841,11 +999,12 @@ def table_item(value, align=Qt.AlignLeft | Qt.AlignVCenter):
 def format_work_time(row):
     start = row.get("start")
     slut = row.get("slut")
+    hours_text = f"{format_number(row['timer'])} t."
 
     if start and slut:
-        return f"{start} - {slut} ({format_number(row['timer'])}t)"
+        return f"{start} - {slut}\n{hours_text}"
 
-    return format_number(row["timer"])
+    return hours_text
 
 
 def load_logo_pixmap(size=None):
@@ -875,6 +1034,32 @@ def app_icon():
     return QIcon(pixmap) if not pixmap.isNull() else QIcon()
 
 
+def success_icon_pixmap(size=42):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#16a34a"))
+    margin = 3
+    painter.drawEllipse(QRectF(margin, margin, size - (margin * 2), size - (margin * 2)))
+    painter.setPen(QPen(QColor("#ffffff"), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    painter.drawLine(QPointF(size * 0.28, size * 0.52), QPointF(size * 0.43, size * 0.67))
+    painter.drawLine(QPointF(size * 0.43, size * 0.67), QPointF(size * 0.73, size * 0.35))
+    painter.end()
+    return pixmap
+
+
+def show_success_message(parent, title, text):
+    message = QMessageBox(parent)
+    message.setWindowTitle(title)
+    message.setWindowIcon(app_icon())
+    message.setText(text)
+    message.setIconPixmap(success_icon_pixmap())
+    message.setStandardButtons(QMessageBox.Ok)
+    message.exec_()
+
+
 def setup_table(table, headers):
     table.setMinimumWidth(0)
     table.setColumnCount(len(headers))
@@ -890,7 +1075,19 @@ def setup_table(table, headers):
     table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
 
-def fit_table_height(table, row_count, max_rows=20, min_rows=1):
+def setup_shift_table_columns(table, time_column, check_column=None):
+    header = table.horizontalHeader()
+    header.setStretchLastSection(False)
+    for column in range(table.columnCount()):
+        header.setSectionResizeMode(column, QHeaderView.Stretch)
+    header.setSectionResizeMode(time_column, QHeaderView.Interactive)
+    table.setColumnWidth(time_column, SHIFT_TABLE_TIME_COLUMN_WIDTH)
+    if check_column is not None:
+        header.setSectionResizeMode(check_column, QHeaderView.ResizeToContents)
+        table.setColumnWidth(check_column, 44)
+
+
+def fit_table_height(table, row_count, max_rows=20, min_rows=1, bottom_padding=8):
     table.resizeRowsToContents()
     visible_rows = min(max(row_count, min_rows), max_rows)
     default_row_height = max(table.verticalHeader().defaultSectionSize(), table.fontMetrics().height() + 14, 30)
@@ -899,7 +1096,7 @@ def fit_table_height(table, row_count, max_rows=20, min_rows=1):
         for index in range(visible_rows)
     )
     header_height = max(table.horizontalHeader().height(), table.horizontalHeader().sizeHint().height(), 34)
-    height = header_height + row_height + (table.frameWidth() * 2) + 8
+    height = header_height + row_height + (table.frameWidth() * 2) + bottom_padding
     table.setFixedHeight(max(header_height + default_row_height + 10, height))
 
 
@@ -1002,8 +1199,13 @@ class MetricCard(QFrame):
         self.accent = accent
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(4)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(6)
+
+        accent_bar = QFrame()
+        accent_bar.setFixedSize(42, 4)
+        accent_bar.setStyleSheet(f"background: {accent}; border-radius: 2px;")
+        layout.addWidget(accent_bar, 0, Qt.AlignLeft)
 
         self.title_label = QLabel(title)
         self.title_label.setObjectName("MetricTitle")
@@ -1028,7 +1230,6 @@ class MetricCard(QFrame):
             QFrame#Card {{
                 background: #ffffff;
                 border: 1px solid #dde3ea;
-                border-left: 4px solid {accent};
                 border-radius: 8px;
             }}
             """
@@ -1140,20 +1341,53 @@ class DashboardMetricStrip(QWidget):
 
 
 class DashboardIconButton(QPushButton):
-    def __init__(self, icon_name, tooltip="", checkable=False, parent=None):
+    def __init__(self, icon_name, tooltip="", checkable=False, parent=None, label_text=""):
         super().__init__(parent)
+        self.setProperty("skipGenericButtonAnimation", True)
         self.icon_name = icon_name
+        self.label_text = label_text
+        self.base_width = 42
+        self.expanded_width = 116 if label_text else self.base_width
+        self._expansion = 0
+        self._expansion_animation = QPropertyAnimation(self, b"expansion", self)
         self.setCheckable(checkable)
-        self.setFixedSize(42, 38)
+        self.setFixedSize(self.base_width, 38)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
         self.setToolTip(tooltip)
+        self.toggled.connect(lambda checked: self._animate_expansion(checked or self.underMouse()))
+
+    @pyqtProperty(int)
+    def expansion(self):
+        return self._expansion
+
+    @expansion.setter
+    def expansion(self, value):
+        self._expansion = max(0, int(value))
+        self.setFixedWidth(self.base_width + self._expansion)
+        self.update()
+
+    def _target_expansion(self):
+        return self.expanded_width - self.base_width
+
+    def _animate_expansion(self, expanded):
+        if not self.label_text:
+            return
+
+        self._expansion_animation.stop()
+        self._expansion_animation.setStartValue(self._expansion)
+        self._expansion_animation.setEndValue(self._target_expansion() if expanded else 0)
+        self._expansion_animation.setDuration(210 if expanded else 140)
+        self._expansion_animation.setEasingCurve(QEasingCurve.OutBack if expanded else QEasingCurve.InOutCubic)
+        self._expansion_animation.start()
 
     def enterEvent(self, event):
+        self._animate_expansion(True)
         self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        self._animate_expansion(self.isChecked())
         self.update()
         super().leaveEvent(event)
 
@@ -1179,8 +1413,20 @@ class DashboardIconButton(QPushButton):
         painter.setBrush(active_fill if active else (hover_fill if hovered else QColor(0, 0, 0, 0)))
         painter.drawRoundedRect(button_rect, 7, 7)
 
+        if self.label_text and self._expansion > 6:
+            painter.save()
+            font = QFont(self.font())
+            font.setWeight(QFont.DemiBold)
+            painter.setFont(font)
+            painter.setOpacity(min(1.0, self._expansion / max(1, self._target_expansion())))
+            painter.setPen(icon_color)
+            text_rect = QRectF(12, 0, max(0, self.width() - self.base_width + 10), self.height())
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, self.label_text)
+            painter.restore()
+
         painter.setPen(QPen(icon_color, 2.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        center = QPointF(self.width() / 2, self.height() / 2)
+        icon_center_x = self.width() - (self.base_width / 2) if self.label_text else self.width() / 2
+        center = QPointF(icon_center_x, self.height() / 2)
 
         if self.icon_name == "add":
             length = 12
@@ -1327,7 +1573,7 @@ class DashboardWidgetFrame(QFrame):
         title_label.setWordWrap(True)
         header.addWidget(title_label, 1)
 
-        self.remove_button = DashboardIconButton("remove", "Fjern widget", parent=self)
+        self.remove_button = DashboardIconButton("remove", "Fjern widget", parent=self, label_text="Fjern")
         self.remove_button.clicked.connect(lambda checked=False: self.remove_callback(self.key))
         header.addWidget(self.remove_button)
 
@@ -1456,7 +1702,7 @@ class DashboardWidgetPreview(QFrame):
             row.addWidget(self._text_block("2.400 / 2.000 kr.", "Sidste periode vist ved siden af"), 1)
             self.preview_layout.addLayout(row)
         elif self.key == "progress":
-            self.preview_layout.addWidget(self._bar("Periodens forløb", 64))
+            self.preview_layout.addWidget(self._bar("Periodens tidslinje", 64))
             self.preview_layout.addWidget(self._small_text("4 vagter · 3.200 kr. brutto"))
         elif self.key == "process":
             self.preview_layout.addLayout(self._metric_row([("Netto", "3.600"), ("Rådighed", "1.850"), ("Timer", "24,5")]))
@@ -1713,7 +1959,7 @@ class GoalHeaderWidget(QWidget):
         previous_title.setStyleSheet("color: #64707d; font-size: 8.5pt; font-weight: 850;")
         self.previous_label = QLabel("Ingen afsluttet periode")
         self.previous_label.setStyleSheet("color: #334155; font-size: 11pt; font-weight: 850;")
-        self.previous_detail_label = QLabel("Når en periode er afsluttet, vises netto og rådighed her.")
+        self.previous_detail_label = QLabel("Når en periode er afsluttet, vises rådighedsbeløbet ger.")
         self.previous_detail_label.setWordWrap(True)
         self.previous_detail_label.setStyleSheet("color: #64707d; font-size: 8.5pt;")
         previous.addWidget(previous_title)
@@ -1725,10 +1971,10 @@ class GoalHeaderWidget(QWidget):
 
     def set_status(self, state, value, detail, previous_period=None):
         styles = {
-            "success": ("NÅET", "#16a34a"),
-            "warning": ("PÅ VEJ", "#d97706"),
-            "danger": ("UNDER", "#dc2626"),
-            "neutral": ("IKKE SAT", "#64748b"),
+            "success": ("MÅLET ER OPNÅET", "#16a34a"),
+            "warning": ("ESTIMERET AT OPNÅ", "#d97706"),
+            "danger": ("ESTIMERET IKKE AT OPNÅ", "#dc2626"),
+            "neutral": ("IKKE INDSTILLET", "#64748b"),
         }
         label, color = styles.get(state, styles["neutral"])
         self.status_pill.setText(label)
@@ -1739,7 +1985,7 @@ class GoalHeaderWidget(QWidget):
             self.previous_detail_label.setText("")
         else:
             self.previous_label.setText("Ingen afsluttet periode")
-            self.previous_detail_label.setText("Når en periode er afsluttet, vises netto og rådighed her.")
+            self.previous_detail_label.setText("Når en periode er afsluttet, vises sidste rådighedsbeløbet her.")
         self.status_pill.setStyleSheet(
             f"""
             QLabel {{
@@ -1879,7 +2125,7 @@ class PeriodProgressWidget(QWidget):
         total_days = max(1, (self.period_end - self.period_start).days + 1)
         elapsed_days = min(max((self.today - self.period_start).days + 1, 0), total_days) if self.today else 0
         total_brutto = sum(row["brutto"] for row in self.rows)
-        best_shift = max(self.rows, key=lambda row: row["brutto"]) if self.rows else None
+        best_shift = max(self.rows, key=lambda row: row.get("netto", 0)) if self.rows else None
 
         painter.setPen(QColor("#334155"))
         painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
@@ -1967,7 +2213,7 @@ class PeriodProgressWidget(QWidget):
             Qt.AlignLeft | Qt.AlignVCenter,
             f"{format_date(self.period_start)} - {format_date(self.period_end)}",
         )
-        best_text = f"Bedste vagt: {format_money(best_shift['brutto'])}" if best_shift else "Ingen vagter registreret endnu"
+        best_text = f"Bedste vagt: {format_money(best_shift.get('netto', 0))}" if best_shift else "Ingen vagter registreret endnu"
         painter.drawText(
             QRectF(rect.center().x(), footer_y, rect.width() / 2 - 18, 18),
             Qt.AlignRight | Qt.AlignVCenter,
@@ -2327,12 +2573,12 @@ class DashboardPage(BasePage):
 
         reorder_toolbar.addStretch()
 
-        self.add_widget_button = DashboardIconButton("add", "Tilføj widget", parent=self)
+        self.add_widget_button = DashboardIconButton("add", "Tilføj widget", parent=self, label_text="Tilføj")
         self.add_widget_button.clicked.connect(self._show_add_widget_dialog)
         self.add_widget_button.hide()
         reorder_toolbar.addWidget(self.add_widget_button, 0, Qt.AlignRight)
 
-        self.reorder_button = DashboardIconButton("widgets", "Rediger widgets", checkable=True, parent=self)
+        self.reorder_button = DashboardIconButton("widgets", "Rediger widgets", checkable=True, parent=self, label_text="Widgets")
         self.reorder_button.toggled.connect(self._set_reorder_mode)
         reorder_toolbar.addWidget(self.reorder_button, 0, Qt.AlignRight)
 
@@ -2347,7 +2593,7 @@ class DashboardPage(BasePage):
         goal_panel.addWidget(self.goal_card)
         self.dashboard_widgets["goal"] = goal_panel
 
-        progress_panel = self._make_widget_frame("Forløb", "progress")
+        progress_panel = self._make_widget_frame("Tidslinje", "progress")
         self.period_progress = PeriodProgressWidget()
         self.progress_detail = QLabel()
         self.progress_detail.setObjectName("PageSubtitle")
@@ -2356,7 +2602,7 @@ class DashboardPage(BasePage):
         progress_panel.addWidget(self.progress_detail)
         self.dashboard_widgets["progress"] = progress_panel
 
-        process_panel = self._make_widget_frame("Process", "process")
+        process_panel = self._make_widget_frame("Løn indtil videre", "process")
         self.summary_strip = DashboardMetricStrip("", columns=3, embedded=True)
         process_panel.addWidget(self.summary_strip)
         self.dashboard_widgets["process"] = process_panel
@@ -2422,7 +2668,8 @@ class DashboardPage(BasePage):
         recent_panel = self._make_widget_frame("Vagter i perioden", "recent")
         recent_panel.addLayout(self._make_dashboard_link_row("Gå til vagter", self._go_to_history_page))
         self.recent_table = QTableWidget()
-        setup_table(self.recent_table, ["Dato", "Timer", "Pause", "Brutto"])
+        setup_table(self.recent_table, ["Dato", "Timer", "Pause", "Netto"])
+        setup_shift_table_columns(self.recent_table, 1)
         recent_panel.addWidget(self.recent_table)
         self.dashboard_widgets["recent"] = recent_panel
 
@@ -2784,7 +3031,7 @@ class DashboardPage(BasePage):
         if summary["rows"]:
             self.progress_detail.setText(
                 f"{elapsed_days} af {total_days} dage er gået. {remaining_days} dage tilbage. "
-                f"Registreret brutto i perioden: {format_money(summary['brutto'])}."
+                f"Netto løn i perioden: {format_money(summary['netto'])}."
             )
         else:
             self.progress_detail.setText(
@@ -2844,7 +3091,7 @@ class DashboardPage(BasePage):
         self.breakdown_table.setRowCount(0)
         self.recent_table.setRowCount(0)
         fit_table_height(self.breakdown_table, 0, max_rows=8, min_rows=1)
-        fit_table_height(self.recent_table, 0, max_rows=20, min_rows=1)
+        fit_table_height(self.recent_table, 0, max_rows=20, min_rows=1, bottom_padding=0)
 
     def _last_complete_period_info(self, other_income, budget_expenses):
         _, complete_periods = build_periods(self.data, self.settings)
@@ -2898,6 +3145,13 @@ class DashboardPage(BasePage):
                 f"Estimatet når målet. Nu: {format_money(available_now)} af {format_money(disposable_goal)}.",
                 previous_period,
             )
+        elif estimated_available is None:
+            self.goal_card.set_status(
+                "neutral",
+                f"N/A / {format_money(disposable_goal)}",
+                "Indstil dit budget i Budget-sektionen for at beregne rådighedsmål.",
+                previous_period,
+            )
         else:
             estimated_text = format_money(estimated_available) if estimated_available is not None else "N/A"
             self.goal_card.set_status(
@@ -2926,11 +3180,12 @@ class DashboardPage(BasePage):
     def _fill_recent(self, rows):
         self.recent_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
-            self.recent_table.setItem(row_index, 0, table_item(format_date(row["dato"])))
+            self.recent_table.setItem(row_index, 0, table_item(format_shift_table_date(row["dato"])))
             self.recent_table.setItem(row_index, 1, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
             self.recent_table.setItem(row_index, 2, table_item(format_pause_minutes(row["pause"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.recent_table.setItem(row_index, 3, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
-        fit_table_height(self.recent_table, len(rows), max_rows=20, min_rows=min(3, max(1, len(rows))))
+            self.recent_table.setItem(row_index, 3, table_item(format_money(row["netto"]), Qt.AlignRight | Qt.AlignVCenter))
+        setup_shift_table_columns(self.recent_table, 1)
+        fit_table_height(self.recent_table, len(rows), max_rows=20, min_rows=min(3, max(1, len(rows))), bottom_padding=0)
 
 
 class ShiftEntryDialog(QDialog):
@@ -3104,7 +3359,7 @@ class ShiftEntryDialog(QDialog):
         )
         self.saved_date = selected_date
 
-        QMessageBox.information(
+        show_success_message(
             self,
             "Vagt gemt",
             f"{key} blev gemt med {format_number(hours)} betalte timer á {format_money(rate)}.",
@@ -3185,6 +3440,11 @@ class CalculatorPage(BasePage):
         tax_form.addRow("Skat %", self.tax_field)
         tax_form.addRow("AM-bidrag %", self.am_field)
 
+        tax_note = QLabel("Du kan se dine skatteoplysninger på borger.dk -> TastSelv.")
+        tax_note.setObjectName("PageSubtitle")
+        tax_note.setWordWrap(True)
+        input_layout.addWidget(tax_note)
+
         result_panel, result_layout = make_panel("Resultat")
         content.addWidget(result_panel, 1)
 
@@ -3248,6 +3508,160 @@ class CalculatorPage(BasePage):
             self.result_table.setItem(row_index, 1, table_item(value, Qt.AlignRight | Qt.AlignVCenter))
 
 
+class PayrollSlipDialog(QDialog):
+    def __init__(self, parent, period, settings):
+        super().__init__(parent)
+        self.period = period
+        self.settings = settings
+        self.setModal(True)
+        self.setWindowTitle(f"Lønseddel - {month_title(period)}")
+        self.setWindowIcon(app_icon())
+        self.setMinimumSize(720, 620)
+        self.resize(820, 700)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setSpacing(14)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        outer.addWidget(scroll, 1)
+
+        body = QWidget()
+        scroll.setWidget(body)
+        root = QVBoxLayout(body)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
+
+        self._build_header(root)
+        self._build_metrics(root)
+        self._build_breakdown(root)
+        self._build_shifts(root)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        close_button = QPushButton("Luk")
+        close_button.clicked.connect(self.accept)
+        button_row.addWidget(close_button)
+        outer.addLayout(button_row)
+
+    def _label(self, text, style="", word_wrap=False):
+        label = QLabel(text)
+        label.setStyleSheet(style)
+        label.setWordWrap(word_wrap)
+        return label
+
+    def _build_header(self, root):
+        panel = QFrame()
+        panel.setStyleSheet(
+            """
+            QFrame {
+                background: #ffffff;
+                border: 1px solid #dbe3ec;
+                border-radius: 8px;
+            }
+            QLabel {
+                border: 0;
+                background: transparent;
+            }
+            """
+        )
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(18)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        title_box.addWidget(self._label("Lønseddel", "color: #64748b; font-weight: 850;"))
+        title_box.addWidget(self._label(month_title(self.period), "color: #0f172a; font-size: 22pt; font-weight: 900;"))
+        title_box.addWidget(
+            self._label(
+                f"Periode {format_period_without_year(self.period)}",
+                "color: #475569; font-size: 10.5pt;",
+            )
+        )
+        layout.addLayout(title_box, 1)
+
+        total = self.period["netto"] + ft.get_other_income(self.settings)
+        total_box = QVBoxLayout()
+        total_box.setSpacing(4)
+        total_box.addWidget(self._label("Total udbetalt", "color: #64748b; font-weight: 850;"))
+        total_box.addWidget(
+            self._label(format_money(total), "color: #1f8a70; font-size: 20pt; font-weight: 900;")
+        )
+        layout.addLayout(total_box)
+        root.addWidget(panel)
+
+    def _build_metrics(self, root):
+        shift_count = len(self.period.get("shifts", [])) or int(self.period.get("vagter", 0))
+        pause = self.period.get("pause", 0)
+        duration = self.period.get("varighed", self.period["timer"] + pause)
+        avg_rate = self.period["brutto"] / self.period["timer"] if self.period["timer"] else None
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        metrics = [
+            ("Udbetalt (Netto)", format_money(self.period["netto"]), "#1f8a70"),
+            ("Betalte timer", f"{format_number(self.period['timer'])} t.", "#7c3aed"),
+            ("Antal vagter", str(shift_count), "#475569"),
+            ("Gns. timeløn", format_money(avg_rate), "#0f766e"),
+            ("Timer før pause", f"{format_number(duration)} t.", "#2563eb"),
+            ("Pause", f"{format_pause_minutes(pause)} min.", "#d97706"),
+        ]
+        for index, (title, value, accent) in enumerate(metrics):
+            grid.addWidget(MetricCard(title, value, accent=accent), index // 3, index % 3)
+        root.addLayout(grid)
+
+    def _build_breakdown(self, root):
+        panel, layout = make_panel("Beregning")
+        root.addWidget(panel)
+
+        other_income = ft.get_other_income(self.settings)
+        total = self.period["netto"] + other_income
+        rows = [
+            ("Brutto løn", format_money(self.period["brutto"])),
+            ("AM-bidrag", f"-{format_money(self.period['am_bidrag'])}"),
+            ("Efter AM-bidrag", format_money(self.period.get("efter_am"))),
+            ("Fradrag", format_money(self.period.get("fradrag"))),
+            ("Skattegrundlag", format_money(self.period.get("skattegrundlag"))),
+            ("Skat", f"-{format_money(self.period['skat'])}"),
+            ("Netto løn", format_money(self.period["netto"])),
+            ("Anden indkomst (netto)", format_money(other_income)),
+            ("Total udbetalt", format_money(total)),
+        ]
+
+        table = QTableWidget()
+        setup_table(table, ["Post", "Beløb"])
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setRowCount(len(rows))
+        for row_index, (label, value) in enumerate(rows):
+            table.setItem(row_index, 0, table_item(label))
+            table.setItem(row_index, 1, table_item(value, Qt.AlignRight | Qt.AlignVCenter))
+        fit_table_height(table, len(rows), max_rows=len(rows), min_rows=len(rows), bottom_padding=0)
+        layout.addWidget(table)
+
+    def _build_shifts(self, root):
+        shifts = sorted(self.period.get("shifts", []), key=lambda shift: shift["dato"])
+        if not shifts:
+            return
+
+        panel, layout = make_panel("Vagter i perioden")
+        root.addWidget(panel)
+        table = QTableWidget()
+        setup_table(table, ["Dato", "Timer", "Pause", "Timeløn", "Netto"])
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setRowCount(len(shifts))
+        for row_index, shift in enumerate(shifts):
+            table.setItem(row_index, 0, table_item(format_shift_table_date(shift["dato"])))
+            table.setItem(row_index, 1, table_item(f"{format_number(shift['timer'])} t.", Qt.AlignRight | Qt.AlignVCenter))
+            table.setItem(row_index, 2, table_item(f"{format_pause_minutes(shift.get('pause', 0))} min.", Qt.AlignRight | Qt.AlignVCenter))
+            table.setItem(row_index, 3, table_item(format_money(shift.get("timeløn")), Qt.AlignRight | Qt.AlignVCenter))
+            table.setItem(row_index, 4, table_item(format_money(shift.get("netto")), Qt.AlignRight | Qt.AlignVCenter))
+        fit_table_height(table, len(shifts), max_rows=8, min_rows=min(3, len(shifts)), bottom_padding=0)
+        layout.addWidget(table)
+
+
 class PaymentsPage(BasePage):
     def __init__(self, window):
         super().__init__(
@@ -3256,26 +3670,13 @@ class PaymentsPage(BasePage):
             "Afsluttede lønperioder med løn, anden indkomst og total udbetaling.",
         )
 
-        content = QHBoxLayout()
-        content.setSpacing(16)
-        self.root.addLayout(content, 1)
-
-        table_panel, table_layout = make_panel("Afsluttede lønsedler")
-        content.addWidget(table_panel, 2)
+        table_panel, table_layout = make_panel("Afsluttede lønperioder")
+        self.root.addWidget(table_panel)
         self.payments_table = QTableWidget()
-        setup_table(self.payments_table, ["Periode", "Vagter", "Timer", "Pause", "Brutto", "Netto", "Total"])
-        self.payments_table.itemSelectionChanged.connect(self._update_detail)
+        setup_table(self.payments_table, ["Periode", "Vagter", "Timer", "Netto", "Total", "Detaljer"])
+        self.payments_table.setSelectionMode(QAbstractItemView.NoSelection)
         table_layout.addWidget(self.payments_table)
-
-        detail_panel, detail_layout = make_panel("Detaljer")
-        content.addWidget(detail_panel, 1)
-        self.detail_title = QLabel("Vælg en udbetaling")
-        self.detail_title.setObjectName("MetricValue")
-        self.detail_title.setWordWrap(True)
-        detail_layout.addWidget(self.detail_title)
-        self.detail_table = QTableWidget()
-        setup_table(self.detail_table, ["Post", "Værdi"])
-        detail_layout.addWidget(self.detail_table)
+        self.root.addStretch()
 
         self.payments = []
 
@@ -3288,53 +3689,58 @@ class PaymentsPage(BasePage):
         for row_index, period in enumerate(self.payments):
             total = period["netto"] + other_income
             shift_count = len(period.get("shifts", [])) or int(period.get("vagter", 0))
-            self.payments_table.setItem(row_index, 0, table_item(f"{month_title(period)}\n{format_period(period)}"))
+            period_label = format_period_without_year(period)
+            self.payments_table.setItem(row_index, 0, table_item(period_label))
             self.payments_table.setItem(row_index, 1, table_item(str(shift_count), Qt.AlignRight | Qt.AlignVCenter))
-            self.payments_table.setItem(row_index, 2, table_item(format_number(period["timer"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.payments_table.setItem(row_index, 3, table_item(format_pause_minutes(period.get("pause", 0)), Qt.AlignRight | Qt.AlignVCenter))
-            self.payments_table.setItem(row_index, 4, table_item(format_money(period["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.payments_table.setItem(row_index, 5, table_item(format_money(period["netto"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.payments_table.setItem(row_index, 6, table_item(format_money(total), Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 2, table_item(f"{format_number(period['timer'])} t.", Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 3, table_item(format_money(period["netto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.payments_table.setItem(row_index, 4, table_item(format_money(total), Qt.AlignRight | Qt.AlignVCenter))
+            self._set_detail_button(row_index)
 
-        if self.payments:
-            self.payments_table.resizeRowsToContents()
-            self.payments_table.selectRow(0)
-            self._update_detail()
-        else:
-            self.detail_title.setText("Ingen afsluttede udbetalinger")
-            self.detail_table.setRowCount(0)
+        self._resize_payment_columns()
+        self._fit_payment_table_height()
 
-    def _update_detail(self):
-        selected = self.payments_table.currentRow()
-        if selected < 0 or selected >= len(self.payments):
+    def _set_detail_button(self, row_index):
+        button = QPushButton("Detaljer")
+        button.setObjectName("InlineButton")
+        button.setCursor(Qt.PointingHandCursor)
+        button.clicked.connect(lambda checked=False, index=row_index: self._open_detail(index))
+
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.addWidget(button)
+        self.payments_table.setCellWidget(row_index, 5, wrapper)
+
+    def _resize_payment_columns(self):
+        header = self.payments_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        self.payments_table.setColumnWidth(0, 170)
+        for column in range(1, self.payments_table.columnCount()):
+            header.setSectionResizeMode(column, QHeaderView.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+
+    def _fit_payment_table_height(self):
+        row_height = 64
+        for row_index in range(self.payments_table.rowCount()):
+            self.payments_table.setRowHeight(row_index, row_height)
+        header_height = max(
+            self.payments_table.horizontalHeader().height(),
+            self.payments_table.horizontalHeader().sizeHint().height(),
+            42,
+        )
+        visible_rows = min(max(self.payments_table.rowCount(), 1), 12)
+        height = header_height + (visible_rows * row_height) + (self.payments_table.frameWidth() * 2)
+        self.payments_table.setFixedHeight(height)
+
+    def _open_detail(self, index):
+        if index < 0 or index >= len(self.payments):
             return
-        period = self.payments[selected]
-        other_income = ft.get_other_income(self.settings)
-        total = period["netto"] + other_income
-        avg_rate = period["brutto"] / period["timer"] if period["timer"] else None
-        shift_count = len(period.get("shifts", [])) or int(period.get("vagter", 0))
-        self.detail_title.setText(month_title(period))
-        rows = [
-            ("Periode", format_period(period)),
-            ("Vagter", str(shift_count)),
-            ("Timer før pause", f"{format_number(period.get('varighed', period['timer'] + period.get('pause', 0)))} t."),
-            ("Pause", f"{format_pause_minutes(period.get('pause', 0))} min."),
-            ("Betalte timer", f"{format_number(period['timer'])} t."),
-            ("Gns. timeløn", format_money(avg_rate)),
-            ("Brutto løn", format_money(period["brutto"])),
-            ("AM-bidrag", f"-{format_money(period['am_bidrag'])}"),
-            ("Efter AM-bidrag", format_money(period.get("efter_am"))),
-            ("Fradrag", format_money(period.get("fradrag"))),
-            ("Skattegrundlag", format_money(period.get("skattegrundlag"))),
-            ("Skat", f"-{format_money(period['skat'])}"),
-            ("Netto løn", format_money(period["netto"])),
-            ("Anden indkomst (netto)", format_money(other_income)),
-            ("Total udbetalt", format_money(total)),
-        ]
-        self.detail_table.setRowCount(len(rows))
-        for row_index, (label, value) in enumerate(rows):
-            self.detail_table.setItem(row_index, 0, table_item(label))
-            self.detail_table.setItem(row_index, 1, table_item(value, Qt.AlignRight | Qt.AlignVCenter))
+        dialog = PayrollSlipDialog(self, self.payments[index], self.settings)
+        dialog.exec_()
 
 
 class StatisticsPage(BasePage):
@@ -3647,7 +4053,7 @@ class HistoryPage(BasePage):
         self.root.addLayout(top)
         self.total_card = MetricCard("Registreringer", accent="#1f8a70")
         self.hours_card = MetricCard("Timer i alt", accent="#2563eb")
-        self.gross_card = MetricCard("Brutto i alt", accent="#d97706")
+        self.gross_card = MetricCard("Netto i alt", accent="#d97706")
         top.addWidget(self.total_card)
         top.addWidget(self.hours_card)
         top.addWidget(self.gross_card)
@@ -3673,9 +4079,8 @@ class HistoryPage(BasePage):
         toolbar.addWidget(self.delete_checked_button)
 
         self.table = QTableWidget()
-        setup_table(self.table, ["", "Dato", "Timer", "Pause", "Brutto"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.setColumnWidth(0, 44)
+        setup_table(self.table, ["", "Dato", "Timer", "Pause", "Netto"])
+        setup_shift_table_columns(self.table, 2, check_column=0)
         self.table.itemSelectionChanged.connect(self._load_selected_row)
         layout.addWidget(self.table)
 
@@ -3727,23 +4132,23 @@ class HistoryPage(BasePage):
 
     def refresh(self):
         previous_selected_date = self.selected_original_date
-        self.rows = entry_rows(self.data)
+        self.rows = entry_rows(self.data, self.settings)
         self.total_card.set_values(str(len(self.rows)), "Gemte vagter")
         self.hours_card.set_values(f"{format_number(sum(row['timer'] for row in self.rows))} t.", "Alle registreringer")
-        self.gross_card.set_values(format_money(sum(row["brutto"] for row in self.rows)), "Før skat")
+        self.gross_card.set_values(format_money(sum(row["netto"] for row in self.rows)), "Efter skat")
 
         self.table.blockSignals(True)
         self.table.setRowCount(len(self.rows))
 
         for row_index, row in enumerate(self.rows):
             self._set_check_widget(row_index)
-            self.table.setItem(row_index, 1, table_item(format_date(row["dato"])))
+            self.table.setItem(row_index, 1, table_item(format_shift_table_date(row["dato"])))
             self.table.setItem(row_index, 2, table_item(format_work_time(row), Qt.AlignRight | Qt.AlignVCenter))
             self.table.setItem(row_index, 3, table_item(format_pause_minutes(row["pause"]), Qt.AlignRight | Qt.AlignVCenter))
-            self.table.setItem(row_index, 4, table_item(format_money(row["brutto"]), Qt.AlignRight | Qt.AlignVCenter))
+            self.table.setItem(row_index, 4, table_item(format_money(row["netto"]), Qt.AlignRight | Qt.AlignVCenter))
 
         self.table.resizeRowsToContents()
-        self.table.resizeColumnToContents(0)
+        setup_shift_table_columns(self.table, 2, check_column=0)
         self.table.blockSignals(False)
         self._update_checked_rows()
         self._select_after_refresh(previous_selected_date)
@@ -4183,7 +4588,7 @@ class SettingsPage(BasePage):
         form.addRow("AM-bidrag %", self.am_field)
         form.addRow("Anden indkomst (netto)", self.other_income_field)
         form.addRow("Ønsket rådighedsbeløb", self.disposable_goal_field)
-        form.addRow("Standard timeløn", self.default_rate_field)
+        form.addRow("Timeløn", self.default_rate_field)
         form.addRow("Lønperiode starter d.", self.start_day_field)
         form.addRow("Lønperiode slutter d.", self.end_day_field)
 
@@ -4202,7 +4607,10 @@ class SettingsPage(BasePage):
         button_row.addWidget(tutorial_button)
         button_row.addStretch()
 
-        note = QLabel("Ændringer påvirker beregninger og prognoser med det samme, men ændrer ikke dine gemte vagter.")
+        note = QLabel(
+            "Du kan se dine skatteoplysninger på borger.dk -> TastSelv. "
+            "Ændringer påvirker beregninger og prognoser med det samme, men ændrer ikke dine gemte vagter."
+        )
         note.setObjectName("PageSubtitle")
         note.setWordWrap(True)
         self.root.addWidget(note)
@@ -4245,7 +4653,7 @@ class SettingsPage(BasePage):
                     ),
                     "standard timeløn": parse_positive_number(
                         self.default_rate_field,
-                        "Standard timeløn",
+                        "Timeløn",
                     ),
                     "ønsket rådighedsbeløb": parse_positive_number(
                         self.disposable_goal_field,
@@ -4399,7 +4807,7 @@ class TutorialDialog(QDialog):
 
         self.visual_frame = QFrame()
         self.visual_frame.setObjectName("Card")
-        self.visual_frame.setMinimumHeight(190)
+        self.visual_frame.setMinimumHeight(220)
         self.visual_frame.setStyleSheet(
             """
             QFrame#Card {
@@ -4410,8 +4818,8 @@ class TutorialDialog(QDialog):
             """
         )
         self.visual_layout = QVBoxLayout(self.visual_frame)
-        self.visual_layout.setContentsMargins(18, 16, 18, 16)
-        self.visual_layout.setSpacing(10)
+        self.visual_layout.setContentsMargins(20, 18, 20, 18)
+        self.visual_layout.setSpacing(12)
         root.addWidget(self.visual_frame)
 
         self.setup_widget = self._build_setup_widget()
@@ -4460,20 +4868,24 @@ class TutorialDialog(QDialog):
                 border: 0;
                 background: transparent;
             }
+            QWidget#SetupCell {
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }
             """
         )
 
         root = QVBoxLayout(wrapper)
-        root.setContentsMargins(18, 16, 18, 18)
-        root.setSpacing(14)
+        root.setContentsMargins(14, 12, 14, 14)
+        root.setSpacing(10)
 
-        title = QLabel("Grundoplysninger")
+        title = QLabel("Indtast dine oplysninger nu")
         title.setObjectName("SetupTitle")
         root.addWidget(title)
 
         hint = QLabel(
-            "Udfyld dine vigtigste tal her. Felterne bliver gemt i Indstillinger, "
-            "når du trykker Næste."
+            "Skriv de tal du kender. Du kan lade resten stå og ændre dem senere i Indstillinger."
         )
         hint.setObjectName("SetupHint")
         hint.setWordWrap(True)
@@ -4481,8 +4893,8 @@ class TutorialDialog(QDialog):
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(12)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
         root.addLayout(grid)
 
         self.setup_other_income = make_text_input(placeholder="0 kr")
@@ -4496,11 +4908,11 @@ class TutorialDialog(QDialog):
         fields = [
             ("Anden indkomst netto", self.setup_other_income),
             ("Skatteprocent", self.setup_tax),
+            ("Timeløn", self.setup_rate),
             ("Fradrag", self.setup_fradrag),
             ("Ønsket rådighedsbeløb", self.setup_goal),
             ("Lønperiode startdag", self.setup_start),
             ("Lønperiode slutdag", self.setup_end),
-            ("Standard timeløn", self.setup_rate),
         ]
 
         def add_field(index, label_text, field):
@@ -4508,15 +4920,17 @@ class TutorialDialog(QDialog):
             column = index % 2
 
             cell = QWidget()
+            cell.setObjectName("SetupCell")
             cell_layout = QVBoxLayout(cell)
-            cell_layout.setContentsMargins(0, 0, 0, 0)
-            cell_layout.setSpacing(5)
+            cell_layout.setContentsMargins(8, 6, 8, 8)
+            cell_layout.setSpacing(4)
 
             label = QLabel(label_text)
             label.setObjectName("SetupFieldLabel")
             label.setWordWrap(False)
 
             field.setMinimumWidth(250)
+            field.setMinimumHeight(30)
 
             cell_layout.addWidget(label)
             cell_layout.addWidget(field)
@@ -4559,7 +4973,7 @@ class TutorialDialog(QDialog):
         else:
             self.visual_frame.show()
             self.body_label.setMinimumHeight(0)
-            self.visual_frame.setMinimumHeight(190)
+            self.visual_frame.setMinimumHeight(220)
             self.visual_frame.setMaximumHeight(16777215)
             self._set_visual(step["key"])
 
@@ -4588,33 +5002,37 @@ class TutorialDialog(QDialog):
 
     def _visual_title(self, text):
         label = QLabel(text)
-        label.setStyleSheet("color: #334155; font-weight: 800;")
+        label.setStyleSheet("color: #0f172a; font-size: 11.5pt; font-weight: 850;")
+        label.setWordWrap(True)
         self.visual_layout.addWidget(label)
 
     def _mini_card(self, title, value, accent="#1f8a70", subtitle=""):
         card = QFrame()
         card.setStyleSheet(
-            f"""
-            QFrame {{
+            """
+            QFrame {
                 background: #ffffff;
                 border: 1px solid #dbe3ec;
-                border-left: 4px solid {accent};
                 border-radius: 8px;
-            }}
-            QLabel {{
+            }
+            QLabel {
                 border: 0;
                 background: transparent;
-            }}
+            }
             """
         )
         card.setMinimumHeight(76)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 9, 12, 9)
-        layout.setSpacing(2)
+        layout.setContentsMargins(13, 11, 13, 11)
+        layout.setSpacing(4)
+        accent_bar = QFrame()
+        accent_bar.setFixedSize(34, 4)
+        accent_bar.setStyleSheet(f"background: {accent}; border-radius: 2px;")
         title_label = QLabel(title)
-        title_label.setStyleSheet("color: #64748b; font-weight: 700;")
+        title_label.setStyleSheet("color: #64748b; font-weight: 800;")
         value_label = QLabel(value)
-        value_label.setStyleSheet("color: #0f172a; font-size: 15pt; font-weight: 850;")
+        value_label.setStyleSheet("color: #0f172a; font-size: 14pt; font-weight: 900;")
+        layout.addWidget(accent_bar, 0, Qt.AlignLeft)
         layout.addWidget(title_label)
         layout.addWidget(value_label)
         if subtitle:
@@ -4626,13 +5044,13 @@ class TutorialDialog(QDialog):
 
     def _mini_row(self, left, right="", accent=False):
         row = QFrame()
-        row.setMinimumHeight(34)
+        row.setMinimumHeight(36)
         row.setStyleSheet(
             f"""
             QFrame {{
                 background: {'#ecfdf5' if accent else '#ffffff'};
-                border: 1px solid {'#99f6e4' if accent else '#dde3ea'};
-                border-radius: 6px;
+                border: 1px solid {'#86efac' if accent else '#dde3ea'};
+                border-radius: 7px;
             }}
             QLabel {{
                 border: 0;
@@ -4641,11 +5059,10 @@ class TutorialDialog(QDialog):
             """
         )
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(12)
         left_label = QLabel(left)
-        left_label.setStyleSheet("font-weight: 700; color: #334155;")
-        left_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        left_label.setStyleSheet("font-weight: 800; color: #334155;")
         right_label = QLabel(right)
         right_label.setStyleSheet("color: #475569;")
         right_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
@@ -4658,11 +5075,11 @@ class TutorialDialog(QDialog):
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
+        layout.setSpacing(6)
         label_widget = QLabel(label)
-        label_widget.setStyleSheet("color: #475569; font-weight: 700;")
+        label_widget.setStyleSheet("color: #475569; font-weight: 800;")
         bar_back = QFrame()
-        bar_back.setFixedHeight(11)
+        bar_back.setFixedHeight(10)
         bar_back.setStyleSheet("background: #e2e8f0; border-radius: 5px;")
         bar_layout = QHBoxLayout(bar_back)
         bar_layout.setContentsMargins(0, 0, 0, 0)
@@ -4674,110 +5091,160 @@ class TutorialDialog(QDialog):
         layout.addWidget(bar_back)
         return wrapper
 
+    def _flow_node(self, title, subtitle, accent):
+        node = QFrame()
+        node.setMinimumHeight(82)
+        node.setStyleSheet(
+            """
+            QFrame {
+                background: #ffffff;
+                border: 1px solid #dbe3ec;
+                border-radius: 8px;
+            }
+            QLabel {
+                border: 0;
+                background: transparent;
+            }
+            """
+        )
+        layout = QVBoxLayout(node)
+        layout.setContentsMargins(13, 11, 13, 11)
+        layout.setSpacing(5)
+        dot = QFrame()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet(f"background: {accent}; border-radius: 5px;")
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #0f172a; font-size: 12pt; font-weight: 900;")
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setStyleSheet("color: #64748b;")
+        subtitle_label.setWordWrap(True)
+        layout.addWidget(dot)
+        layout.addWidget(title_label)
+        layout.addWidget(subtitle_label)
+        return node
+
+    def _visual_flow(self, items):
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        for index, (title, subtitle, accent) in enumerate(items):
+            row.addWidget(self._flow_node(title, subtitle, accent), 1)
+            if index < len(items) - 1:
+                arrow = QLabel("→")
+                arrow.setAlignment(Qt.AlignCenter)
+                arrow.setStyleSheet("color: #94a3b8; font-size: 18pt; font-weight: 800;")
+                row.addWidget(arrow)
+        self.visual_layout.addLayout(row)
+
     def _visual_welcome(self):
-        self._visual_title("Lønix samler løn, budget og rådighed ét sted")
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        grid.addWidget(self._mini_card("Vagter", "Tilføj", "#1f8a70", "Dato, timer, pause og timeløn"), 0, 0)
-        grid.addWidget(self._mini_card("Beregn", "Netto", "#2563eb", "Skat og fradrag medregnes"), 0, 1)
-        grid.addWidget(self._mini_card("Planlæg", "Budget", "#d97706", "Faste udgifter trækkes fra"), 0, 2)
-        self.visual_layout.addLayout(grid)
-        self.visual_layout.addWidget(self._mini_bar("Rådighed gennem perioden", 62))
+        self._visual_title("Et roligt overblik over det, du faktisk skal bruge")
+        self._visual_flow(
+            [
+                ("Vagter", "Gem timer og pause", "#1f8a70"),
+                ("Netto", "Se løn efter skat", "#2563eb"),
+                ("Budget", "Hold øje med rådighed", "#d97706"),
+            ]
+        )
+        self.visual_layout.addWidget(self._mini_bar("Rådighed i perioden", 62))
 
     def _visual_overview(self):
-        self._visual_title("Overblik består af widgets, du kan tilpasse")
+        self._visual_title("Overblik er bygget af små widgets")
         grid = QGridLayout()
         grid.setSpacing(10)
-        grid.addWidget(self._mini_card("Netto løn nu", "3.600 kr.", "#1f8a70"), 0, 0)
-        grid.addWidget(self._mini_card("Til rådighed nu", "1.850 kr.", "#d97706"), 0, 1)
-        grid.addWidget(self._mini_card("Timer", "24,5 t.", "#7c3aed"), 0, 2)
+        grid.addWidget(self._mini_card("Netto løn", "3.600 kr.", "#1f8a70", "Efter skat"), 0, 0)
+        grid.addWidget(self._mini_card("Rådighed", "1.850 kr.", "#d97706", "Efter budget"), 0, 1)
+        grid.addWidget(self._mini_card("Timer", "24,5 t.", "#7c3aed", "Denne periode"), 1, 0)
+        grid.addWidget(self._mini_card("Widgets", "Tilpas", "#0f766e", "Flyt, fjern og tilføj"), 1, 1)
         self.visual_layout.addLayout(grid)
-        self.visual_layout.addWidget(self._mini_bar("Periodens forløb", 40))
-        self.visual_layout.addWidget(self._mini_row("Widgets", "Flyt, fjern og tilføj efter behov", True))
 
     def _visual_entry(self):
-        self._visual_title("Vagter registrerer én vagt ad gangen")
-        rows = QVBoxLayout()
-        rows.setSpacing(7)
-        for left, right in [
-            ("Dato", "03-05-2026"),
-            ("Metode", "Start/slut"),
-            ("Start og slut", "14:00 - 18:00"),
-            ("Pause", "30 min."),
-            ("Timeløn", "150 kr."),
-        ]:
-            rows.addWidget(self._mini_row(left, right))
-        rows.addWidget(self._mini_row("Gem vagt", "Tilføjes til listen og beregninger", True))
-        self.visual_layout.addLayout(rows)
+        self._visual_title("Tilføj en vagt uden at tænke på beregningen")
+        form = QGridLayout()
+        form.setSpacing(9)
+        for index, (left, right) in enumerate(
+            [
+                ("Dato", "06 maj"),
+                ("Start", "14:00"),
+                ("Slut", "18:00"),
+                ("Pause", "0 min."),
+                ("Timeløn", "150 kr."),
+                ("Netto", "331 kr."),
+            ]
+        ):
+            form.addWidget(self._mini_row(left, right), index // 2, index % 2)
+        self.visual_layout.addLayout(form)
 
     def _visual_payments(self):
-        self._visual_title("Lønsedler samler afsluttede perioder")
+        self._visual_title("Afsluttede lønperioder står som korte lønsedler")
         rows = QVBoxLayout()
-        rows.setSpacing(7)
-        rows.addWidget(self._mini_row("April 2026", "Netto 8.240 kr. | Total 8.240 kr.", True))
-        rows.addWidget(self._mini_row("Marts 2026", "6 vagter | 42 t. | 90 min. pause"))
-        rows.addWidget(self._mini_row("Detaljer", "Betalte timer, pause, skat og total"))
+        rows.setSpacing(8)
+        rows.addWidget(self._mini_row("Maj 2026", "Netto 8.240 kr."))
+        rows.addWidget(self._mini_row("Vagter og timer", "8 vagter · 52 t."))
+        rows.addWidget(self._mini_row("Detaljer", "Pause · skat · total"))
         self.visual_layout.addLayout(rows)
 
     def _visual_statistics(self):
-        self._visual_title("Statistik hjælper dig med at opdage mønstre")
-        bars = QGridLayout()
-        bars.setSpacing(12)
-        bars.addWidget(self._mini_bar("Timer pr. periode", 78, "#7c3aed"), 0, 0)
-        bars.addWidget(self._mini_bar("Netto løn", 64, "#1f8a70"), 1, 0)
-        bars.addWidget(self._mini_bar("Brutto løn", 86, "#2563eb"), 2, 0)
-        bars.addWidget(self._mini_card("Nøgletal", "Gennemsnit", "#475569", "Timer, løn og bedste periode"), 0, 1, 3, 1)
-        self.visual_layout.addLayout(bars)
+        self._visual_title("Statistik viser mønstre uden at fylde hele skærmen")
+        grid = QGridLayout()
+        grid.setSpacing(12)
+        grid.addWidget(self._mini_bar("Timer pr. periode", 78, "#7c3aed"), 0, 0)
+        grid.addWidget(self._mini_bar("Netto løn", 64, "#1f8a70"), 1, 0)
+        grid.addWidget(self._mini_bar("Udvikling", 52, "#2563eb"), 2, 0)
+        grid.addWidget(self._mini_card("Nøgletal", "Snit", "#475569", "Bedste periode og gennemsnit"), 0, 1, 3, 1)
+        self.visual_layout.addLayout(grid)
 
     def _visual_budget(self):
-        self._visual_title("Budget bruges som dine faste udgifter")
+        self._visual_title("Budget er bare de faste poster, du vil trække fra")
         rows = QVBoxLayout()
-        rows.setSpacing(7)
-        rows.addWidget(self._mini_row("Husleje", "5.200 kr.", True))
+        rows.setSpacing(8)
+        rows.addWidget(self._mini_row("Husleje", "5.200 kr."))
         rows.addWidget(self._mini_row("Forsikring", "350 kr."))
         rows.addWidget(self._mini_row("Abonnementer", "199 kr."))
-        rows.addWidget(self._mini_row("Rådighed", "Indkomst minus budgetposter"))
+        rows.addWidget(self._mini_row("Rådighed", "Indkomst minus budget"))
         self.visual_layout.addLayout(rows)
 
     def _visual_history(self):
-        self._visual_title("Vagter samler tilføjelse og redigering")
+        self._visual_title("Vagter giver dig en enkel liste, du kan rette i")
         rows = QVBoxLayout()
-        rows.setSpacing(7)
-        rows.addWidget(self._mini_row("Tilføj vagt", "Dato, timer, pause og timeløn", True))
-        rows.addWidget(self._mini_row("03-05-2026", "7 t. | Pause 30 min. | 150 kr."))
-        rows.addWidget(self._mini_row("Rediger valgt vagt", "Ret dato, timer eller timeløn"))
-        rows.addWidget(self._mini_row("Slet markerede", "Brug checkbokse til flere vagter"))
+        rows.setSpacing(8)
+        rows.addWidget(self._mini_row("Tilføj vagt", "Dato · timer · pause"))
+        rows.addWidget(self._mini_row("06 maj", "14:00 - 18:00 · 331 kr."))
+        rows.addWidget(self._mini_row("Rediger", "Ret den valgte række"))
+        rows.addWidget(self._mini_row("Marker", "Slet flere på én gang"))
         self.visual_layout.addLayout(rows)
 
     def _visual_calculator(self):
-        self._visual_title("Lønberegneren gemmer ikke noget")
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        grid.addWidget(self._mini_card("Bruttoløn", "3.000 kr.", "#2563eb"), 0, 0)
-        grid.addWidget(self._mini_card("Timer", "20 t. x 150", "#7c3aed"), 0, 1)
-        grid.addWidget(self._mini_card("Netto", "1.795 kr.", "#1f8a70", "Beregnet ud fra dine satser"), 1, 0, 1, 2)
-        self.visual_layout.addLayout(grid)
+        self._visual_title("Lønberegneren er en hurtig testberegning")
+        self._visual_flow(
+            [
+                ("Brutto", "3.000 kr.", "#2563eb"),
+                ("Skat", "Dine satser", "#64748b"),
+                ("Netto", "1.795 kr.", "#1f8a70"),
+            ]
+        )
+        self.visual_layout.addWidget(self._mini_row("Gemmes ikke", "Kun en beregning"))
 
     def _visual_settings(self):
-        self._visual_title("Indstillinger styrer beregningerne")
+        self._visual_title("Indstillinger er de tal resten af appen regner med")
         rows = QVBoxLayout()
-        rows.setSpacing(7)
-        rows.addWidget(self._mini_row("Skat og fradrag", "Bruges til netto løn"))
-        rows.addWidget(self._mini_row("Anden indkomst", "Medregnes kun hvis beløbet er over 0"))
-        rows.addWidget(self._mini_row("Standard timeløn", "Forudfylder Tilføj vagt"))
-        rows.addWidget(self._mini_row("Lønperiode", "Bestemmer Overblik og estimater", True))
+        rows.setSpacing(8)
+        rows.addWidget(self._mini_row("Skat og fradrag", "Netto løn"))
+        rows.addWidget(self._mini_row("Anden indkomst", "Total indkomst"))
+        rows.addWidget(self._mini_row("Rådighedsmål", "Mål i Overblik"))
+        rows.addWidget(self._mini_row("Lønperiode", "Datoer og estimater"))
         self.visual_layout.addLayout(rows)
 
     def _visual_setup(self):
-        pass
+        self._visual_title("Udfyld kun de tal, du kender nu")
+        self.visual_layout.addWidget(self._mini_row("Skat", "40%"))
+        self.visual_layout.addWidget(self._mini_row("Timeløn", "150 kr."))
 
     def _visual_done(self):
-        self._visual_title("Klar til første vagt")
+        self._visual_title("Klar til at bruge Lønix")
         rows = QVBoxLayout()
-        rows.setSpacing(7)
-        rows.addWidget(self._mini_row("Start", "Gå til Vagter og gem din første vagt", True))
-        rows.addWidget(self._mini_row("Budget", "Tilføj faste udgifter når du har dem"))
-        rows.addWidget(self._mini_row("Genstart tutorial", "Findes altid under Indstillinger"))
+        rows.setSpacing(8)
+        rows.addWidget(self._mini_row("1. Tilføj vagter", "Vagter-sektionen"))
+        rows.addWidget(self._mini_row("2. Tilføj budget", "Budget-sektionen"))
+        rows.addWidget(self._mini_row("3. Følg med", "Overblik åbner nu"))
         self.visual_layout.addLayout(rows)
 
     def _field_number(self, field, default, label, allow_zero=True):
@@ -4825,6 +5292,7 @@ class TutorialDialog(QDialog):
         new_settings[ft.TUTORIAL_DONE_KEY] = True
         ft.save_settings(new_settings)
         self.window.refresh_all()
+        self.window.go_to_page(0)
         self.accept()
 
     def _next(self):
