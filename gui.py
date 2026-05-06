@@ -3558,6 +3558,20 @@ class DashboardPage(CompactScrollPage):
         except (OSError, ValueError, TypeError) as error:
             QMessageBox.warning(self, "Rækkefølge kunne ikke gemmes", str(error))
 
+    def leave_page(self):
+        if self.dragged_widget_key is not None:
+            self._stop_auto_scroll()
+            self._clear_drag_ghost()
+            self.dragged_widget_key = None
+            self.drag_last_global_pos = None
+            self._render_widget_order()
+
+        if self.reorder_button.isChecked():
+            self.reorder_button.setChecked(False)
+            self._set_reorder_mode(False)
+
+        self.add_widget_button.hide()
+
     def refresh(self):
         self._apply_widget_order()
         budget_categories = ft.get_budget_categories(self.settings)
@@ -6072,8 +6086,17 @@ class MainWindow(QMainWindow):
     def go_to_page(self, index):
         if index < 0 or index >= len(self.pages):
             return
+
+        current_index = self.stack.currentIndex()
+
+        if current_index != index and 0 <= current_index < len(self.pages):
+            current_page = self.pages[current_index]
+            if hasattr(current_page, "leave_page"):
+                current_page.leave_page()
+
         self.stack.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
+
         if self._tutorial_dialog is not None:
             self.nav_buttons[index].raise_()
 
