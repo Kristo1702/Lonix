@@ -2364,8 +2364,12 @@ class GoalStatusCard(QWidget):
 
 
 class GoalHeaderWidget(QWidget):
-    def __init__(self, show_title=True):
+    def __init__(self, show_title=True, add_shifts_callback=None, settings_callback=None, budget_callback=None):
         super().__init__()
+        self.add_shifts_callback = add_shifts_callback
+        self.settings_callback = settings_callback
+        self.budget_callback = budget_callback
+        self.active_action_callback = None
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         root = QVBoxLayout(self)
@@ -2373,7 +2377,7 @@ class GoalHeaderWidget(QWidget):
         root.setSpacing(8)
 
         top = QHBoxLayout()
-        top.setSpacing(12)
+        top.setSpacing(10)
         root.addLayout(top)
 
         if show_title:
@@ -2385,6 +2389,14 @@ class GoalHeaderWidget(QWidget):
         self.status_pill.setAlignment(Qt.AlignCenter)
         self.status_pill.setMinimumWidth(76)
         top.addWidget(self.status_pill, 0, Qt.AlignVCenter)
+
+        self.action_button = QPushButton("")
+        self.action_button.setObjectName("InlineButton")
+        self.action_button.setCursor(Qt.PointingHandCursor)
+        self.action_button.hide()
+        self.action_button.clicked.connect(self._run_action)
+        top.addWidget(self.action_button, 0, Qt.AlignVCenter)
+
         top.addStretch()
 
         content = QHBoxLayout()
@@ -2393,24 +2405,31 @@ class GoalHeaderWidget(QWidget):
 
         current = QVBoxLayout()
         current.setSpacing(2)
+
         self.value_label = QLabel("Ikke beregnet")
         self.value_label.setStyleSheet("color: #111827; font-size: 18pt; font-weight: 900;")
+
         self.detail_label = QLabel()
         self.detail_label.setWordWrap(True)
         self.detail_label.setStyleSheet("color: #475569;")
+
         current.addWidget(self.value_label)
         current.addWidget(self.detail_label)
         content.addLayout(current, 2)
 
         previous = QVBoxLayout()
         previous.setSpacing(2)
+
         previous_title = QLabel("Sidste lønperiode")
         previous_title.setStyleSheet("color: #64707d; font-size: 8.5pt; font-weight: 850;")
+
         self.previous_label = QLabel("Ingen afsluttet periode")
         self.previous_label.setStyleSheet("color: #334155; font-size: 11pt; font-weight: 850;")
-        self.previous_detail_label = QLabel("Når en periode er afsluttet, vises rådighedsbeløbet ger.")
+
+        self.previous_detail_label = QLabel("Når en periode er afsluttet, vises rådighedsbeløbet her.")
         self.previous_detail_label.setWordWrap(True)
         self.previous_detail_label.setStyleSheet("color: #64707d; font-size: 8.5pt;")
+
         previous.addWidget(previous_title)
         previous.addWidget(self.previous_label)
         previous.addWidget(self.previous_detail_label)
@@ -2418,23 +2437,55 @@ class GoalHeaderWidget(QWidget):
 
         self.set_status("neutral", "Ikke beregnet", "Målet kan ikke vurderes endnu.", None)
 
-    def set_status(self, state, value, detail, previous_period=None):
+    def _run_action(self):
+        if self.active_action_callback is not None:
+            self.active_action_callback()
+
+    def _set_action_button(self, text="", callback=None):
+        self.active_action_callback = callback
+        self.action_button.setText(text)
+        self.action_button.setVisible(bool(text and callback))
+
+    def set_status(
+        self,
+        state,
+        value,
+        detail,
+        previous_period=None,
+        show_add_shifts_button=False,
+        show_settings_button=False,
+        show_budget_button=False,
+    ):
         styles = {
             "success": ("MÅLET ER OPNÅET", "#16a34a"),
             "warning": ("ESTIMERET AT OPNÅ", "#d97706"),
             "danger": ("ESTIMERET IKKE AT OPNÅ", "#dc2626"),
             "neutral": ("IKKE INDSTILLET", "#64748b"),
+            "empty": ("INGEN VAGTER", "#64748b"),
         }
+
         label, color = styles.get(state, styles["neutral"])
+
         self.status_pill.setText(label)
         self.value_label.setText(value)
         self.detail_label.setText(detail)
+
+        if show_add_shifts_button:
+            self._set_action_button("Tilføj vagter", self.add_shifts_callback)
+        elif show_settings_button:
+            self._set_action_button("Indstil nu", self.settings_callback)
+        elif show_budget_button:
+            self._set_action_button("Indstil budget", self.budget_callback)
+        else:
+            self._set_action_button()
+
         if previous_period:
             self.previous_label.setText(f"Rådighed: {format_money(previous_period['available'])}")
             self.previous_detail_label.setText("")
         else:
             self.previous_label.setText("Ingen afsluttet periode")
             self.previous_detail_label.setText("Når en periode er afsluttet, vises sidste rådighedsbeløbet her.")
+
         self.status_pill.setStyleSheet(
             f"""
             QLabel {{
@@ -3073,7 +3124,12 @@ class DashboardPage(CompactScrollPage):
         self.drop_indicator = DashboardDropIndicator(self.dashboard_container)
 
         goal_panel = self._make_widget_frame("Rådighedsmål", "goal")
-        self.goal_card = GoalHeaderWidget(show_title=False)
+        self.goal_card = GoalHeaderWidget(
+            show_title=False,
+            add_shifts_callback=self._go_to_history_page,
+            settings_callback=self._go_to_settings_goal_field,
+            budget_callback=self._go_to_budget_page,
+        )
         goal_panel.addWidget(self.goal_card)
         self.dashboard_widgets["goal"] = goal_panel
 
@@ -3371,6 +3427,12 @@ class DashboardPage(CompactScrollPage):
                 self.window.go_to_page(index)
                 return
 
+    def _go_to_settings_goal_field(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, SettingsPage):
+                self.window.go_to_page(index)
+                QTimer.singleShot(0, page.focus_disposable_goal)
+                return
 
     def _go_to_statistics_page(self):
         for index, page in enumerate(getattr(self.window, "pages", [])):
@@ -3643,7 +3705,14 @@ class DashboardPage(CompactScrollPage):
                 "Ingen vagter registreret i perioden endnu."
             )
 
-        self._update_goal_status(available_now, estimated_available, disposable_goal, previous_period)
+        self._update_goal_status(
+            available_now,
+            estimated_available,
+            disposable_goal,
+            previous_period,
+            summary["rows"],
+            budget_categories,
+        )
         self._update_stats(summary)
         self._fill_breakdown(summary["breakdown"])
         self._fill_recent(summary["rows"])
@@ -3733,13 +3802,26 @@ class DashboardPage(CompactScrollPage):
         self.stat_week_card.set_values(format_money(weekly_netto), f"{format_number(weekly_hours)} timer i snit")
         self.stat_total_net_card.set_values(format_money(total_netto_all), "Netto fra alle vagter")
 
-    def _update_goal_status(self, available_now, estimated_available, disposable_goal, previous_period):
+    def _update_goal_status(self, available_now, estimated_available, disposable_goal, previous_period, current_rows, budget_categories):
+        has_any_shifts = bool(self.data)
+        has_budget_posts = bool(budget_categories)
+        show_budget_button = has_any_shifts and disposable_goal > 0 and not has_budget_posts
+
         if disposable_goal <= 0:
             self.goal_card.set_status(
                 "neutral",
-                "Ikke sat",
+                "Ikke indstillet",
                 "Angiv et ønsket rådighedsbeløb i Indstillinger for at følge målet.",
                 previous_period,
+                show_settings_button=True,
+            )
+        elif not has_any_shifts:
+            self.goal_card.set_status(
+                "empty",
+                "Ingen vagter registreret",
+                f"Dit rådighedsmål er sat til {format_money(disposable_goal)},\nmen der findes endnu ingen vagter i databasen.",
+                previous_period,
+                show_add_shifts_button=True,
             )
         elif available_now >= disposable_goal:
             self.goal_card.set_status(
@@ -3747,6 +3829,7 @@ class DashboardPage(CompactScrollPage):
                 f"{format_money(available_now)} / {format_money(disposable_goal)}",
                 "Målet er nået for den nuværende lønperiode.",
                 previous_period,
+                show_budget_button=show_budget_button,
             )
         elif estimated_available is not None and estimated_available >= disposable_goal:
             self.goal_card.set_status(
@@ -3754,6 +3837,7 @@ class DashboardPage(CompactScrollPage):
                 f"{format_money(estimated_available)} estimeret / {format_money(disposable_goal)}",
                 f"Estimatet når målet. Nu: {format_money(available_now)} af {format_money(disposable_goal)}.",
                 previous_period,
+                show_budget_button=show_budget_button,
             )
         elif estimated_available is None:
             self.goal_card.set_status(
@@ -3761,6 +3845,7 @@ class DashboardPage(CompactScrollPage):
                 f"N/A / {format_money(disposable_goal)}",
                 "Indstil dit budget i Budget-sektionen for at beregne rådighedsmål.",
                 previous_period,
+                show_budget_button=show_budget_button,
             )
         else:
             estimated_text = format_money(estimated_available) if estimated_available is not None else "N/A"
@@ -3769,6 +3854,7 @@ class DashboardPage(CompactScrollPage):
                 f"{estimated_text} estimeret / {format_money(disposable_goal)}",
                 f"Estimatet er under målet på {format_money(disposable_goal)}.",
                 previous_period,
+                show_budget_button=show_budget_button,
             )
 
     def _fill_breakdown(self, breakdown):
@@ -5173,7 +5259,7 @@ class SettingsPage(BasePage):
         self.fradrag_field = make_text_input(placeholder="fx 0")
         self.am_field = make_text_input(placeholder="fx 8")
         self.other_income_field = make_text_input(placeholder="fx 10742")
-        self.disposable_goal_field = make_text_input(placeholder="fx 2500")
+        self.disposable_goal_field = make_text_input(placeholder="fx 0")
         self.default_rate_field = make_text_input(placeholder="fx 150")
         self.start_day_field = make_text_input(placeholder="1-31")
         self.end_day_field = make_text_input(placeholder="1-31")
@@ -5213,23 +5299,30 @@ class SettingsPage(BasePage):
 
     def refresh(self):
         settings = self.settings if has_required_settings(self.settings) else {
-            "skat": 0.4,
+            "skat": 0.39,
             "fradrag": 0,
             "am bidrag": 0.08,
             "anden indkomst netto": 0,
-            "ønsket rådighedsbeløb": 1000,
+            "ønsket rådighedsbeløb": 0,
             "standard timeløn": 150,
-            "løn start": 15,
-            "løn slut": 14,
+            "løn start": 21,
+            "løn slut": 20,
         }
         set_field_number(self.tax_field, float(settings.get("skat", 0)) * 100)
         set_field_number(self.fradrag_field, float(settings.get("fradrag", 0)))
         set_field_number(self.am_field, float(settings.get("am bidrag", 0)) * 100)
         set_field_number(self.other_income_field, ft.get_other_income(settings))
-        set_field_number(self.disposable_goal_field, ft.get_disposable_income_goal(settings))
+        set_field_number(self.disposable_goal_field, float(settings.get("ønsket rådighedsbeløb", 0)))
         set_field_number(self.default_rate_field, ft.get_default_hourly_rate(settings))
         self.start_day_field.setText(str(int(settings.get("løn start", 15))))
         self.end_day_field.setText(str(int(settings.get("løn slut", 14))))
+
+    def focus_disposable_goal(self):
+        self.disposable_goal_field.setFocus()
+        self.disposable_goal_field.selectAll()
+
+        if hasattr(self, "scroll_area"):
+            self.scroll_area.ensureWidgetVisible(self.disposable_goal_field, 80, 80)
 
     def _save_settings(self):
         try:
@@ -5495,7 +5588,7 @@ class TutorialDialog(QDialog):
         self.setup_other_income = make_text_input(placeholder="0 kr")
         self.setup_tax = make_text_input(placeholder="40%")
         self.setup_fradrag = make_text_input(placeholder="0 kr")
-        self.setup_goal = make_text_input(placeholder="2000 kr")
+        self.setup_goal = make_text_input(placeholder="0 kr")
         self.setup_start = make_text_input(placeholder="15")
         self.setup_end = make_text_input(placeholder="14")
         self.setup_rate = make_text_input(placeholder="150 kr")
@@ -5865,7 +5958,7 @@ class TutorialDialog(QDialog):
                     "anden indkomst netto": self._field_number(self.setup_other_income, 0, "Anden indkomst", allow_zero=True),
                     "ønsket rådighedsbeløb": self._field_number(
                         self.setup_goal,
-                        2000,
+                        0,
                         "Ønsket rådighedsbeløb",
                         allow_zero=True,
                     ),
