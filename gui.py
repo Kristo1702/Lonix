@@ -5,7 +5,6 @@ from datetime import date, datetime, timedelta
 
 from PyQt5.QtCore import (
     QEasingCurve,
-    QEvent,
     QPointF,
     QPropertyAnimation,
     QRectF,
@@ -38,6 +37,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QStyle,
+    QTabBar,
     QStyleOptionButton,
     QStylePainter,
     QTabWidget,
@@ -184,7 +184,7 @@ QPushButton#PrimaryNavButton {
     color: #f8fafc;
     border: 0;
     border-radius: 7px;
-    padding: 11px 14px;
+    padding: 9px 16px 9px 18px;
     text-align: left;
     font-weight: 750;
 }
@@ -200,7 +200,7 @@ QPushButton#NavButton {
     color: #d8dee6;
     border: 0;
     border-radius: 7px;
-    padding: 11px 14px;
+    padding: 9px 16px 9px 18px;
     text-align: left;
     font-weight: 600;
 }
@@ -673,8 +673,20 @@ class AnimatedButton(BasePushButton):
 
     @buttonInset.setter
     def buttonInset(self, value):
-        self._button_inset = max(0, min(5, int(value)))
+        self._button_inset = max(0, min(3, int(value)))
         self.update()
+
+    def sizeHint(self):
+        size = super().sizeHint()
+        if self._generic_animation_enabled():
+            size += QSize(18, 10)
+        return size
+
+    def minimumSizeHint(self):
+        size = super().minimumSizeHint()
+        if self._generic_animation_enabled():
+            size += QSize(18, 10)
+        return size
 
     def _generic_animation_enabled(self):
         return not bool(self.property("skipGenericButtonAnimation"))
@@ -699,7 +711,7 @@ class AnimatedButton(BasePushButton):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._animate_inset(4, 70, QEasingCurve.OutCubic)
+            self._animate_inset(3, 70, QEasingCurve.OutCubic)
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -713,14 +725,226 @@ class AnimatedButton(BasePushButton):
             return
 
         painter = QStylePainter(self)
-        option = QStyleOptionButton()
-        self.initStyleOption(option)
+        bevel_option = QStyleOptionButton()
+        self.initStyleOption(bevel_option)
         inset = self._button_inset
-        option.rect = self.rect().adjusted(inset, inset, -inset, -inset)
-        painter.drawControl(QStyle.CE_PushButton, option)
+        bevel_option.rect = self.rect().adjusted(inset, inset, -inset, -inset)
+        painter.drawControl(QStyle.CE_PushButtonBevel, bevel_option)
+
+        label_option = QStyleOptionButton()
+        self.initStyleOption(label_option)
+        label_option.rect = self.rect().adjusted(8, 0, -8, 0)
+        painter.drawControl(QStyle.CE_PushButtonLabel, label_option)
 
 
 QPushButton = AnimatedButton
+
+
+class SidebarNavButton(BasePushButton):
+    def __init__(self, label, parent=None):
+        super().__init__(label, parent)
+        self._nav_progress = 0
+        self._is_pressed = False
+        self.nav_animation = QPropertyAnimation(self, b"navProgress", self)
+        self.nav_animation.setDuration(150)
+        self.nav_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setProperty("skipGenericButtonAnimation", True)
+        self.toggled.connect(self._sync_nav_state)
+
+    @pyqtProperty(int)
+    def navProgress(self):
+        return self._nav_progress
+
+    @navProgress.setter
+    def navProgress(self, value):
+        self._nav_progress = max(0, min(100, int(value)))
+        self.update()
+
+    def sizeHint(self):
+        size = super().sizeHint()
+        return QSize(size.width() + 8, max(size.height(), 34))
+
+    def minimumSizeHint(self):
+        size = super().minimumSizeHint()
+        return QSize(size.width() + 8, max(size.height(), 34))
+
+    def _animate_nav(self, target, duration=150, easing=QEasingCurve.OutCubic):
+        self.nav_animation.stop()
+        self.nav_animation.setStartValue(self._nav_progress)
+        self.nav_animation.setEndValue(target)
+        self.nav_animation.setDuration(duration)
+        self.nav_animation.setEasingCurve(easing)
+        self.nav_animation.start()
+
+    def _sync_nav_state(self):
+        self._animate_nav(100 if self.isChecked() or self.underMouse() else 0)
+
+    def enterEvent(self, event):
+        self._animate_nav(100, 170, QEasingCurve.OutCubic)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self.isChecked():
+            self._animate_nav(0, 130, QEasingCurve.OutCubic)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._is_pressed = True
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._is_pressed = False
+            self._sync_nav_state()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        progress = self._nav_progress / 100
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        if self.isChecked():
+            background = QColor("#18735d" if self._is_pressed else "#1f8a70")
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(rect, 7, 7)
+        elif progress > 0:
+            background = QColor("#2d3742")
+            background.setAlpha(int(40 + (120 * progress)))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(rect, 7, 7)
+
+        normal = QColor("#f8fafc") if self.objectName() == "PrimaryNavButton" else QColor("#d8dee6")
+        active = QColor("#ffffff")
+        text_color = QColor(
+            int(normal.red() + (active.red() - normal.red()) * progress),
+            int(normal.green() + (active.green() - normal.green()) * progress),
+            int(normal.blue() + (active.blue() - normal.blue()) * progress),
+        )
+        font = QFont(self.font())
+        base_size = font.pointSizeF()
+        if base_size > 0:
+            font.setPointSizeF(base_size + (0.55 * progress))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(text_color)
+
+        left = 18 + (5 * progress)
+        text_rect = QRectF(left, 0, self.width() - left - 12, self.height())
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.text())
+
+
+class AnimatedSegmentedTabBar(QTabBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.hovered_index = -1
+        self.pressed_index = -1
+        self._tab_pop = 0
+        self.pop_animation = QPropertyAnimation(self, b"tabPop", self)
+        self.pop_animation.setDuration(120)
+        self.pop_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.setMouseTracking(True)
+        self.setDrawBase(False)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFont(QFont("Segoe UI", 9, QFont.Bold))
+
+    @pyqtProperty(int)
+    def tabPop(self):
+        return self._tab_pop
+
+    @tabPop.setter
+    def tabPop(self, value):
+        self._tab_pop = max(-2, min(3, int(value)))
+        self.update()
+
+    def tabSizeHint(self, index):
+        text_width = self.fontMetrics().horizontalAdvance(self.tabText(index))
+        return QSize(max(text_width + 48, 118), 42)
+
+    def _animate_pop(self, value, duration=120, easing=QEasingCurve.OutCubic):
+        self.pop_animation.stop()
+        self.pop_animation.setStartValue(self._tab_pop)
+        self.pop_animation.setEndValue(value)
+        self.pop_animation.setDuration(duration)
+        self.pop_animation.setEasingCurve(easing)
+        self.pop_animation.start()
+
+    def mouseMoveEvent(self, event):
+        index = self.tabAt(event.pos())
+        if index != self.hovered_index:
+            self.hovered_index = index
+            self._animate_pop(3 if index >= 0 else 0, 130, QEasingCurve.OutBack)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.hovered_index = -1
+        self.pressed_index = -1
+        self._animate_pop(0, 110, QEasingCurve.OutCubic)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.pressed_index = self.tabAt(event.pos())
+            if self.pressed_index >= 0:
+                self._animate_pop(-2, 70, QEasingCurve.OutCubic)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.pressed_index = -1
+            self.hovered_index = self.tabAt(event.pos())
+            self._animate_pop(3 if self.hovered_index >= 0 else 0, 150, QEasingCurve.OutBack)
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        if self.count() == 0:
+            return
+
+        outer = QRectF(self.tabRect(0))
+        for index in range(1, self.count()):
+            outer = outer.united(QRectF(self.tabRect(index)))
+        outer.adjust(2, 3, -2, -3)
+        painter.setPen(QPen(QColor("#cfd8e3"), 1))
+        painter.setBrush(QColor("#e7ecef"))
+        painter.drawRoundedRect(outer, 10, 10)
+
+        for index in range(self.count()):
+            rect = QRectF(self.tabRect(index)).adjusted(5, 6, -5, -6)
+            selected = index == self.currentIndex()
+            interactive = index == self.hovered_index or index == self.pressed_index
+            pop = self._tab_pop if interactive else 0
+            if pop > 0:
+                rect.adjust(-pop, -pop, pop, pop)
+            elif pop < 0:
+                rect.adjust(-pop, -pop, pop, pop)
+
+            if selected:
+                fill = QColor("#1f8a70")
+                border = QColor("#1f8a70")
+                text_color = QColor("#ffffff")
+            elif index == self.hovered_index:
+                fill = QColor("#edf7f4")
+                border = QColor("#9bcfc2")
+                text_color = QColor("#0f766e")
+            else:
+                fill = QColor("#f6f8fa")
+                border = QColor("#d7dee6")
+                text_color = QColor("#42505f")
+
+            painter.setPen(QPen(border, 1.2))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect, 8, 8)
+            painter.setPen(text_color)
+            painter.setFont(self.font())
+            painter.drawText(rect, Qt.AlignCenter, self.tabText(index))
 
 
 class VisibleCheckBox(QCheckBox):
@@ -3384,27 +3608,10 @@ class CalculatorPage(BasePage):
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("CalculatorTabs")
+        self.tabs.setTabBar(AnimatedSegmentedTabBar())
         self.tabs.setUsesScrollButtons(False)
         self.tabs.tabBar().setExpanding(False)
         input_layout.addWidget(self.tabs)
-
-        calculator_tab_bar = self.tabs.tabBar()
-        calculator_tab_bar.setStyleSheet("""
-        QTabBar::tab {
-            background: #e7ecef;
-            border-radius: 7px;
-            padding: 10px 18px;
-            margin-right: 8px;
-            min-width: 130px;
-            color: #42505f;
-            font-weight: 700;
-        }
-
-        QTabBar::tab:selected {
-            background: #1f8a70;
-            color: white;
-        }
-        """)
 
         brutto_tab = QWidget()
         brutto_form = QFormLayout(brutto_tab)
@@ -3752,7 +3959,9 @@ class StatisticsPage(BasePage):
         )
 
         self.tabs = QTabWidget()
+        self.tabs.setTabBar(AnimatedSegmentedTabBar())
         self.tabs.setUsesScrollButtons(False)
+        self.tabs.tabBar().setExpanding(False)
         self.root.addWidget(self.tabs, 1)
 
         numbers_tab = QWidget()
@@ -5372,15 +5581,11 @@ class MainWindow(QMainWindow):
         self.button_group.setExclusive(True)
 
         self._add_page(sidebar_layout, "Overblik", DashboardPage(self), primary=True)
-        overview_separator = QFrame()
-        overview_separator.setObjectName("SidebarSeparator")
-        overview_separator.setFixedHeight(1)
-        sidebar_layout.addSpacing(6)
-        sidebar_layout.addWidget(overview_separator)
-        sidebar_layout.addSpacing(6)
+        self._add_sidebar_separator(sidebar_layout)
         self._add_page(sidebar_layout, "Vagter", HistoryPage(self))
         self._add_page(sidebar_layout, "Budget", BudgetPage(self))
         self._add_page(sidebar_layout, "Lønsedler", PaymentsPage(self))
+        self._add_sidebar_separator(sidebar_layout)
         self._add_page(sidebar_layout, "Statistik", StatisticsPage(self))
         self._add_page(sidebar_layout, "Lønberegner", CalculatorPage(self))
 
@@ -5415,7 +5620,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "brand_sub_label"):
             brand_text_width = max(brand_text_width, metrics.horizontalAdvance(self.brand_sub_label.text()))
 
-        nav_width = nav_text_width + self._ui_px(28)
+        nav_width = nav_text_width + self._ui_px(46)
         brand_width = self._ui_px(44 + 10) + brand_text_width
         sidebar_padding = self._ui_px(36)
         return max(self._ui_px(BASE_SIDEBAR_WIDTH), nav_width + sidebar_padding, brand_width + sidebar_padding)
@@ -5435,9 +5640,17 @@ class MainWindow(QMainWindow):
         if self.sidebar.width() != width:
             self.sidebar.setFixedWidth(width)
 
+    def _add_sidebar_separator(self, sidebar_layout):
+        separator = QFrame()
+        separator.setObjectName("SidebarSeparator")
+        separator.setFixedHeight(1)
+        sidebar_layout.addSpacing(6)
+        sidebar_layout.addWidget(separator)
+        sidebar_layout.addSpacing(6)
+
     def _add_page(self, sidebar_layout, label, page, primary=False):
         index = len(self.pages)
-        button = QPushButton(label)
+        button = SidebarNavButton(label)
         button.setObjectName("PrimaryNavButton" if primary else "NavButton")
         button.setCheckable(True)
         button.clicked.connect(lambda checked=False, page_index=index: self.go_to_page(page_index))
@@ -5449,8 +5662,8 @@ class MainWindow(QMainWindow):
 
     def _add_footer_page(self, sidebar_layout, label, page):
         index = len(self.pages)
-        button = QPushButton(label)
-        button.setObjectName("SecondaryButton")
+        button = SidebarNavButton(label)
+        button.setObjectName("NavButton")
         button.setCheckable(True)
         button.clicked.connect(lambda checked=False, page_index=index: self.go_to_page(page_index))
         self.button_group.addButton(button)
