@@ -13,6 +13,8 @@ init()
 OTHER_INCOME_KEY = "anden indkomst netto"
 DEFAULT_HOURLY_RATE_KEY = "standard timeløn"
 TUTORIAL_DONE_KEY = "tutorial gennemført"
+ENTRY_TYPE_KEY = "type"
+DAY_OFF_ENTRY_TYPE = "fridag"
 REQUIRED_SETTINGS_KEYS = ["skat", "fradrag", "am bidrag", OTHER_INCOME_KEY, "løn start", "løn slut"]
 DEFAULT_FIXED_EXPENSES = 0
 DEFAULT_HOURLY_RATE = 150
@@ -308,7 +310,15 @@ def is_tutorial_completed(settings=None):
     return bool(settings.get(TUTORIAL_DONE_KEY, False))
 
 
+def is_day_off(løn_info):
+    if not isinstance(løn_info, dict):
+        return False
+    return løn_info.get(ENTRY_TYPE_KEY) == DAY_OFF_ENTRY_TYPE or løn_info.get("fridag") is True
+
+
 def get_shift_duration_hours(løn_info):
+    if is_day_off(løn_info):
+        return 0.0
     try:
         return max(0.0, float(løn_info.get("timer", 0) or 0))
     except (TypeError, ValueError):
@@ -316,6 +326,8 @@ def get_shift_duration_hours(løn_info):
 
 
 def get_shift_pause_hours(løn_info):
+    if is_day_off(løn_info):
+        return 0.0
     try:
         return max(0.0, float(løn_info.get("pause", 0) or 0))
     except (TypeError, ValueError):
@@ -323,6 +335,8 @@ def get_shift_pause_hours(løn_info):
 
 
 def get_shift_paid_hours(løn_info):
+    if is_day_off(løn_info):
+        return 0.0
     return max(0.0, get_shift_duration_hours(løn_info) - get_shift_pause_hours(løn_info))
 
 
@@ -477,8 +491,11 @@ def calculate_all_netto_salaries():
                 "pause": 0,
                 "brutto": 0,
                 "vagter": 0,
+                "fridage": 0,
+                "registreringer": 0,
             }
 
+        is_day_off_entry = is_day_off(løn_info)
         timer = get_shift_paid_hours(løn_info)
         pause = get_shift_pause_hours(løn_info)
         timeløn = løn_info.get("timeløn", 0)
@@ -487,7 +504,11 @@ def calculate_all_netto_salaries():
         lønsedler[lønseddel_nøgle]["timer"] += timer
         lønsedler[lønseddel_nøgle]["pause"] += pause
         lønsedler[lønseddel_nøgle]["brutto"] += brutto
-        lønsedler[lønseddel_nøgle]["vagter"] += 1
+        lønsedler[lønseddel_nøgle]["registreringer"] += 1
+        if is_day_off_entry:
+            lønsedler[lønseddel_nøgle]["fridage"] += 1
+        else:
+            lønsedler[lønseddel_nøgle]["vagter"] += 1
 
     sorterede_lønsedler = sorted(lønsedler.values(), key=lambda value: value["periode_start"], reverse=True)
     for lønseddel in sorterede_lønsedler:

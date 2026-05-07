@@ -111,6 +111,7 @@ def print_stats(data=None, settings=None):
         [
             ["Timer i alt", _format_number(statistics["totals"]["timer"])],
             ["Pause i alt", f"{_format_number(statistics['totals'].get('pause', 0) * 60)} min."],
+            ["Fridage i alt", statistics["day_off_counts"]["total"]],
             ["Løn i alt", _format_money_pair(statistics["totals"]["brutto"], statistics["totals"]["netto"])],
         ],
         right_align={1},
@@ -124,7 +125,9 @@ def print_stats(data=None, settings=None):
             ["Vagter i år", statistics["shift_counts"]["year"]],
             ["Nuværende lønperiode", statistics["current_period_label"]],
             ["Vagter i nuværende lønperiode", statistics["shift_counts"]["current_period"]],
+            ["Fridage i nuværende lønperiode", statistics["day_off_counts"]["current_period"]],
             ["Vagter pr. lønperiode i snit", _format_optional(statistics["shift_counts"]["per_period"], _format_number)],
+            ["Fridage pr. lønperiode i snit", _format_optional(statistics["day_off_counts"]["per_period"], _format_number)],
         ],
         right_align={1},
     )
@@ -216,7 +219,7 @@ def print_stats(data=None, settings=None):
         ["Måling", "Værdi"],
         [
             ["Gennemsnitlige dage mellem vagter", _format_optional(average_gap, _format_number)],
-            ["Længste streak", f"{streak['length']} dage ({streak['start'].strftime('%d-%m-%Y')} - {streak['end'].strftime('%d-%m-%Y')})"],
+            ["Længste streak", _format_streak(streak)],
         ],
     )
 
@@ -266,21 +269,25 @@ def print_stats(data=None, settings=None):
 def calculate_average_hours(data):
     settings = ft.load_settings()
     shifts, _, complete_periods, _, complete_years = _build_dataset_context(data, settings)
-    return _calculate_average_hours_from_groups(shifts, complete_periods, complete_years)
+    work_shifts = _work_shifts(shifts)
+    return _calculate_average_hours_from_groups(work_shifts, complete_periods, complete_years)
 
 
 def calculate_average_salary_before_tax(data):
     settings = ft.load_settings()
     shifts, _, complete_periods, _, complete_years = _build_dataset_context(data, settings)
-    return _calculate_average_salary_before_tax_from_groups(shifts, complete_periods, complete_years)
+    work_shifts = _work_shifts(shifts)
+    return _calculate_average_salary_before_tax_from_groups(work_shifts, complete_periods, complete_years)
 
 
 def _build_statistics(data, settings):
     shifts, periods, complete_periods, _, complete_years = _build_dataset_context(data, settings)
+    work_shifts = _work_shifts(shifts)
+    day_offs = _day_offs(shifts)
 
-    hours_average = _calculate_average_hours_from_groups(shifts, complete_periods, complete_years)
-    salary_before_average = _calculate_average_salary_before_tax_from_groups(shifts, complete_periods, complete_years)
-    salary_after_average = _calculate_average_salary_after_tax_from_groups(shifts, complete_periods, complete_years)
+    hours_average = _calculate_average_hours_from_groups(work_shifts, complete_periods, complete_years)
+    salary_before_average = _calculate_average_salary_before_tax_from_groups(work_shifts, complete_periods, complete_years)
+    salary_after_average = _calculate_average_salary_after_tax_from_groups(work_shifts, complete_periods, complete_years)
 
     current_period_start, current_period_end = ft.get_salary_period_for_date(
         datetime.now().date(),
@@ -289,23 +296,32 @@ def _build_statistics(data, settings):
     )
 
     totals = {
-        "timer": sum(shift["timer"] for shift in shifts),
-        "pause": sum(shift["pause"] for shift in shifts),
-        "brutto": sum(shift["brutto"] for shift in shifts),
+        "timer": sum(shift["timer"] for shift in work_shifts),
+        "pause": sum(shift["pause"] for shift in work_shifts),
+        "brutto": sum(shift["brutto"] for shift in work_shifts),
         "netto": sum(period["netto"] for period in periods),
+        "fridage": len(day_offs),
+        "registreringer": len(shifts),
     }
 
     shift_counts = {
-        "total": len(shifts),
-        "year": sum(1 for shift in shifts if shift["dato"].year == datetime.now().year),
-        "current_period": sum(1 for shift in shifts if current_period_start <= shift["dato"] <= current_period_end),
+        "total": len(work_shifts),
+        "year": sum(1 for shift in work_shifts if shift["dato"].year == datetime.now().year),
+        "current_period": sum(1 for shift in work_shifts if current_period_start <= shift["dato"] <= current_period_end),
         "per_period": _average_or_none([period["vagter"] for period in complete_periods]),
     }
 
+    day_off_counts = {
+        "total": len(day_offs),
+        "year": sum(1 for shift in day_offs if shift["dato"].year == datetime.now().year),
+        "current_period": sum(1 for shift in day_offs if current_period_start <= shift["dato"] <= current_period_end),
+        "per_period": _average_or_none([period.get("fridage", 0) for period in complete_periods]),
+    }
+
     records = {
-        "longest": max(shifts, key=lambda shift: (shift["timer"], shift["brutto"], shift["dato"])),
-        "shortest": min(shifts, key=lambda shift: (shift["timer"], shift["brutto"], shift["dato"])),
-        "highest_paid": max(shifts, key=lambda shift: (shift["brutto"], shift["timer"], shift["dato"])),
+        "longest": max(work_shifts, key=lambda shift: (shift["timer"], shift["brutto"], shift["dato"])) if work_shifts else None,
+        "shortest": min(work_shifts, key=lambda shift: (shift["timer"], shift["brutto"], shift["dato"])) if work_shifts else None,
+        "highest_paid": max(work_shifts, key=lambda shift: (shift["brutto"], shift["timer"], shift["dato"])) if work_shifts else None,
     }
 
     periods_statistics = {
@@ -356,12 +372,13 @@ def _build_statistics(data, settings):
         },
         "totals": totals,
         "shift_counts": shift_counts,
+        "day_off_counts": day_off_counts,
         "records": records,
         "periods": periods_statistics,
         "development": development,
         "patterns": {
-            "average_gap": _calculate_average_gap(shifts),
-            "longest_streak": _calculate_longest_streak(shifts),
+            "average_gap": _calculate_average_gap(work_shifts),
+            "longest_streak": _calculate_longest_streak(work_shifts),
         },
         "deductions": deductions,
         "forecast": forecast,
@@ -374,6 +391,7 @@ def _parse_shifts(data):
     for entry in data:
         dato_str, løn_info = next(iter(entry.items()))
         dato = datetime.strptime(dato_str, "%d-%m-%Y").date()
+        is_day_off = ft.is_day_off(løn_info)
         varighed = ft.get_shift_duration_hours(løn_info)
         pause = ft.get_shift_pause_hours(løn_info)
         timer = ft.get_shift_paid_hours(løn_info)
@@ -390,10 +408,19 @@ def _parse_shifts(data):
                 "netto": 0.0,
                 "am_bidrag": 0.0,
                 "skat": 0.0,
+                "is_day_off": is_day_off,
             }
         )
 
     return sorted(shifts, key=lambda shift: (shift["dato"], shift["brutto"], shift["timer"]))
+
+
+def _work_shifts(shifts):
+    return [shift for shift in shifts if not shift.get("is_day_off")]
+
+
+def _day_offs(shifts):
+    return [shift for shift in shifts if shift.get("is_day_off")]
 
 
 def _build_dataset_context(data, settings):
@@ -431,6 +458,8 @@ def _group_periods(shifts, settings):
                 "skattegrundlag": 0.0,
                 "skat": 0.0,
                 "vagter": 0,
+                "fridage": 0,
+                "registreringer": 0,
                 "shifts": [],
             }
 
@@ -439,7 +468,11 @@ def _group_periods(shifts, settings):
         period["timer"] += shift["timer"]
         period["pause"] += shift["pause"]
         period["brutto"] += shift["brutto"]
-        period["vagter"] += 1
+        period["registreringer"] += 1
+        if shift.get("is_day_off"):
+            period["fridage"] += 1
+        else:
+            period["vagter"] += 1
         period["shifts"].append(shift)
 
     sorted_periods = sorted(periods.values(), key=lambda period: period["periode_start"])
@@ -470,13 +503,28 @@ def _group_years(shifts):
     for shift in shifts:
         year = shift["dato"].year
         if year not in years:
-            years[year] = {"år": year, "varighed": 0.0, "timer": 0.0, "pause": 0.0, "brutto": 0.0, "netto": 0.0}
+            years[year] = {
+                "år": year,
+                "varighed": 0.0,
+                "timer": 0.0,
+                "pause": 0.0,
+                "brutto": 0.0,
+                "netto": 0.0,
+                "vagter": 0,
+                "fridage": 0,
+                "registreringer": 0,
+            }
 
         years[year]["varighed"] += shift["varighed"]
         years[year]["timer"] += shift["timer"]
         years[year]["pause"] += shift["pause"]
         years[year]["brutto"] += shift["brutto"]
         years[year]["netto"] += shift["netto"]
+        years[year]["registreringer"] += 1
+        if shift.get("is_day_off"):
+            years[year]["fridage"] += 1
+        else:
+            years[year]["vagter"] += 1
 
     return sorted(years.values(), key=lambda year: year["år"])
 
@@ -551,6 +599,9 @@ def _calculate_average_gap(shifts):
 
 def _calculate_longest_streak(shifts):
     work_dates = sorted({shift["dato"] for shift in shifts})
+    if not work_dates:
+        return {"start": None, "end": None, "length": 0}
+
     best = {"start": work_dates[0], "end": work_dates[0], "length": 1}
     current_start = work_dates[0]
     current_length = 1
@@ -665,6 +716,12 @@ def _period_row(label, period):
         _format_money(period["brutto"]),
         _format_money(period["netto"]),
     ]
+
+
+def _format_streak(streak):
+    if not streak or streak.get("length", 0) <= 0 or streak.get("start") is None or streak.get("end") is None:
+        return _na()
+    return f"{streak['length']} dage ({streak['start'].strftime('%d-%m-%Y')} - {streak['end'].strftime('%d-%m-%Y')})"
 
 
 def _table_border(widths):

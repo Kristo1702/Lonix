@@ -40,6 +40,7 @@ def build_udbetaling_overview(settings, udbetaling):
     timer = udbetaling.get("timer", 0)
     pause = udbetaling.get("pause", 0)
     vagter = udbetaling.get("vagter", 0)
+    fridage = udbetaling.get("fridage", 0)
     brutto = udbetaling.get("brutto", 0)
     netto_løn = udbetaling.get("netto", 0)
     anden_indkomst = ft.get_other_income(settings)
@@ -51,6 +52,7 @@ def build_udbetaling_overview(settings, udbetaling):
     print(Fore.WHITE + "\n  ===== LØN =====")
     print(Fore.LIGHTBLACK_EX + f"  Periode: {periode_start.strftime('%d-%m-%Y')} - {periode_slut.strftime('%d-%m-%Y')}")
     print(Fore.BLUE + f"  Vagter: {vagter}")
+    print(Fore.BLUE + f"  Fridage: {fridage}")
     print(Fore.BLUE + f"  Pause: {_format_timer(pause * 60)} min.")
     if timer > 0:
         timeløn = brutto / timer
