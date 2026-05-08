@@ -1,10 +1,19 @@
 import json
 import os
 import sys
+import time
+from calendar import monthrange
 from datetime import date, datetime, timedelta
+
+# Qt reads some environment flags while the bindings are imported.
+os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+os.environ.pop("QT_USE_NATIVE_WINDOWS", None)
 
 from PyQt5.QtCore import (
     QEasingCurve,
+    QEvent,
+    QObject,
     QPoint,
     QPointF,
     QParallelAnimationGroup,
@@ -96,6 +105,7 @@ DASHBOARD_DEFAULT_WIDGET_ORDER = (
     "goal",
     "progress",
     "process",
+    "holiday_pay",
     "estimates",
     "stats",
     "budget",
@@ -107,17 +117,22 @@ DASHBOARD_AVAILABLE_WIDGET_ORDER = DASHBOARD_DEFAULT_WIDGET_ORDER + (
     "salary_calculator",
 )
 DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY = "overblik budget widget tilføjet"
+DASHBOARD_HOLIDAY_PAY_WIDGET_MIGRATION_KEY = "overblik feriepenge widget tilføjet"
 DASHBOARD_WIDGET_TITLES = {
     "goal": "Rådighedsmål",
     "progress": "Tidslinje",
     "process": "Løn indtil videre",
     "estimates": "Estimater",
     "stats": "Statistik",
+    "holiday_pay": "Feriepenge",
     "budget": "Budget",
     "breakdown": "Skatteopdeling",
     "recent": "Vagter i perioden",
     "salary_calculator": "Lønberegner",
 }
+HOLIDAY_PAY_RATE_KEY = "feriegodtgørelse"
+HOLIDAY_PAY_EMPLOYMENT_START_KEY = "ansættelsesstart"
+DEFAULT_HOLIDAY_PAY_RATE = 12.5
 
 MONTH_NAMES = {
     1: "Januar",
@@ -452,6 +467,96 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
 """
 
 
+# Temporary startup/window debug logging. Set LONIX_WINDOW_DEBUG=1 to enable it.
+# Set LONIX_WINDOW_DEBUG_VERBOSE=1 to include parent-change/hide-to-parent noise.
+WINDOW_DEBUG_ENABLED = os.environ.get("LONIX_WINDOW_DEBUG", "0") == "1"
+WINDOW_DEBUG_VERBOSE = os.environ.get("LONIX_WINDOW_DEBUG_VERBOSE", "0") == "1"
+_WINDOW_DEBUG_START = time.monotonic()
+
+
+def debug_window_log(message):
+    if WINDOW_DEBUG_ENABLED:
+        elapsed = time.monotonic() - _WINDOW_DEBUG_START
+        print(f"[window-debug {elapsed:7.3f}s] {message}", flush=True)
+
+
+def describe_widget(widget):
+    parent = widget.parentWidget()
+    geometry = widget.geometry()
+    object_name = widget.objectName() or "-"
+    title = widget.windowTitle() or "-"
+    return (
+        f"{type(widget).__name__}(object={object_name!r}, title={title!r}, "
+        f"visible={widget.isVisible()}, isWindow={widget.isWindow()}, "
+        f"native={widget.testAttribute(Qt.WA_NativeWindow)}, "
+        f"parent={type(parent).__name__ if parent is not None else None}, "
+        f"geom={geometry.x()},{geometry.y()} {geometry.width()}x{geometry.height()})"
+    )
+
+
+def debug_widget_inventory(label, limit=30):
+    if not WINDOW_DEBUG_ENABLED:
+        return
+
+    app = QApplication.instance()
+    if app is None:
+        return
+
+    all_widgets = list(QApplication.allWidgets())
+    top_level_widgets = list(QApplication.topLevelWidgets())
+    parentless_widgets = [widget for widget in all_widgets if widget.parentWidget() is None]
+    native_widgets = [widget for widget in all_widgets if widget.testAttribute(Qt.WA_NativeWindow)]
+    debug_window_log(
+        f"{label}: all={len(all_widgets)} topLevel={len(top_level_widgets)} "
+        f"parentless={len(parentless_widgets)} native={len(native_widgets)}"
+    )
+    for widget in top_level_widgets[:limit]:
+        debug_window_log(f"  topLevel {describe_widget(widget)}")
+    for widget in parentless_widgets[:limit]:
+        if widget not in top_level_widgets:
+            debug_window_log(f"  parentless-not-topLevel {describe_widget(widget)}")
+    for widget in native_widgets[:limit]:
+        if widget not in top_level_widgets and widget.parentWidget() is not None:
+            debug_window_log(f"  native-child {describe_widget(widget)}")
+
+
+class WindowDebugEventFilter(QObject):
+    EVENT_NAMES = {
+        QEvent.Close: "Close",
+        QEvent.Hide: "Hide",
+        QEvent.HideToParent: "HideToParent",
+        QEvent.ParentChange: "ParentChange",
+        QEvent.Show: "Show",
+        QEvent.ShowToParent: "ShowToParent",
+        QEvent.WindowActivate: "WindowActivate",
+        QEvent.WindowDeactivate: "WindowDeactivate",
+    }
+
+    def eventFilter(self, obj, event):
+        event_name = self.EVENT_NAMES.get(event.type())
+        if event_name and isinstance(obj, QWidget):
+            interesting_event = event.type() in (
+                QEvent.Close,
+                QEvent.Hide,
+                QEvent.Show,
+                QEvent.WindowActivate,
+                QEvent.WindowDeactivate,
+            )
+            if not interesting_event and not WINDOW_DEBUG_VERBOSE:
+                return super().eventFilter(obj, event)
+
+            is_suspect = (
+                obj.isWindow()
+                or obj.parentWidget() is None
+                or obj.testAttribute(Qt.WA_NativeWindow)
+            )
+            if is_suspect:
+                debug_window_log(f"event {event_name}: {describe_widget(obj)}")
+                if event.type() in (QEvent.Show, QEvent.Hide, QEvent.Close):
+                    debug_widget_inventory(f"inventory after {event_name} {type(obj).__name__}", limit=12)
+        return super().eventFilter(obj, event)
+
+
 def ensure_storage():
     if not os.path.exists("data"):
         os.mkdir("data")
@@ -481,6 +586,9 @@ def dashboard_widget_order(settings):
     if not settings.get(DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY, False) and "budget" not in order:
         insert_index = order.index("stats") + 1 if "stats" in order else len(order)
         order.insert(insert_index, "budget")
+    if not settings.get(DASHBOARD_HOLIDAY_PAY_WIDGET_MIGRATION_KEY, False) and "holiday_pay" not in order:
+        insert_index = order.index("process") + 1 if "process" in order else len(order)
+        order.insert(insert_index, "holiday_pay")
     return order
 
 
@@ -498,6 +606,23 @@ def default_entry_date():
     if now.time().hour < 4:
         entry_date = entry_date - timedelta(days=1)
     return entry_date
+
+
+def first_work_entry_date(data):
+    first_work_date = None
+    first_any_date = None
+    for entry in data or []:
+        try:
+            dato_str, info = next(iter(entry.items()))
+            dato = parse_date_key(dato_str)
+        except (StopIteration, TypeError, ValueError):
+            continue
+
+        if first_any_date is None or dato < first_any_date:
+            first_any_date = dato
+        if not ft.is_day_off(info) and (first_work_date is None or dato < first_work_date):
+            first_work_date = dato
+    return first_work_date or first_any_date
 
 
 def format_number(value, decimals=2):
@@ -518,6 +643,13 @@ def format_date(value):
     if value is None:
         return "N/A"
     return value.strftime("%d-%m-%Y")
+
+
+def format_long_date(value):
+    if value is None:
+        return "N/A"
+    month_name = SHIFT_TABLE_MONTH_NAMES.get(value.month, str(value.month))
+    return f"{value.day:02d} {month_name} {value.year}"
 
 
 def format_shift_table_date(value):
@@ -582,6 +714,18 @@ def parse_date_text(value):
         return datetime.strptime(value.strip(), "%d-%m-%Y").date()
     except ValueError as error:
         raise ValueError("Dato skal skrives som dd-mm-åååå, fx 02-05-2026.") from error
+
+
+def parse_optional_settings_date(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    for pattern in ("%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    return None
 
 
 def parse_clock_minutes(value):
@@ -1299,6 +1443,159 @@ def current_period_summary(data, settings, today=None):
     }
 
 
+def next_month(year, month):
+    if month == 12:
+        return year + 1, 1
+    return year, month + 1
+
+
+def month_range(start, end):
+    if end < start:
+        return []
+    current = date(start.year, start.month, 1)
+    months = []
+    while current <= end:
+        last_day = monthrange(current.year, current.month)[1]
+        month_start = current
+        month_end = date(current.year, current.month, last_day)
+        months.append((month_start, month_end))
+        next_year, next_month_number = next_month(current.year, current.month)
+        current = date(next_year, next_month_number, 1)
+    return months
+
+
+def current_holiday_year(today=None):
+    today = today or datetime.now().date()
+    start_year = today.year if today.month >= 9 else today.year - 1
+    start = date(start_year, 9, 1)
+    end = date(start_year + 1, 8, 31)
+    request_end = date(start_year + 1, 12, 31)
+    return start, end, request_end
+
+
+def holiday_pay_settings(settings):
+    settings = settings if isinstance(settings, dict) else {}
+    try:
+        raw_rate = settings.get(HOLIDAY_PAY_RATE_KEY, DEFAULT_HOLIDAY_PAY_RATE)
+        rate = parse_number_text(str(raw_rate)) if isinstance(raw_rate, str) else float(raw_rate or DEFAULT_HOLIDAY_PAY_RATE)
+        rate = max(0.0, rate)
+    except (TypeError, ValueError):
+        rate = DEFAULT_HOLIDAY_PAY_RATE
+    return {
+        "rate": rate,
+        "employment_start": parse_optional_settings_date(settings.get(HOLIDAY_PAY_EMPLOYMENT_START_KEY)),
+    }
+
+
+def holiday_days_for_range(start, end):
+    if start is None or end is None or end < start:
+        return 0.0
+
+    total = 0.0
+    for month_start, month_end in month_range(start, end):
+        active_start = max(start, month_start)
+        active_end = min(end, month_end)
+        active_days = (active_end - active_start).days + 1
+        full_month = active_start == month_start and active_end == month_end
+        month_days = 2.08 if full_month else min(2.08, active_days * 0.07)
+        total += month_days
+    return total
+
+
+def month_label(value):
+    month_name = MONTH_NAMES.get(value.month, str(value.month))
+    return f"{month_name} {value.year}"
+
+
+def holiday_pay_calculation(data, settings, today=None):
+    today = today or datetime.now().date()
+    config = holiday_pay_settings(settings)
+    ferie_start, ferie_end, request_end = current_holiday_year(today)
+    request_start = ferie_start
+
+    base = {
+        "configured": False,
+        "rate": config["rate"],
+        "employment_start": config["employment_start"],
+        "ferie_start": ferie_start,
+        "ferie_end": ferie_end,
+        "request_start": request_start,
+        "request_end": request_end,
+        "reason": "",
+    }
+    if config["employment_start"] is None:
+        config["employment_start"] = first_work_entry_date(data)
+        if config["employment_start"] is None:
+            base["reason"] = "Angiv ansættelsesstart for at beregne feriepenge."
+            return base
+        base["employment_start"] = config["employment_start"]
+
+    calculation_start = max(ferie_start, config["employment_start"])
+    calculation_end = min(today, ferie_end)
+    has_active_range = calculation_end >= calculation_start
+    rows = entry_rows(data, settings)
+    work_rows = [
+        row
+        for row in rows
+        if not row.get("is_day_off") and has_active_range and calculation_start <= row["dato"] <= calculation_end
+    ]
+    eligible_salary = sum(row["brutto"] for row in work_rows)
+    holiday_pay = eligible_salary * (config["rate"] / 100)
+    holiday_days = holiday_days_for_range(calculation_start, calculation_end) if has_active_range else 0.0
+    period_eligible_salary = 0.0
+    period_holiday_pay = 0.0
+    period_start = None
+    period_end = None
+    if has_required_settings(settings):
+        period_start, period_end = ft.get_salary_period_for_date(
+            today,
+            settings.get("løn start"),
+            settings.get("løn slut"),
+        )
+        period_eligible_salary = sum(
+            row["brutto"]
+            for row in work_rows
+            if period_start <= row["dato"] <= period_end
+        )
+        period_holiday_pay = period_eligible_salary * (config["rate"] / 100)
+
+    monthly_rows = []
+    if has_active_range:
+        for month_start, month_end in month_range(calculation_start, calculation_end):
+            active_start = max(calculation_start, month_start)
+            active_end = min(calculation_end, month_end)
+            salary = sum(row["brutto"] for row in work_rows if active_start <= row["dato"] <= active_end)
+            monthly_rows.append(
+                {
+                    "label": month_label(month_start),
+                    "start": active_start,
+                    "end": active_end,
+                    "salary": salary,
+                    "holiday_pay": salary * (config["rate"] / 100),
+                    "holiday_days": holiday_days_for_range(active_start, active_end),
+                }
+            )
+
+    base.update(
+        {
+            "configured": True,
+            "calculation_start": calculation_start,
+            "calculation_end": calculation_end if has_active_range else calculation_start,
+            "eligible_salary": eligible_salary,
+            "holiday_pay": holiday_pay,
+            "period_start": period_start,
+            "period_end": period_end,
+            "period_eligible_salary": period_eligible_salary,
+            "period_holiday_pay": period_holiday_pay,
+            "holiday_days": holiday_days,
+            "work_rows": work_rows,
+            "monthly_rows": monthly_rows,
+            "request_available_now": request_start <= today <= request_end,
+        }
+    )
+    return base
+
+
 def build_periods(data, settings):
     if not data or not has_required_settings(settings):
         return [], []
@@ -1552,6 +1849,7 @@ class MetricCard(QFrame):
         self.value_label = QLabel(value)
         self.value_label.setObjectName("MetricValue")
         self.value_label.setWordWrap(True)
+        self.value_label.setMinimumHeight(40)
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("MetricSub")
         self.subtitle_label.setWordWrap(True)
@@ -1562,6 +1860,7 @@ class MetricCard(QFrame):
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label)
         layout.addWidget(self.subtitle_label)
+        self.subtitle_label.setVisible(bool(subtitle))
         layout.addStretch()
 
         self.setStyleSheet(
@@ -1577,6 +1876,7 @@ class MetricCard(QFrame):
     def set_values(self, value, subtitle=""):
         self.value_label.setText(value)
         self.subtitle_label.setText(subtitle)
+        self.subtitle_label.setVisible(bool(subtitle))
 
 
 class DashboardMetricItem(QWidget):
@@ -2113,11 +2413,23 @@ class DashboardWidgetPreview(QFrame):
                     [
                         ("Snit/vagt", "331 kr.", "#475569"),
                         ("Snit/uge", "77 kr.", "#2563eb"),
-                        ("I alt", "1.408 kr.", "#1f8a70"),
+                        ("Perioden", "1.408 kr.", "#1f8a70"),
                     ]
                 )
             )
-            self.preview_layout.addWidget(self._note("Hurtige nøgletal direkte på forsiden."))
+            self.preview_layout.addWidget(self._note("Nøgletal for den nuværende lønperiode."))
+
+        elif self.key == "holiday_pay":
+            self.preview_layout.addLayout(
+                self._metric_row(
+                    [
+                        ("Denne periode", "197 kr.", "#1f8a70"),
+                        ("Total", "1.250 kr.", "#0f766e"),
+                        ("Feriedage", "4,16", "#2563eb"),
+                    ]
+                )
+            )
+            self.preview_layout.addWidget(self._note("Optjent feriepenge og anmodningsperiode."))
 
         elif self.key == "budget":
             self.preview_layout.addLayout(
@@ -2508,22 +2820,35 @@ class GoalHeaderWidget(QWidget):
         top.addStretch()
 
         content = QHBoxLayout()
-        content.setSpacing(22)
+        content.setSpacing(18)
         root.addLayout(content)
 
-        current = QVBoxLayout()
-        current.setSpacing(2)
+        main = QVBoxLayout()
+        main.setSpacing(8)
 
         self.value_label = QLabel("Ikke beregnet")
-        self.value_label.setStyleSheet("color: #111827; font-size: 18pt; font-weight: 900;")
+        self.value_label.setStyleSheet("color: #111827; font-size: 15pt; font-weight: 900;")
+        self.value_label.setWordWrap(True)
+
+        self.metrics_widget = QWidget()
+        self.metrics_layout = QHBoxLayout(self.metrics_widget)
+        self.metrics_layout.setContentsMargins(0, 0, 0, 0)
+        self.metrics_layout.setSpacing(8)
+        self.current_metric = self._goal_metric_box("Rådighed nu", "#1f8a70")
+        self.target_metric = self._goal_metric_box("Mål", "#2563eb")
+        self.estimate_metric = self._goal_metric_box("Forventet", "#d97706")
+        self.metrics_layout.addWidget(self.current_metric, 1)
+        self.metrics_layout.addWidget(self.target_metric, 1)
+        self.metrics_layout.addWidget(self.estimate_metric, 1)
 
         self.detail_label = QLabel()
         self.detail_label.setWordWrap(True)
         self.detail_label.setStyleSheet("color: #475569;")
 
-        current.addWidget(self.value_label)
-        current.addWidget(self.detail_label)
-        content.addLayout(current, 2)
+        main.addWidget(self.value_label)
+        main.addWidget(self.metrics_widget)
+        main.addWidget(self.detail_label)
+        content.addLayout(main, 3)
 
         previous = QVBoxLayout()
         previous.setSpacing(2)
@@ -2545,6 +2870,38 @@ class GoalHeaderWidget(QWidget):
 
         self.set_status("neutral", "Ikke beregnet", "Målet kan ikke vurderes endnu.", None)
 
+    def _goal_metric_box(self, title, accent):
+        box = QFrame()
+        box.setObjectName("Card")
+        box.setMinimumHeight(74)
+        box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        box.setStyleSheet(
+            f"""
+            QFrame#Card {{
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                border-left: 3px solid {accent};
+            }}
+            QLabel {{
+                background: transparent;
+                border: 0;
+            }}
+            """
+        )
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(3)
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #64748b; font-size: 8.5pt; font-weight: 850;")
+        value_label = QLabel("-")
+        value_label.setStyleSheet("color: #111827; font-size: 13pt; font-weight: 900;")
+        value_label.setWordWrap(True)
+        box.value_label = value_label
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        return box
+
     def _run_action(self):
         if self.active_action_callback is not None:
             self.active_action_callback()
@@ -2563,6 +2920,9 @@ class GoalHeaderWidget(QWidget):
         show_add_shifts_button=False,
         show_settings_button=False,
         show_budget_button=False,
+        current_amount=None,
+        target_amount=None,
+        estimate_amount=None,
     ):
         styles = {
             "success": ("MÅLET ER OPNÅET", "#16a34a"),
@@ -2577,6 +2937,18 @@ class GoalHeaderWidget(QWidget):
         self.status_pill.setText(label)
         self.value_label.setText(value)
         self.detail_label.setText(detail)
+
+        metrics = [
+            (self.current_metric, current_amount),
+            (self.target_metric, target_amount),
+            (self.estimate_metric, estimate_amount),
+        ]
+        has_metrics = any(amount is not None for _, amount in metrics)
+        self.metrics_widget.setVisible(has_metrics)
+        for metric, amount in metrics:
+            metric.setVisible(amount is not None)
+            if amount is not None:
+                metric.value_label.setText(format_money(amount))
 
         if show_add_shifts_button:
             self._set_action_button("Tilføj vagter", self.add_shifts_callback)
@@ -3027,6 +3399,216 @@ class DashboardSalaryCalculatorWidget(QWidget):
         return hours * rate
 
 
+class DashboardHolidayPayWidget(QWidget):
+    def __init__(self, setup_callback, details_callback):
+        super().__init__()
+        self.setup_callback = setup_callback
+        self.details_callback = details_callback
+        self.calculation = None
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
+
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(22)
+        root.addLayout(content)
+
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(8)
+        content.addLayout(left, 3)
+
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 2, 0, 0)
+        right.setSpacing(6)
+        content.addLayout(right, 2)
+
+        self.amount_label = QLabel("Optjent denne lønperiode: N/A")
+        self.amount_label.setStyleSheet("color: #111827; font-size: 17pt; font-weight: 900;")
+        self.amount_label.setWordWrap(True)
+        left.addWidget(self.amount_label)
+
+        self.total_amount_label = QLabel("Total optjent: N/A")
+        self.total_amount_label.setStyleSheet("color: #475569; font-size: 10.5pt; font-weight: 800;")
+        self.total_amount_label.setWordWrap(True)
+        left.addWidget(self.total_amount_label)
+
+        self.info_row = QHBoxLayout()
+        self.info_row.setContentsMargins(0, 0, 0, 0)
+        self.info_row.setSpacing(8)
+        left.addLayout(self.info_row)
+
+        self.days_chip = self._chip("Feriedage", "-", "#2563eb")
+        self.info_row.addWidget(self.days_chip, 0, Qt.AlignLeft)
+        self.info_row.addStretch()
+
+        self.detail_label = QLabel()
+        self.detail_label.setObjectName("PageSubtitle")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        right.addWidget(self.detail_label)
+        right.addStretch()
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(10)
+        left.addLayout(button_row)
+
+        self.details_button = QPushButton("Detaljer")
+        self.details_button.setObjectName("InlineButton")
+        self.details_button.clicked.connect(self._open_details)
+        button_row.addWidget(self.details_button, 0, Qt.AlignLeft)
+
+        self.setup_button = QPushButton("Indstil feriepenge beregneren")
+        self.setup_button.setObjectName("InlineButton")
+        self.setup_button.clicked.connect(self.setup_callback)
+        button_row.addWidget(self.setup_button, 0, Qt.AlignLeft)
+        button_row.addStretch()
+
+    def _chip(self, title, value, accent):
+        chip = QFrame()
+        chip.setObjectName("Card")
+        chip.setFixedSize(190, 82)
+        chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        chip.setStyleSheet(
+            f"""
+            QFrame#Card {{
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 7px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: 0;
+            }}
+            """
+        )
+        layout = QVBoxLayout(chip)
+        layout.setContentsMargins(10, 8, 10, 11)
+        layout.setSpacing(4)
+
+        accent_bar = QFrame()
+        accent_bar.setFixedHeight(3)
+        accent_bar.setStyleSheet(f"background: {accent}; border: 0; border-radius: 1px;")
+        layout.addWidget(accent_bar)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #64748b; font-size: 8.5pt; font-weight: 800;")
+        value_label = QLabel(value)
+        value_label.setStyleSheet("color: #0f172a; font-size: 12pt; font-weight: 900;")
+        value_label.setMinimumHeight(28)
+        chip.value_label = value_label
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        return chip
+
+    def update_calculation(self, calculation):
+        self.calculation = calculation
+        configured = bool(calculation and calculation.get("configured"))
+        self.details_button.setVisible(configured)
+        self.days_chip.setVisible(configured)
+        self.total_amount_label.setVisible(configured)
+        self.setup_button.setVisible(not configured)
+
+        if not configured:
+            reason = calculation.get("reason") if calculation else "Indstillinger mangler."
+            self.amount_label.setText("Feriepenge: Ikke indstillet")
+            self.detail_label.setText(reason)
+            return
+
+        request_text = f"Ferie kan holdes frem til {format_long_date(calculation['request_end'])}.\n"
+        self.amount_label.setText(f"Optjent denne lønperiode: {format_money(calculation.get('period_holiday_pay', 0))}")
+        self.total_amount_label.setText(f"Total optjent: {format_money(calculation['holiday_pay'])}")
+        self.detail_label.setText(
+            f"{request_text}\n"
+            "Udbetaling: tidligst 1 måned før første feriedag."
+            f"Beregnet fra {format_long_date(calculation['calculation_start'])} til {format_long_date(calculation['calculation_end'])}."
+        )
+        self.days_chip.value_label.setText(f"{format_number(calculation['holiday_days'])} dage")
+
+    def _open_details(self):
+        if self.calculation and self.calculation.get("configured"):
+            self.details_callback(self.calculation)
+
+
+class HolidayPayDetailsDialog(QDialog):
+    def __init__(self, parent, calculation):
+        super().__init__(parent)
+        self.calculation = calculation
+        self.setModal(True)
+        self.setWindowTitle("Feriepenge")
+        self.setWindowIcon(app_icon())
+        self.setMinimumSize(760, 680)
+        self.resize(840, 720)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setSpacing(12)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scroll, 1)
+
+        scroll_body = QWidget()
+        scroll.setWidget(scroll_body)
+        scroll_layout = QVBoxLayout(scroll_body)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(0)
+
+        panel, layout = make_panel("Feriepenge")
+        scroll_layout.addWidget(panel)
+
+        metric_grid = QGridLayout()
+        metric_grid.setSpacing(10)
+        metrics = [
+            ("Feriepenge", format_money(calculation["holiday_pay"]), "#1f8a70"),
+            ("Ferieberettiget løn", format_money(calculation["eligible_salary"]), "#2563eb"),
+            ("Feriedage", f"{format_number(calculation['holiday_days'])} dage", "#0f766e"),
+        ]
+        for index, (title, value, accent) in enumerate(metrics):
+            card = MetricCard(title, value, accent=accent)
+            card.setMinimumHeight(126)
+            metric_grid.addWidget(card, index // 2, index % 2)
+        layout.addLayout(metric_grid)
+
+        period_label = QLabel(
+            f"Beregnet fra {format_long_date(calculation['calculation_start'])} til {format_long_date(calculation['calculation_end'])}.\n"
+            f"Ferieafholdelsesperiode: {format_long_date(calculation['request_start'])} - {format_long_date(calculation['request_end'])}.\n"
+            "FerieKonto udbetaler tidligst 1 måned før første feriedag.\n"
+        )
+        period_label.setObjectName("PageSubtitle")
+        period_label.setWordWrap(True)
+        layout.addWidget(period_label)
+
+        table = QTableWidget()
+        setup_table(table, ["Måned", "Ferieberettiget løn", "Feriepenge", "Feriedage"])
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        monthly_rows = calculation.get("monthly_rows", [])
+        table.setRowCount(len(monthly_rows))
+        for row_index, row in enumerate(monthly_rows):
+            table.setItem(row_index, 0, table_item(row["label"]))
+            table.setItem(row_index, 1, table_item(format_money(row["salary"]), Qt.AlignRight | Qt.AlignVCenter))
+            table.setItem(row_index, 2, table_item(format_money(row["holiday_pay"]), Qt.AlignRight | Qt.AlignVCenter))
+            table.setItem(row_index, 3, table_item(format_number(row["holiday_days"]), Qt.AlignRight | Qt.AlignVCenter))
+        visible_months = min(8, max(4, len(monthly_rows)))
+        fit_table_height(table, len(monthly_rows), max_rows=8, min_rows=visible_months, bottom_padding=12)
+        layout.addWidget(table)
+        scroll_layout.addStretch()
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        close_button = QPushButton("Luk")
+        close_button.clicked.connect(self.accept)
+        button_row.addWidget(close_button)
+        outer.addLayout(button_row)
+
+
 class LineChart(QWidget):
     def __init__(self):
         super().__init__()
@@ -3120,20 +3702,20 @@ class LineChart(QWidget):
 
 class BasePage(QWidget):
     def __init__(self, window, title, subtitle):
-        super().__init__()
+        super().__init__(window if isinstance(window, QWidget) else None)
         self.window = window
 
         page_layout = QVBoxLayout(self)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(0)
 
-        self.scroll_area = QScrollArea()
+        self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         page_layout.addWidget(self.scroll_area)
 
-        self.page_body = QWidget()
+        self.page_body = QWidget(self.scroll_area)
         self.page_body.setObjectName("PageBody")
         self.scroll_area.setWidget(self.page_body)
 
@@ -3163,6 +3745,8 @@ class BasePage(QWidget):
         pass
 
 class CompactScrollPage(BasePage):
+    MIN_VALID_VIEWPORT_WIDTH = 320
+
     def __init__(self, window, title, subtitle):
         super().__init__(window, title, subtitle)
 
@@ -3172,6 +3756,10 @@ class CompactScrollPage(BasePage):
         # når indholdet er lavere end vinduet.
         self.scroll_area.setWidgetResizable(False)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._sync_compact_body_size)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._sync_compact_body_size()
@@ -3179,7 +3767,8 @@ class CompactScrollPage(BasePage):
     def _sync_compact_body_size(self):
         viewport_width = self.scroll_area.viewport().width()
 
-        if viewport_width <= 0:
+        if viewport_width < self.MIN_VALID_VIEWPORT_WIDTH:
+            QTimer.singleShot(0, self._sync_compact_body_size)
             return
 
         self.page_body.setFixedWidth(viewport_width)
@@ -3310,6 +3899,14 @@ class DashboardPage(CompactScrollPage):
         self.stats_cards = [self.stat_average_card, self.stat_week_card, self.stat_total_net_card]
         for card in self.stats_cards:
             self.stats_strip.add_item(card)
+
+        holiday_panel = self._make_widget_frame("Feriepenge", "holiday_pay")
+        self.holiday_pay_widget = DashboardHolidayPayWidget(
+            self._go_to_settings_holiday_pay_field,
+            self._open_holiday_pay_details,
+        )
+        holiday_panel.addWidget(self.holiday_pay_widget)
+        self.dashboard_widgets["holiday_pay"] = holiday_panel
 
         budget_panel = self._make_widget_frame("Budget", "budget")
         self.budget_widget = DashboardBudgetWidget(self._go_to_budget_page)
@@ -3551,6 +4148,13 @@ class DashboardPage(CompactScrollPage):
                 QTimer.singleShot(0, page.focus_disposable_goal)
                 return
 
+    def _go_to_settings_holiday_pay_field(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, SettingsPage):
+                self.window.go_to_page(index)
+                QTimer.singleShot(0, page.focus_holiday_pay)
+                return
+
     def _go_to_statistics_page(self):
         for index, page in enumerate(getattr(self.window, "pages", [])):
             if isinstance(page, StatisticsPage):
@@ -3563,6 +4167,10 @@ class DashboardPage(CompactScrollPage):
             if isinstance(page, CalculatorPage):
                 self.window.go_to_page(index)
                 return
+
+    def _open_holiday_pay_details(self, calculation):
+        dialog = HolidayPayDetailsDialog(self, calculation)
+        dialog.exec_()
         
     def _start_widget_drag(self, key, global_pos):
         if not self.reorder_button.isChecked() or key not in self.widget_order:
@@ -3732,6 +4340,7 @@ class DashboardPage(CompactScrollPage):
             new_settings = dict(self.settings) if isinstance(self.settings, dict) else ft.load_settings()
             new_settings[DASHBOARD_WIDGET_ORDER_KEY] = list(self.widget_order)
             new_settings[DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY] = True
+            new_settings[DASHBOARD_HOLIDAY_PAY_WIDGET_MIGRATION_KEY] = True
             ft.save_settings(new_settings)
             self.window.settings = ft.load_settings()
         except (OSError, ValueError, TypeError) as error:
@@ -3777,6 +4386,7 @@ class DashboardPage(CompactScrollPage):
         show_other_income = other_income > 0
         self._arrange_cards(show_other_income)
         today = datetime.now().date()
+        self.holiday_pay_widget.update_calculation(holiday_pay_calculation(self.data, self.settings, today))
         total_days = max(1, (summary["periode_slut"] - summary["periode_start"]).days + 1)
         elapsed_days = min(max((today - summary["periode_start"]).days + 1, 0), total_days)
         remaining_days = max(total_days - elapsed_days, 0)
@@ -3867,6 +4477,7 @@ class DashboardPage(CompactScrollPage):
     def _show_missing_settings(self):
         self.budget_widget.update_budget(ft.get_budget_categories(self.settings))
         self.salary_calculator_widget.set_settings(self.settings)
+        self.holiday_pay_widget.update_calculation(holiday_pay_calculation(self.data, self.settings))
         self._arrange_cards(True)
         for card in [
             self.net_card,
@@ -3908,12 +4519,10 @@ class DashboardPage(CompactScrollPage):
 
     def _update_stats(self, summary):
         rows = summary.get("work_rows", summary["rows"])
-        periods, _ = build_periods(self.data, self.settings)
-        total_netto_all = sum(period["netto"] for period in periods) if periods else 0
         if not rows:
             self.stat_average_card.set_values("N/A", "Ingen vagter i perioden")
             self.stat_week_card.set_values("N/A", "Ingen vagter i perioden")
-            self.stat_total_net_card.set_values(format_money(total_netto_all), "Netto fra alle vagter")
+            self.stat_total_net_card.set_values(format_money(summary["netto"]), "Netto i perioden")
             return
 
         avg_netto = summary["netto"] / len(rows)
@@ -3923,7 +4532,7 @@ class DashboardPage(CompactScrollPage):
         weekly_hours = summary["timer"] / total_weeks
         self.stat_average_card.set_values(format_money(avg_netto), f"{format_number(avg_hours)} timer i snit")
         self.stat_week_card.set_values(format_money(weekly_netto), f"{format_number(weekly_hours)} timer i snit")
-        self.stat_total_net_card.set_values(format_money(total_netto_all), "Netto fra alle vagter")
+        self.stat_total_net_card.set_values(format_money(summary["netto"]), "Netto i perioden")
 
     def _update_goal_status(self, available_now, estimated_available, disposable_goal, previous_period, current_rows, budget_categories):
         has_any_shifts = any(not ft.is_day_off(next(iter(entry.values()))) for entry in self.data)
@@ -3945,39 +4554,51 @@ class DashboardPage(CompactScrollPage):
                 f"Dit rådighedsmål er sat til {format_money(disposable_goal)},\nmen der findes endnu ingen vagter i databasen.",
                 previous_period,
                 show_add_shifts_button=True,
+                target_amount=disposable_goal,
             )
         elif available_now >= disposable_goal:
             self.goal_card.set_status(
                 "success",
-                f"{format_money(available_now)} / {format_money(disposable_goal)}",
+                "Målet er nået",
                 "Målet er nået for den nuværende lønperiode.",
                 previous_period,
                 show_budget_button=show_budget_button,
+                current_amount=available_now,
+                target_amount=disposable_goal,
             )
         elif estimated_available is not None and estimated_available >= disposable_goal:
+            missing_now = max(0, disposable_goal - available_now)
             self.goal_card.set_status(
                 "warning",
-                f"{format_money(estimated_available)} estimeret / {format_money(disposable_goal)}",
-                f"Estimatet når målet. Nu: {format_money(available_now)} af {format_money(disposable_goal)}.",
+                "Estimatet når målet",
+                f"Der mangler {format_money(missing_now)} lige nu, men prognosen ligger over målet.",
                 previous_period,
                 show_budget_button=show_budget_button,
+                current_amount=available_now,
+                target_amount=disposable_goal,
+                estimate_amount=estimated_available,
             )
         elif estimated_available is None:
             self.goal_card.set_status(
                 "neutral",
-                f"N/A / {format_money(disposable_goal)}",
+                "Budget mangler",
                 "Indstil dit budget i Budget-sektionen for at beregne rådighedsmål.",
                 previous_period,
                 show_budget_button=show_budget_button,
+                current_amount=available_now,
+                target_amount=disposable_goal,
             )
         else:
-            estimated_text = format_money(estimated_available) if estimated_available is not None else "N/A"
+            missing_estimate = max(0, disposable_goal - estimated_available)
             self.goal_card.set_status(
                 "danger",
-                f"{estimated_text} estimeret / {format_money(disposable_goal)}",
-                f"Estimatet er under målet på {format_money(disposable_goal)}.",
+                "Prognosen er under målet",
+                f"Forventet rådighed ligger {format_money(missing_estimate)} under målet.",
                 previous_period,
                 show_budget_button=show_budget_button,
+                current_amount=available_now,
+                target_amount=disposable_goal,
+                estimate_amount=estimated_available,
             )
 
     def _fill_breakdown(self, breakdown):
@@ -4419,8 +5040,8 @@ class PayrollSlipDialog(QDialog):
 
         self._build_header(root)
         self._build_metrics(root)
-        self._build_breakdown(root)
         self._build_shifts(root)
+        self._build_breakdown(root)
 
         button_row = QHBoxLayout()
         button_row.addStretch()
@@ -5540,11 +6161,20 @@ class SettingsPage(BasePage):
             "Tilpas skat, anden indkomst, rådighedsmål og lønperiodens datoer. Faste udgifter styres på Budget-siden.",
         )
 
-        panel, layout = make_panel("Økonomi, mål og lønperiode")
-        self.root.addWidget(panel)
-        form = QFormLayout()
-        form.setVerticalSpacing(12)
-        layout.addLayout(form)
+        def add_settings_form(title):
+            panel, layout = make_panel(title)
+            self.root.addWidget(panel)
+            form = QFormLayout()
+            form.setVerticalSpacing(12)
+            form.setHorizontalSpacing(18)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            layout.addLayout(form)
+            return form
+
+        tax_form = add_settings_form("Skat og indkomst")
+        goal_form = add_settings_form("Mål og lønperiode")
+        holiday_form = add_settings_form("Feriepenge")
 
         self.tax_field = make_text_input(placeholder="fx 49")
         self.fradrag_field = make_text_input(placeholder="fx 0")
@@ -5554,18 +6184,24 @@ class SettingsPage(BasePage):
         self.default_rate_field = make_text_input(placeholder="fx 150")
         self.start_day_field = make_text_input(placeholder="1-31")
         self.end_day_field = make_text_input(placeholder="1-31")
+        self.holiday_rate_field = make_text_input(placeholder="12,5")
+        self.employment_start_field = make_text_input(placeholder="dd-mm-åååå")
 
-        form.addRow("Skat %", self.tax_field)
-        form.addRow("Fradrag", self.fradrag_field)
-        form.addRow("AM-bidrag %", self.am_field)
-        form.addRow("Anden indkomst (netto)", self.other_income_field)
-        form.addRow("Ønsket rådighedsbeløb", self.disposable_goal_field)
-        form.addRow("Timeløn", self.default_rate_field)
-        form.addRow("Lønperiode starter d.", self.start_day_field)
-        form.addRow("Lønperiode slutter d.", self.end_day_field)
+        tax_form.addRow("Skat %", self.tax_field)
+        tax_form.addRow("Fradrag", self.fradrag_field)
+        tax_form.addRow("AM-bidrag %", self.am_field)
+        tax_form.addRow("Anden indkomst (netto)", self.other_income_field)
+        tax_form.addRow("Timeløn", self.default_rate_field)
+
+        goal_form.addRow("Ønsket rådighedsbeløb", self.disposable_goal_field)
+        goal_form.addRow("Lønperiode starter d.", self.start_day_field)
+        goal_form.addRow("Lønperiode slutter d.", self.end_day_field)
+
+        holiday_form.addRow("Feriegodtgørelse %", self.holiday_rate_field)
+        holiday_form.addRow("Ansættelsesstart", self.employment_start_field)
 
         button_row = QHBoxLayout()
-        layout.addLayout(button_row)
+        self.root.addLayout(button_row)
         save_button = QPushButton("Gem indstillinger")
         save_button.clicked.connect(self._save_settings)
         button_row.addWidget(save_button)
@@ -5573,10 +6209,10 @@ class SettingsPage(BasePage):
         reset_button.setObjectName("SecondaryButton")
         reset_button.clicked.connect(self.refresh)
         button_row.addWidget(reset_button)
-        tutorial_button = QPushButton("Start tutorial")
-        tutorial_button.setObjectName("SecondaryButton")
-        tutorial_button.clicked.connect(lambda: self.window.start_tutorial(force=True))
-        button_row.addWidget(tutorial_button)
+        introduction_button = QPushButton("Start introduktion")
+        introduction_button.setObjectName("SecondaryButton")
+        introduction_button.clicked.connect(lambda: self.window.start_introduction(force=True))
+        button_row.addWidget(introduction_button)
         button_row.addStretch()
 
         note = QLabel(
@@ -5598,6 +6234,8 @@ class SettingsPage(BasePage):
             "standard timeløn": 150,
             "løn start": 21,
             "løn slut": 20,
+            HOLIDAY_PAY_RATE_KEY: DEFAULT_HOLIDAY_PAY_RATE,
+            HOLIDAY_PAY_EMPLOYMENT_START_KEY: "",
         }
         set_field_number(self.tax_field, float(settings.get("skat", 0)) * 100)
         set_field_number(self.fradrag_field, float(settings.get("fradrag", 0)))
@@ -5607,6 +6245,10 @@ class SettingsPage(BasePage):
         set_field_number(self.default_rate_field, ft.get_default_hourly_rate(settings))
         self.start_day_field.setText(str(int(settings.get("løn start", 15))))
         self.end_day_field.setText(str(int(settings.get("løn slut", 14))))
+        holiday_settings = holiday_pay_settings(settings)
+        set_field_number(self.holiday_rate_field, holiday_settings["rate"])
+        employment_start = holiday_settings["employment_start"] or first_work_entry_date(self.data)
+        self.employment_start_field.setText(format_date(employment_start) if employment_start else "")
 
     def focus_disposable_goal(self):
         self.disposable_goal_field.setFocus()
@@ -5615,34 +6257,46 @@ class SettingsPage(BasePage):
         if hasattr(self, "scroll_area"):
             self.scroll_area.ensureWidgetVisible(self.disposable_goal_field, 80, 80)
 
+    def focus_holiday_pay(self):
+        target = self.employment_start_field
+        target.setFocus()
+        target.selectAll()
+
+        if hasattr(self, "scroll_area"):
+            self.scroll_area.ensureWidgetVisible(target, 80, 80)
+
     def _save_settings(self):
         try:
             tax = parse_positive_number(self.tax_field, "Skat", allow_zero=True)
             am = parse_positive_number(self.am_field, "AM-bidrag", allow_zero=True)
+            holiday_rate = parse_positive_number(self.holiday_rate_field, "Feriegodtgørelse")
+            employment_start_text = self.employment_start_field.text().strip()
+            employment_start = parse_date_text(employment_start_text) if employment_start_text else None
             new_settings = dict(self.settings) if isinstance(self.settings, dict) else {}
-            new_settings.update(
-                {
-                    "skat": tax / 100 if tax > 1 else tax,
-                    "fradrag": parse_positive_number(self.fradrag_field, "Fradrag", allow_zero=True),
-                    "am bidrag": am / 100 if am > 1 else am,
-                    "anden indkomst netto": parse_positive_number(
-                        self.other_income_field,
-                        "Anden indkomst",
-                        allow_zero=True,
-                    ),
-                    "standard timeløn": parse_positive_number(
-                        self.default_rate_field,
-                        "Timeløn",
-                    ),
-                    "ønsket rådighedsbeløb": parse_positive_number(
-                        self.disposable_goal_field,
-                        "Ønsket rådighedsbeløb",
-                        allow_zero=True,
-                    ),
-                    "løn start": parse_int_field(self.start_day_field, "Lønperiode starter", 1, 31),
-                    "løn slut": parse_int_field(self.end_day_field, "Lønperiode slutter", 1, 31),
-                }
-            )
+            updated_settings = {
+                "skat": tax / 100 if tax > 1 else tax,
+                "fradrag": parse_positive_number(self.fradrag_field, "Fradrag", allow_zero=True),
+                "am bidrag": am / 100 if am > 1 else am,
+                "anden indkomst netto": parse_positive_number(
+                    self.other_income_field,
+                    "Anden indkomst",
+                    allow_zero=True,
+                ),
+                "standard timeløn": parse_positive_number(
+                    self.default_rate_field,
+                    "Timeløn",
+                ),
+                "ønsket rådighedsbeløb": parse_positive_number(
+                    self.disposable_goal_field,
+                    "Ønsket rådighedsbeløb",
+                    allow_zero=True,
+                ),
+                "løn start": parse_int_field(self.start_day_field, "Lønperiode starter", 1, 31),
+                "løn slut": parse_int_field(self.end_day_field, "Lønperiode slutter", 1, 31),
+                HOLIDAY_PAY_RATE_KEY: holiday_rate,
+                HOLIDAY_PAY_EMPLOYMENT_START_KEY: date_to_key(employment_start) if employment_start else "",
+            }
+            new_settings.update(updated_settings)
         except ValueError as error:
             QMessageBox.warning(self, "Ugyldige indstillinger", str(error))
             return
@@ -5652,14 +6306,15 @@ class SettingsPage(BasePage):
         self.window.refresh_all()
 
 
-class TutorialDialog(QDialog):
+class IntroductionDialog(QDialog):
     def __init__(self, window, force=False):
+        debug_window_log(f"IntroductionDialog.__init__ start force={force}")
         super().__init__(window)
         self.window = window
         self.force = force
         self.step_index = 0
         self.setModal(True)
-        self.setWindowTitle("Kom godt i gang")
+        self.setWindowTitle("Introduktion")
         self.setWindowIcon(app_icon())
         self.setMinimumSize(760, 620)
         self.resize(820, 680)
@@ -5669,7 +6324,7 @@ class TutorialDialog(QDialog):
                 "key": "welcome",
                 "title": "Velkommen til Lønix",
                 "text": (
-                    "Denne korte tutorial hjælper dig med at sætte programmet op.\n\n"
+                    "Denne korte introduktion hjælper dig med at sætte programmet op.\n\n"
                     "Lønix bruges til at registrere vagter, beregne løn, holde styr på faste udgifter "
                     "og se hvor meget du har til rådighed i lønperioden."
                 ),
@@ -5756,9 +6411,9 @@ class TutorialDialog(QDialog):
                 "key": "done",
                 "title": "Du er klar",
                 "text": (
-                    "Tutorialen er færdig.\n\n"
+                    "Introduktionen er færdig.\n\n"
                     "Start med at tilføje dine vagter og dine faste udgifter i Budget. "
-                    "Du kan altid starte tutorialen igen fra Indstillinger."
+                    "Du kan altid starte introduktionen igen fra Indstillinger."
                 ),
             },
         ]
@@ -5817,6 +6472,7 @@ class TutorialDialog(QDialog):
 
         self._fill_existing_values() if self.force else None
         self._show_step()
+        debug_widget_inventory("IntroductionDialog.__init__ end", limit=12)
 
     def _build_setup_widget(self):
         wrapper = QFrame()
@@ -5938,6 +6594,7 @@ class TutorialDialog(QDialog):
 
     def _show_step(self):
         step = self._current_step()
+        debug_window_log(f"IntroductionDialog._show_step index={self.step_index} key={step['key']}")
         is_setup_step = step["key"] == "setup"
 
         self.title_label.setText(step["title"])
@@ -6237,6 +6894,7 @@ class TutorialDialog(QDialog):
         return parse_int_field(field, label, 1, 31)
 
     def _save_setup_step(self):
+        debug_window_log("IntroductionDialog._save_setup_step")
         try:
             tax_value = self._field_number(self.setup_tax, 40, "Skatteprocent", allow_zero=True)
             am_value = float(self.window.settings.get("am bidrag", 0.08))
@@ -6263,21 +6921,22 @@ class TutorialDialog(QDialog):
             return False
 
         ft.save_settings(new_settings)
-        self.window.refresh_all()
+        self.window.refresh_all_quietly()
         return True
 
-    def _complete_tutorial(self):
+    def _complete_introduction(self):
+        debug_window_log("IntroductionDialog._complete_introduction")
         new_settings = dict(self.window.settings) if isinstance(self.window.settings, dict) else {}
-        new_settings[ft.TUTORIAL_DONE_KEY] = True
+        new_settings[ft.INTRODUCTION_DONE_KEY] = True
         ft.save_settings(new_settings)
-        self.window.refresh_all()
+        self.window.settings = ft.load_settings()
         self.window.go_to_page(0)
         self.accept()
 
     def _next(self):
         step = self._current_step()
         if step["key"] == "done":
-            self._complete_tutorial()
+            self._complete_introduction()
             return
         if step["key"] == "setup" and not self._save_setup_step():
             return
@@ -6293,7 +6952,11 @@ class TutorialDialog(QDialog):
 
 class MainWindow(QMainWindow):
     def __init__(self):
+        debug_window_log("MainWindow.__init__ start")
         super().__init__()
+        self.setUpdatesEnabled(False)
+        self._startup_revealed = False
+        self._startup_reveal_scheduled = False
         ensure_storage()
         self.data = ft.load_data()
         self.settings = ft.load_settings()
@@ -6306,14 +6969,14 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(minimum_size)
         self.resize(saved_window_size(self.settings, window_size, minimum_size))
 
-        root = QWidget()
+        root = QWidget(self)
         root.setObjectName("Content")
         self.setCentralWidget(root)
         layout = QHBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        sidebar = QWidget()
+        sidebar = QWidget(root)
         sidebar.setObjectName("Sidebar")
         sidebar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         sidebar.setMinimumWidth(BASE_SIDEBAR_WIDTH)
@@ -6323,7 +6986,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setSpacing(8)
         layout.addWidget(sidebar)
 
-        brand_panel = QFrame()
+        brand_panel = QFrame(sidebar)
         brand_panel.setObjectName("BrandPanel")
         brand_panel_layout = QHBoxLayout(brand_panel)
         brand_panel_layout.setContentsMargins(12, 11, 12, 11)
@@ -6344,7 +7007,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(brand_panel)
         sidebar_layout.addSpacing(18)
 
-        self.stack = QStackedWidget()
+        self.stack = QStackedWidget(root)
         layout.addWidget(self.stack, 1)
 
         self.button_group = QButtonGroup(self)
@@ -6362,17 +7025,17 @@ class MainWindow(QMainWindow):
         sidebar_layout.addStretch()
         self._add_footer_page(sidebar_layout, "Indstillinger", SettingsPage(self))
 
-        self.tutorial_overlay = QWidget(root)
-        self.tutorial_overlay.setStyleSheet("background: rgba(15, 23, 42, 150);")
-        self.tutorial_overlay.hide()
-        self._tutorial_dialog = None
+        self.introduction_overlay = QWidget(root)
+        self.introduction_overlay.setStyleSheet("background: rgba(15, 23, 42, 150);")
+        self.introduction_overlay.hide()
+        self._introduction_dialog = None
 
         self.nav_buttons[0].setChecked(True)
         self.stack.setCurrentIndex(0)
         self._update_sidebar_width()
         center_on_primary_screen(self)
         self.refresh_all()
-        QTimer.singleShot(250, self._maybe_start_tutorial)
+        debug_widget_inventory("MainWindow.__init__ end")
 
     def _ui_px(self, value):
         font_height = max(1, self.fontMetrics().height())
@@ -6443,15 +7106,38 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(page)
 
     def refresh_all(self):
+        debug_window_log("MainWindow.refresh_all start")
         self.data = ft.load_data()
         self.settings = ft.load_settings()
         for page in self.pages:
+            debug_window_log(f"  refreshing {type(page).__name__}")
             page.refresh()
+        debug_widget_inventory("MainWindow.refresh_all end", limit=10)
+
+    def refresh_all_quietly(self):
+        debug_window_log("MainWindow.refresh_all_quietly start")
+        updates_were_enabled = self.updatesEnabled()
+        if updates_were_enabled:
+            self.setUpdatesEnabled(False)
+        try:
+            self.refresh_all()
+        finally:
+            if updates_were_enabled:
+                self.setUpdatesEnabled(True)
+                self.update()
+        debug_window_log("MainWindow.refresh_all_quietly end")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_sidebar_width()
-        self._position_tutorial_overlay()
+        self._position_introduction_overlay()
+
+    def showEvent(self, event):
+        debug_window_log("MainWindow.showEvent")
+        super().showEvent(event)
+        if not self._startup_reveal_scheduled:
+            self._startup_reveal_scheduled = True
+            QTimer.singleShot(0, self.finalize_startup)
 
     def closeEvent(self, event):
         try:
@@ -6463,11 +7149,23 @@ class MainWindow(QMainWindow):
             pass
         super().closeEvent(event)
 
-    def _position_tutorial_overlay(self):
-        if hasattr(self, "tutorial_overlay"):
-            self.tutorial_overlay.setGeometry(self.stack.geometry())
+    def finalize_startup(self):
+        debug_window_log("MainWindow.finalize_startup")
+        if self._startup_revealed:
+            return
+        self._startup_reveal_scheduled = True
+        self._startup_revealed = True
+        self.setUpdatesEnabled(True)
+        self.update()
+        debug_widget_inventory("after startup reveal")
+        QTimer.singleShot(220, self._maybe_start_introduction)
+
+    def _position_introduction_overlay(self):
+        if hasattr(self, "introduction_overlay"):
+            self.introduction_overlay.setGeometry(self.stack.geometry())
 
     def go_to_page(self, index):
+        debug_window_log(f"MainWindow.go_to_page index={index}")
         if index < 0 or index >= len(self.pages):
             return
 
@@ -6481,46 +7179,80 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
 
-        if self._tutorial_dialog is not None:
+        if self._introduction_dialog is not None:
             self.nav_buttons[index].raise_()
 
-    def _maybe_start_tutorial(self):
-        self.refresh_all()
-        if not ft.is_tutorial_completed(self.settings):
-            self.start_tutorial(force=False)
+    def _maybe_start_introduction(self):
+        debug_window_log("MainWindow._maybe_start_introduction")
+        self.data = ft.load_data()
+        self.settings = ft.load_settings()
+        debug_window_log(f"  introduction_completed={ft.is_introduction_completed(self.settings)}")
+        if not ft.is_introduction_completed(self.settings):
+            self.start_introduction(force=False)
 
-    def start_tutorial(self, force=False):
-        if self._tutorial_dialog is not None:
-            self._tutorial_dialog.raise_()
-            self._tutorial_dialog.activateWindow()
+    def start_introduction(self, force=False):
+        debug_window_log(f"MainWindow.start_introduction force={force}")
+        debug_widget_inventory("before start_introduction", limit=12)
+        if self._introduction_dialog is not None:
+            self._introduction_dialog.raise_()
+            self._introduction_dialog.activateWindow()
             return
-        self._position_tutorial_overlay()
-        self.tutorial_overlay.show()
-        self.tutorial_overlay.raise_()
-        self._tutorial_dialog = TutorialDialog(self, force=force)
-        self._tutorial_dialog.finished.connect(self._finish_tutorial_dialog)
-        self._tutorial_dialog.open()
-        self._tutorial_dialog.raise_()
+        updates_were_enabled = self.updatesEnabled()
+        if updates_were_enabled:
+            self.setUpdatesEnabled(False)
+        try:
+            self._position_introduction_overlay()
+            self._introduction_dialog = IntroductionDialog(self, force=force)
+            self._introduction_dialog.finished.connect(self._finish_introduction_dialog)
+            self._center_dialog_on_window(self._introduction_dialog)
+            self.introduction_overlay.show()
+            self.introduction_overlay.raise_()
+            self._introduction_dialog.open()
+            self._introduction_dialog.raise_()
+        finally:
+            if updates_were_enabled:
+                self.setUpdatesEnabled(True)
+                self.update()
+        debug_widget_inventory("after start_introduction", limit=12)
 
-    def _finish_tutorial_dialog(self):
-        self.tutorial_overlay.hide()
-        self._tutorial_dialog = None
-        self.refresh_all()
+    def _center_dialog_on_window(self, dialog):
+        debug_window_log("MainWindow._center_dialog_on_window")
+        dialog.adjustSize()
+        frame = dialog.frameGeometry()
+        frame.moveCenter(self.frameGeometry().center())
+        dialog.move(frame.topLeft())
+
+    def _finish_introduction_dialog(self):
+        debug_window_log("MainWindow._finish_introduction_dialog")
+        dialog = self._introduction_dialog
+        self._introduction_dialog = None
+        self.introduction_overlay.hide()
+        if dialog is not None:
+            dialog.deleteLater()
+        debug_widget_inventory("after finish_introduction_dialog", limit=12)
 
 
 def run():
-    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
-    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    debug_window_log("run start")
+    os.environ.pop("QT_USE_NATIVE_WINDOWS", None)
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    QApplication.setAttribute(Qt.AA_NativeWindows, False)
+    QApplication.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings, True)
     app = QApplication(sys.argv)
+    if WINDOW_DEBUG_ENABLED:
+        app.window_debug_filter = WindowDebugEventFilter(app)
+        app.installEventFilter(app.window_debug_filter)
+        debug_widget_inventory("after QApplication created")
     app.setStyle("Fusion")
     app.setWindowIcon(app_icon())
     app.setStyleSheet(APP_STYLE)
     font = QFont("Segoe UI", 10)
     app.setFont(font)
     window = MainWindow()
+    debug_widget_inventory("before window.show")
     window.show()
+    debug_widget_inventory("after window.show call")
     return app.exec_()
 
 

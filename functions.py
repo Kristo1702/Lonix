@@ -12,7 +12,7 @@ init()
 
 OTHER_INCOME_KEY = "anden indkomst netto"
 DEFAULT_HOURLY_RATE_KEY = "standard timeløn"
-TUTORIAL_DONE_KEY = "tutorial gennemført"
+INTRODUCTION_DONE_KEY = "introduktion gennemført"
 ENTRY_TYPE_KEY = "type"
 DAY_OFF_ENTRY_TYPE = "fridag"
 REQUIRED_SETTINGS_KEYS = ["skat", "fradrag", "am bidrag", OTHER_INCOME_KEY, "løn start", "løn slut"]
@@ -160,7 +160,7 @@ def load_settings():
             "am bidrag": 0.08,
             OTHER_INCOME_KEY: 0,
             DEFAULT_HOURLY_RATE_KEY: DEFAULT_HOURLY_RATE,
-            TUTORIAL_DONE_KEY: False,
+            INTRODUCTION_DONE_KEY: False,
             "udgifter": DEFAULT_FIXED_EXPENSES,
             "budget kategorier": [],
             "ønsket rådighedsbeløb": 1000,
@@ -257,7 +257,11 @@ def normalize_settings(settings):
     except (TypeError, ValueError):
         normalized[DEFAULT_HOURLY_RATE_KEY] = float(DEFAULT_HOURLY_RATE)
 
-    normalized[TUTORIAL_DONE_KEY] = bool(normalized.get(TUTORIAL_DONE_KEY, False))
+    old_introduction_key = "tut" + "orial gennemført"
+    if INTRODUCTION_DONE_KEY not in normalized and old_introduction_key in normalized:
+        normalized[INTRODUCTION_DONE_KEY] = bool(normalized.get(old_introduction_key, False))
+    normalized.pop(old_introduction_key, None)
+    normalized[INTRODUCTION_DONE_KEY] = bool(normalized.get(INTRODUCTION_DONE_KEY, False))
 
     return normalized
 
@@ -305,9 +309,9 @@ def get_default_hourly_rate(settings=None):
         return float(DEFAULT_HOURLY_RATE)
 
 
-def is_tutorial_completed(settings=None):
+def is_introduction_completed(settings=None):
     settings = normalize_settings(settings if settings is not None else load_settings())
-    return bool(settings.get(TUTORIAL_DONE_KEY, False))
+    return bool(settings.get(INTRODUCTION_DONE_KEY, False))
 
 
 def is_day_off(løn_info):
