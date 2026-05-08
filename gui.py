@@ -1543,21 +1543,41 @@ def last_rate(data, settings=None):
     return ft.get_default_hourly_rate(settings)
 
 
+def overview_row_with_current_settings(row, settings):
+    settings = ft.normalize_settings(settings)
+    clean_row = dict(row)
+    clean_row["settings"] = settings
+    if clean_row.get("is_day_off"):
+        clean_row["timer"] = 0.0
+        clean_row["brutto"] = 0.0
+        return clean_row
+
+    duration = max(0.0, float(clean_row.get("varighed", 0) or 0))
+    pause = max(0.0, float(clean_row.get("pause", 0) or 0))
+    paid_hours = duration if settings.get(ft.PAID_BREAK_KEY, False) else max(0.0, duration - pause)
+    hourly_rate = float(clean_row.get("timeløn", 0) or 0)
+    clean_row["timer"] = paid_hours
+    clean_row["brutto"] = paid_hours * hourly_rate
+    return clean_row
+
+
 def current_period_summary(data, settings, today=None):
     today = today or datetime.now().date()
     if not has_required_settings(settings):
         return None
 
+    current_settings = ft.normalize_settings(settings)
     periode_start, periode_slut = ft.get_salary_period_for_date(
         today,
-        settings=settings,
+        settings=current_settings,
     )
 
     rows = [
-        row
-        for row in entry_rows(data, settings)
+        overview_row_with_current_settings(row, current_settings)
+        for row in entry_rows(data, current_settings)
         if periode_start <= row["dato"] <= periode_slut
     ]
+
     work_rows = [row for row in rows if not row.get("is_day_off")]
     day_off_rows = [row for row in rows if row.get("is_day_off")]
     timer = sum(row["timer"] for row in work_rows)
@@ -1567,7 +1587,7 @@ def current_period_summary(data, settings, today=None):
             "brutto": row["brutto"],
             "timer": row["timer"],
             "paid_hours": row["timer"],
-            "settings": row.get("settings", settings),
+            "settings": current_settings,
         }
         for row in rows
     ]
@@ -1575,8 +1595,12 @@ def current_period_summary(data, settings, today=None):
         calculation_items,
         periode_start,
         periode_slut,
-        settings,
+        current_settings,
     )
+    for row, row_breakdown in zip(rows, breakdown.get("item_breakdowns", [])):
+        row["netto"] = row_breakdown["netto"]
+        row["settings"] = current_settings
+
     return {
         "periode_start": periode_start,
         "periode_slut": periode_slut,
@@ -1584,9 +1608,9 @@ def current_period_summary(data, settings, today=None):
         "brutto": brutto,
         "netto": breakdown["netto"],
         "breakdown": breakdown,
-        "other_income": ft.calculate_period_other_income(calculation_items, periode_start, periode_slut, settings),
-        "budget_expenses": ft.calculate_period_budget_expenses(calculation_items, periode_start, periode_slut, settings),
-        "disposable_goal": ft.calculate_period_disposable_goal(calculation_items, periode_start, periode_slut, settings),
+        "other_income": ft.get_other_income(current_settings, periode_start, periode_slut),
+        "budget_expenses": ft.calculate_budget_expenses(current_settings, periode_start, periode_slut),
+        "disposable_goal": ft.get_disposable_income_goal(current_settings, periode_start, periode_slut),
         "rows": rows,
         "work_rows": work_rows,
         "day_off_rows": day_off_rows,
@@ -1765,6 +1789,7 @@ def month_label(value):
 
 def holiday_pay_calculation(data, settings, today=None):
     today = today or datetime.now().date()
+    settings = ft.normalize_settings(settings if isinstance(settings, dict) else {})
     config = holiday_pay_settings(settings)
     ferie_start, ferie_end, request_end = current_holiday_year(today)
     request_start = ferie_start
@@ -1789,7 +1814,10 @@ def holiday_pay_calculation(data, settings, today=None):
     calculation_start = max(ferie_start, config["employment_start"])
     calculation_end = min(today, ferie_end)
     has_active_range = calculation_end >= calculation_start
-    rows = entry_rows(data, settings)
+    rows = [
+        overview_row_with_current_settings(row, settings)
+        for row in entry_rows(data, settings)
+    ]
     work_rows = [
         row
         for row in rows
@@ -3106,7 +3134,7 @@ class GoalHeaderWidget(QWidget):
         self.metrics_layout.setContentsMargins(0, 0, 0, 0)
         self.metrics_layout.setSpacing(8)
         self.current_metric = self._goal_metric_box("Rådighed nu", "#1f8a70")
-        self.target_metric = self._goal_metric_box("Mål", "#2563eb")
+        self.target_metric = self._goal_metric_box("Periodemål", "#2563eb")
         self.estimate_metric = self._goal_metric_box("Forventet", "#d97706")
         self.metrics_layout.addWidget(self.current_metric, 1)
         self.metrics_layout.addWidget(self.target_metric, 1)
@@ -3144,7 +3172,7 @@ class GoalHeaderWidget(QWidget):
     def _goal_metric_box(self, title, accent):
         box = QFrame()
         box.setObjectName("Card")
-        box.setMinimumHeight(74)
+        box.setMinimumHeight(82)
         box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         box.setStyleSheet(
             f"""
@@ -3168,9 +3196,15 @@ class GoalHeaderWidget(QWidget):
         value_label = QLabel("-")
         value_label.setStyleSheet("color: #111827; font-size: 13pt; font-weight: 900;")
         value_label.setWordWrap(True)
+        subtitle_label = QLabel("")
+        subtitle_label.setStyleSheet("color: #64748b; font-size: 8.5pt;")
+        subtitle_label.setWordWrap(True)
+        subtitle_label.hide()
         box.value_label = value_label
+        box.subtitle_label = subtitle_label
         layout.addWidget(title_label)
         layout.addWidget(value_label)
+        layout.addWidget(subtitle_label)
         return box
 
     def _run_action(self):
@@ -3194,6 +3228,7 @@ class GoalHeaderWidget(QWidget):
         current_amount=None,
         target_amount=None,
         estimate_amount=None,
+        monthly_target_amount=None,
     ):
         styles = {
             "success": ("MÅLET ER OPNÅET", "#16a34a"),
@@ -3220,6 +3255,12 @@ class GoalHeaderWidget(QWidget):
             metric.setVisible(amount is not None)
             if amount is not None:
                 metric.value_label.setText(format_money(amount))
+            if hasattr(metric, "subtitle_label"):
+                metric.subtitle_label.hide()
+                metric.subtitle_label.setText("")
+        if target_amount is not None and monthly_target_amount is not None:
+            self.target_metric.subtitle_label.setText(f"Månedsmål: {format_money(monthly_target_amount)}")
+            self.target_metric.subtitle_label.show()
 
         if show_add_shifts_button:
             self._set_action_button("Tilføj vagter", self.add_shifts_callback)
@@ -4176,7 +4217,7 @@ class DashboardPage(CompactScrollPage):
         self.dashboard_widgets["stats"] = stats_panel
         self.stat_average_card = DashboardMetricItem("Snit pr. vagt", accent="#475569")
         self.stat_week_card = DashboardMetricItem("Snit pr. uge", accent="#2563eb")
-        self.stat_total_net_card = DashboardMetricItem("Løn i alt", accent="#1f8a70")
+        self.stat_total_net_card = DashboardMetricItem("Bedste vagt", accent="#1f8a70")
         self.stats_cards = [self.stat_average_card, self.stat_week_card, self.stat_total_net_card]
         for card in self.stats_cards:
             self.stats_strip.add_item(card)
@@ -4651,7 +4692,7 @@ class DashboardPage(CompactScrollPage):
             return
 
         summary = current_period_summary(self.data, self.settings)
-        forecast = ft.calculate_salary_forecast(self.data, self.settings)
+        forecast = ft.calculate_salary_forecast(self.data, self.settings, use_entry_settings=False)
         other_income = summary.get("other_income", ft.get_other_income(self.settings, summary["periode_start"], summary["periode_slut"]))
         budget_expenses = summary.get("budget_expenses", ft.calculate_budget_expenses(self.settings, summary["periode_start"], summary["periode_slut"]))
         previous_period = self._last_complete_period_info()
@@ -4663,7 +4704,8 @@ class DashboardPage(CompactScrollPage):
         estimated_netto = forecast.get("estimated_netto") if forecast else None
         estimated_brutto = forecast.get("estimated_brutto") if forecast else None
         estimated_hours = forecast.get("estimated_hours") if forecast else None
-        disposable_goal = summary.get("disposable_goal", ft.get_disposable_income_goal(self.settings, summary["periode_start"], summary["periode_slut"]))
+        disposable_goal = ft.get_disposable_income_goal(self.settings, summary["periode_start"], summary["periode_slut"])
+        monthly_disposable_goal = float(ft.normalize_settings(self.settings).get("ønsket rådighedsbeløb", 0) or 0)
         show_other_income = other_income > 0
         self._arrange_cards(show_other_income)
         today = datetime.now().date()
@@ -4726,6 +4768,7 @@ class DashboardPage(CompactScrollPage):
             previous_period,
             summary["rows"],
             budget_categories,
+            monthly_disposable_goal,
         )
         self._update_stats(summary)
         self._fill_breakdown(summary["breakdown"])
@@ -4788,21 +4831,50 @@ class DashboardPage(CompactScrollPage):
         self._sync_compact_body_size()
 
     def _last_complete_period_info(self):
-        _, complete_periods = build_periods(self.data, self.settings)
-        if not complete_periods:
+        if not has_required_settings(self.settings):
             return None
-        period = complete_periods[-1]
-        other_income = period.get(
-            "anden_indkomst",
-            ft.get_other_income(self.settings, period["periode_start"], period["periode_slut"]),
+
+        current_settings = ft.normalize_settings(self.settings)
+        today = datetime.now().date()
+        current_start, _ = ft.get_salary_period_for_date(today, settings=current_settings)
+        periods = {}
+        for raw_row in entry_rows(self.data, current_settings):
+            row = overview_row_with_current_settings(raw_row, current_settings)
+            period_start, period_end = ft.get_salary_period_for_date(row["dato"], settings=current_settings)
+            if period_end >= current_start:
+                continue
+            period = periods.setdefault(
+                (period_start, period_end),
+                {
+                    "periode_start": period_start,
+                    "periode_slut": period_end,
+                    "items": [],
+                },
+            )
+            period["items"].append(
+                {
+                    "brutto": row["brutto"],
+                    "timer": row["timer"],
+                    "paid_hours": row["timer"],
+                    "settings": current_settings,
+                }
+            )
+
+        if not periods:
+            return None
+
+        period = max(periods.values(), key=lambda item: item["periode_slut"])
+        breakdown = ft.calculate_period_salary_breakdown(
+            period["items"],
+            period["periode_start"],
+            period["periode_slut"],
+            current_settings,
         )
-        budget_expenses = period.get(
-            "budget_expenses",
-            ft.calculate_budget_expenses(self.settings, period["periode_start"], period["periode_slut"]),
-        )
-        total_income = period["netto"] + other_income
+        other_income = ft.get_other_income(current_settings, period["periode_start"], period["periode_slut"])
+        budget_expenses = ft.calculate_budget_expenses(current_settings, period["periode_start"], period["periode_slut"])
+        total_income = breakdown["netto"] + other_income
         return {
-            "netto": period["netto"],
+            "netto": breakdown["netto"],
             "available": total_income - budget_expenses,
         }
 
@@ -4811,7 +4883,7 @@ class DashboardPage(CompactScrollPage):
         if not rows:
             self.stat_average_card.set_values("N/A", "Ingen vagter i perioden")
             self.stat_week_card.set_values("N/A", "Ingen vagter i perioden")
-            self.stat_total_net_card.set_values(format_money(summary["netto"]), "Netto i perioden")
+            self.stat_total_net_card.set_values("N/A", "Ingen vagter i perioden")
             return
 
         avg_netto = summary["netto"] / len(rows)
@@ -4819,14 +4891,22 @@ class DashboardPage(CompactScrollPage):
         total_weeks = max(1 / 7, ((summary["periode_slut"] - summary["periode_start"]).days + 1) / 7)
         weekly_netto = summary["netto"] / total_weeks
         weekly_hours = summary["timer"] / total_weeks
-        self.stat_average_card.set_values(format_money(avg_netto), f"{format_number(avg_hours)} timer i snit")
-        self.stat_week_card.set_values(format_money(weekly_netto), f"{format_number(weekly_hours)} timer i snit")
-        self.stat_total_net_card.set_values(format_money(summary["netto"]), "Netto i perioden")
+        best_shift = max(rows, key=lambda row: (row.get("netto", 0), row.get("brutto", 0), row["dato"]))
+        self.stat_average_card.set_values(format_money(avg_netto), f"{format_number(avg_hours)} timer · denne periode")
+        self.stat_week_card.set_values(format_money(weekly_netto), f"{format_number(weekly_hours)} timer/uge · denne periode")
+        self.stat_total_net_card.set_values(
+            format_money(best_shift.get("netto", 0)),
+            f"{format_date(best_shift['dato'])} · {format_number(best_shift['timer'])} t.",
+        )
 
-    def _update_goal_status(self, available_now, estimated_available, disposable_goal, previous_period, current_rows, budget_categories):
+    def _update_goal_status(self, available_now, estimated_available, disposable_goal, previous_period, current_rows, budget_categories, monthly_disposable_goal):
         has_any_shifts = any(not ft.is_day_off(next(iter(entry.values()))) for entry in self.data)
         has_budget_posts = bool(budget_categories)
         show_budget_button = has_any_shifts and disposable_goal > 0 and not has_budget_posts
+        goal_text = (
+            f"Månedsmål: {format_money(monthly_disposable_goal)}. "
+            f"Mål for denne lønperiode: {format_money(disposable_goal)}."
+        )
 
         if disposable_goal <= 0:
             self.goal_card.set_status(
@@ -4840,32 +4920,35 @@ class DashboardPage(CompactScrollPage):
             self.goal_card.set_status(
                 "empty",
                 "Ingen vagter registreret",
-                f"Dit rådighedsmål er sat til {format_money(disposable_goal)},\nmen der findes endnu ingen vagter i databasen.",
+                f"{goal_text}\nDer findes endnu ingen vagter i databasen.",
                 previous_period,
                 show_add_shifts_button=True,
                 target_amount=disposable_goal,
+                monthly_target_amount=monthly_disposable_goal,
             )
         elif available_now >= disposable_goal:
             self.goal_card.set_status(
                 "success",
                 "Målet er nået",
-                "Målet er nået for den nuværende lønperiode.",
+                f"Målet er nået for den nuværende lønperiode.\n{goal_text}",
                 previous_period,
                 show_budget_button=show_budget_button,
                 current_amount=available_now,
                 target_amount=disposable_goal,
+                monthly_target_amount=monthly_disposable_goal,
             )
         elif estimated_available is not None and estimated_available >= disposable_goal:
             missing_now = max(0, disposable_goal - available_now)
             self.goal_card.set_status(
                 "warning",
                 "Estimatet når målet",
-                f"Der mangler {format_money(missing_now)} lige nu, men prognosen ligger over målet.",
+                f"Der mangler {format_money(missing_now)} lige nu, men prognosen ligger over periodemålet.\n{goal_text}",
                 previous_period,
                 show_budget_button=show_budget_button,
                 current_amount=available_now,
                 target_amount=disposable_goal,
                 estimate_amount=estimated_available,
+                monthly_target_amount=monthly_disposable_goal,
             )
         elif estimated_available is None:
             self.goal_card.set_status(
@@ -4876,18 +4959,20 @@ class DashboardPage(CompactScrollPage):
                 show_budget_button=show_budget_button,
                 current_amount=available_now,
                 target_amount=disposable_goal,
+                monthly_target_amount=monthly_disposable_goal,
             )
         else:
             missing_estimate = max(0, disposable_goal - estimated_available)
             self.goal_card.set_status(
                 "danger",
                 "Prognosen er under målet",
-                f"Forventet rådighed ligger {format_money(missing_estimate)} under målet.",
+                f"Forventet rådighed ligger {format_money(missing_estimate)} under periodemålet.\n{goal_text}",
                 previous_period,
                 show_budget_button=show_budget_button,
                 current_amount=available_now,
                 target_amount=disposable_goal,
                 estimate_amount=estimated_available,
+                monthly_target_amount=monthly_disposable_goal,
             )
 
     def _fill_breakdown(self, breakdown):

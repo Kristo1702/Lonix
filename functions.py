@@ -1195,7 +1195,12 @@ def calculate_all_netto_salaries():
             }
 
         is_day_off_entry = is_day_off(løn_info)
-        timer = get_shift_paid_hours(løn_info)
+        if use_entry_settings:
+            timer = get_shift_paid_hours(løn_info)
+        else:
+            duration = get_shift_duration_hours(løn_info)
+            pause = get_shift_pause_hours(løn_info)
+            timer = duration if settings.get(PAID_BREAK_KEY, False) else max(0.0, duration - pause)
         pause = get_shift_pause_hours(løn_info)
         timeløn = løn_info.get("timeløn", 0)
         brutto = timer * timeløn
@@ -1267,8 +1272,8 @@ def calculate_all_netto_salaries():
     return sorterede_lønsedler
 
 
-def calculate_salary_forecast(data=None, settings=None, today=None):
-    settings = settings if settings is not None else load_settings()
+def calculate_salary_forecast(data=None, settings=None, today=None, use_entry_settings=True):
+    settings = normalize_settings(settings if settings is not None else load_settings())
     data = data if data is not None else load_data()
 
     if not all(key in settings for key in REQUIRED_SETTINGS_KEYS):
@@ -1295,7 +1300,7 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
     for entry in data:
         dato_str, løn_info = next(iter(entry.items()))
         dato_obj = datetime.strptime(dato_str, "%d-%m-%Y").date()
-        entry_settings = get_entry_settings(løn_info, settings)
+        entry_settings = get_entry_settings(løn_info, settings) if use_entry_settings else settings
         timer = get_shift_paid_hours(løn_info)
         timeløn = float(løn_info.get("timeløn", 0))
         brutto = timer * timeløn
