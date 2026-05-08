@@ -16,6 +16,18 @@ OTHER_INCOME_KEY = "anden indkomst netto"
 DEFAULT_HOURLY_RATE_KEY = "standard timeløn"
 INTRODUCTION_DONE_KEY = "introduktion gennemført"
 PENSION_CONTRIBUTION_KEY = "eget pensionsbidrag"
+EMPLOYER_PENSION_CONTRIBUTION_KEY = "arbejdsgiver pensionsbidrag"
+TAX_ALLOWANCE_UNIT_KEY = "fradrag enhed"
+ATP_ENABLED_KEY = "atp aktiveret"
+ATP_CALCULATION_KEY = "atp beregning"
+ATP_CALCULATION_MANUAL = "manuel"
+ATP_EMPLOYEE_AMOUNT_KEY = "atp medarbejderbeløb"
+ATP_EMPLOYER_AMOUNT_KEY = "atp arbejdsgiverbeløb"
+BIRTH_YEAR_KEY = "fødselsår"
+AM_AGE_RULE_ENABLED_KEY = "am aldersregel aktiv"
+PAID_BREAK_KEY = "pause betalt"
+OTHER_INCOME_UNIT_KEY = "anden indkomst enhed"
+DISPOSABLE_GOAL_UNIT_KEY = "rådighedsbeløb enhed"
 PAY_PERIOD_TYPE_KEY = "lønperiode type"
 PAY_PERIOD_TYPE_MONTH = "måned"
 PAY_PERIOD_TYPE_WEEKS = "uger"
@@ -34,16 +46,41 @@ DEFAULT_PAY_PERIOD_ANCHOR = "01-01-2024"
 LEGACY_DEFAULT_FIXED_EXPENSES = 8250
 LEGACY_DEFAULT_OTHER_INCOME = 9539 + 1203
 AVERAGE_DAYS_PER_MONTH = 365.2425 / 12
+AM_AGE_RULE_START_YEAR = 2026
+AM_AGE_RULE_MINIMUM_AGE = 18
+AMOUNT_UNIT_MONTH = "måned"
+AMOUNT_UNIT_TWO_WEEKS = "14 dage"
+AMOUNT_UNIT_WEEK = "uge"
+AMOUNT_UNIT_DAY = "dag"
+AMOUNT_UNIT_PERIOD = "periode"
+AMOUNT_UNITS = (
+    AMOUNT_UNIT_MONTH,
+    AMOUNT_UNIT_TWO_WEEKS,
+    AMOUNT_UNIT_WEEK,
+    AMOUNT_UNIT_DAY,
+    AMOUNT_UNIT_PERIOD,
+)
 ENTRY_SETTINGS_SNAPSHOT_KEYS = (
     "skat",
     "fradrag",
+    TAX_ALLOWANCE_UNIT_KEY,
     "am bidrag",
+    BIRTH_YEAR_KEY,
+    AM_AGE_RULE_ENABLED_KEY,
     PENSION_CONTRIBUTION_KEY,
+    EMPLOYER_PENSION_CONTRIBUTION_KEY,
+    ATP_ENABLED_KEY,
+    ATP_CALCULATION_KEY,
+    ATP_EMPLOYEE_AMOUNT_KEY,
+    ATP_EMPLOYER_AMOUNT_KEY,
+    PAID_BREAK_KEY,
     OTHER_INCOME_KEY,
+    OTHER_INCOME_UNIT_KEY,
     DEFAULT_HOURLY_RATE_KEY,
     "udgifter",
     "budget kategorier",
     "ønsket rådighedsbeløb",
+    DISPOSABLE_GOAL_UNIT_KEY,
     "løn start",
     "løn slut",
     PAY_PERIOD_TYPE_KEY,
@@ -196,14 +233,25 @@ def load_settings():
         default_data = {
             "skat": 0.4,
             "fradrag": 0,
+            TAX_ALLOWANCE_UNIT_KEY: AMOUNT_UNIT_MONTH,
             "am bidrag": 0.08,
+            BIRTH_YEAR_KEY: None,
+            AM_AGE_RULE_ENABLED_KEY: True,
             PENSION_CONTRIBUTION_KEY: 0,
+            EMPLOYER_PENSION_CONTRIBUTION_KEY: 0,
+            ATP_ENABLED_KEY: False,
+            ATP_CALCULATION_KEY: ATP_CALCULATION_MANUAL,
+            ATP_EMPLOYEE_AMOUNT_KEY: 0,
+            ATP_EMPLOYER_AMOUNT_KEY: 0,
+            PAID_BREAK_KEY: False,
             OTHER_INCOME_KEY: 0,
+            OTHER_INCOME_UNIT_KEY: AMOUNT_UNIT_MONTH,
             DEFAULT_HOURLY_RATE_KEY: DEFAULT_HOURLY_RATE,
             INTRODUCTION_DONE_KEY: False,
             "udgifter": DEFAULT_FIXED_EXPENSES,
             "budget kategorier": [],
             "ønsket rådighedsbeløb": 1000,
+            DISPOSABLE_GOAL_UNIT_KEY: AMOUNT_UNIT_MONTH,
             "løn start": 15,
             "løn slut": 14,
             PAY_PERIOD_TYPE_KEY: PAY_PERIOD_TYPE_MONTH,
@@ -320,6 +368,24 @@ def scale_monthly_amount_for_period(amount, period_start=None, period_end=None, 
     return monthly_amount * get_period_amount_factor(period_start, period_end, settings)
 
 
+def periodize_amount(amount, unit, period_start=None, period_end=None, settings=None):
+    amount = _coerce_float(amount, 0.0)
+    unit = normalize_amount_unit(unit, AMOUNT_UNIT_MONTH)
+    days = _period_days(period_start, period_end)
+
+    if unit == AMOUNT_UNIT_PERIOD or days is None:
+        return amount
+    if unit == AMOUNT_UNIT_MONTH:
+        return scale_monthly_amount_for_period(amount, period_start, period_end, settings)
+    if unit == AMOUNT_UNIT_TWO_WEEKS:
+        return amount * (days / 14)
+    if unit == AMOUNT_UNIT_WEEK:
+        return amount * (days / 7)
+    if unit == AMOUNT_UNIT_DAY:
+        return amount * days
+    return amount
+
+
 def _weighted_period_amount(items, period_start, period_end, fallback_settings, amount_getter):
     normalized_items = []
     for item in items or []:
@@ -415,6 +481,60 @@ def _normalize_pay_period_type(value):
     return PAY_PERIOD_TYPE_MONTH
 
 
+def _coerce_float(value, default=0.0, minimum=None, maximum=None):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if minimum is not None:
+        parsed = max(float(minimum), parsed)
+    if maximum is not None:
+        parsed = min(float(maximum), parsed)
+    return parsed
+
+
+def _normalize_rate(value, default=0.0):
+    rate = _coerce_float(value, default, 0.0)
+    if rate > 1:
+        rate = rate / 100
+    return max(0.0, min(rate, 1.0))
+
+
+def normalize_amount_unit(value, default=AMOUNT_UNIT_MONTH):
+    text = str(value or default).strip().lower().replace("-", " ")
+    aliases = {
+        "måneds": AMOUNT_UNIT_MONTH,
+        "maaned": AMOUNT_UNIT_MONTH,
+        "månedligt": AMOUNT_UNIT_MONTH,
+        "monthly": AMOUNT_UNIT_MONTH,
+        "14": AMOUNT_UNIT_TWO_WEEKS,
+        "14dage": AMOUNT_UNIT_TWO_WEEKS,
+        "14 dage": AMOUNT_UNIT_TWO_WEEKS,
+        "14 dages": AMOUNT_UNIT_TWO_WEEKS,
+        "14 dags": AMOUNT_UNIT_TWO_WEEKS,
+        "2 uger": AMOUNT_UNIT_TWO_WEEKS,
+        "uge": AMOUNT_UNIT_WEEK,
+        "ugentlig": AMOUNT_UNIT_WEEK,
+        "weekly": AMOUNT_UNIT_WEEK,
+        "dag": AMOUNT_UNIT_DAY,
+        "daglig": AMOUNT_UNIT_DAY,
+        "daily": AMOUNT_UNIT_DAY,
+        "periode": AMOUNT_UNIT_PERIOD,
+        "period": AMOUNT_UNIT_PERIOD,
+    }
+    return aliases.get(text, text if text in AMOUNT_UNITS else default)
+
+
+def _period_days(period_start=None, period_end=None):
+    if period_start is None or period_end is None:
+        return None
+    if isinstance(period_start, datetime):
+        period_start = period_start.date()
+    if isinstance(period_end, datetime):
+        period_end = period_end.date()
+    return max(1, (period_end - period_start).days + 1)
+
+
 def normalize_settings(settings):
     if not isinstance(settings, dict):
         settings = {}
@@ -444,6 +564,7 @@ def normalize_settings(settings):
                 {
                     "navn": str(item.get("navn", "Kategori")),
                     "beløb": max(0.0, amount),
+                    "enhed": normalize_amount_unit(item.get("enhed", AMOUNT_UNIT_MONTH)),
                 }
             )
         if (
@@ -472,13 +593,60 @@ def normalize_settings(settings):
         normalized["ønsket rådighedsbeløb"] = float(normalized.get("rådighed advarsel", 1000) or 0)
     normalized.pop("rådighed advarsel", None)
 
-    try:
-        pension = float(normalized.get(PENSION_CONTRIBUTION_KEY, 0) or 0)
-    except (TypeError, ValueError):
-        pension = 0.0
-    if pension > 1:
-        pension = pension / 100
-    normalized[PENSION_CONTRIBUTION_KEY] = max(0.0, min(pension, 1.0))
+    normalized["skat"] = _normalize_rate(normalized.get("skat", 0.4), 0.4)
+    normalized["fradrag"] = _coerce_float(normalized.get("fradrag", 0), 0.0, 0.0)
+    normalized["am bidrag"] = _normalize_rate(normalized.get("am bidrag", 0.08), 0.08)
+    normalized[PENSION_CONTRIBUTION_KEY] = _normalize_rate(
+        normalized.get(PENSION_CONTRIBUTION_KEY, 0),
+        0.0,
+    )
+    normalized[EMPLOYER_PENSION_CONTRIBUTION_KEY] = _normalize_rate(
+        normalized.get(EMPLOYER_PENSION_CONTRIBUTION_KEY, 0),
+        0.0,
+    )
+    normalized[TAX_ALLOWANCE_UNIT_KEY] = normalize_amount_unit(
+        normalized.get(TAX_ALLOWANCE_UNIT_KEY, AMOUNT_UNIT_MONTH),
+        AMOUNT_UNIT_MONTH,
+    )
+    normalized[OTHER_INCOME_UNIT_KEY] = normalize_amount_unit(
+        normalized.get(OTHER_INCOME_UNIT_KEY, AMOUNT_UNIT_MONTH),
+        AMOUNT_UNIT_MONTH,
+    )
+    normalized[DISPOSABLE_GOAL_UNIT_KEY] = normalize_amount_unit(
+        normalized.get(DISPOSABLE_GOAL_UNIT_KEY, AMOUNT_UNIT_MONTH),
+        AMOUNT_UNIT_MONTH,
+    )
+
+    normalized[ATP_ENABLED_KEY] = bool(normalized.get(ATP_ENABLED_KEY, False))
+    atp_calculation = str(normalized.get(ATP_CALCULATION_KEY, ATP_CALCULATION_MANUAL) or "").strip().lower()
+    normalized[ATP_CALCULATION_KEY] = atp_calculation if atp_calculation else ATP_CALCULATION_MANUAL
+    normalized[ATP_EMPLOYEE_AMOUNT_KEY] = _coerce_float(
+        normalized.get(ATP_EMPLOYEE_AMOUNT_KEY, 0),
+        0.0,
+        0.0,
+    )
+    normalized[ATP_EMPLOYER_AMOUNT_KEY] = _coerce_float(
+        normalized.get(ATP_EMPLOYER_AMOUNT_KEY, 0),
+        0.0,
+        0.0,
+    )
+    normalized[AM_AGE_RULE_ENABLED_KEY] = bool(normalized.get(AM_AGE_RULE_ENABLED_KEY, True))
+    normalized[PAID_BREAK_KEY] = bool(normalized.get(PAID_BREAK_KEY, False))
+
+    birth_year = normalized.get(BIRTH_YEAR_KEY, None)
+    if birth_year in ("", None):
+        normalized[BIRTH_YEAR_KEY] = None
+    else:
+        try:
+            parsed_birth_year = int(float(birth_year))
+        except (TypeError, ValueError):
+            parsed_birth_year = None
+        current_year = datetime.now().year
+        normalized[BIRTH_YEAR_KEY] = (
+            parsed_birth_year
+            if parsed_birth_year is not None and 1900 <= parsed_birth_year <= current_year
+            else None
+        )
 
     try:
         normalized[DEFAULT_HOURLY_RATE_KEY] = max(
@@ -527,6 +695,7 @@ def get_budget_categories(settings=None):
             {
                 "navn": str(item.get("navn", "Kategori")),
                 "beløb": max(0.0, amount),
+                "enhed": normalize_amount_unit(item.get("enhed", AMOUNT_UNIT_MONTH)),
             }
         )
     return categories
@@ -538,7 +707,13 @@ def get_disposable_income_goal(settings=None, period_start=None, period_end=None
         monthly_goal = max(0.0, float(settings.get("ønsket rådighedsbeløb", 0) or 0))
     except (TypeError, ValueError):
         return 0.0
-    return scale_monthly_amount_for_period(monthly_goal, period_start, period_end, settings)
+    return periodize_amount(
+        monthly_goal,
+        settings.get(DISPOSABLE_GOAL_UNIT_KEY, AMOUNT_UNIT_MONTH),
+        period_start,
+        period_end,
+        settings,
+    )
 
 
 def get_other_income(settings=None, period_start=None, period_end=None):
@@ -547,7 +722,13 @@ def get_other_income(settings=None, period_start=None, period_end=None):
         monthly_income = max(0.0, float(settings.get(OTHER_INCOME_KEY, 0) or 0))
     except (TypeError, ValueError):
         return 0.0
-    return scale_monthly_amount_for_period(monthly_income, period_start, period_end, settings)
+    return periodize_amount(
+        monthly_income,
+        settings.get(OTHER_INCOME_UNIT_KEY, AMOUNT_UNIT_MONTH),
+        period_start,
+        period_end,
+        settings,
+    )
 
 
 def get_default_hourly_rate(settings=None):
@@ -590,13 +771,29 @@ def get_shift_pause_hours(løn_info):
 def get_shift_paid_hours(løn_info):
     if is_day_off(løn_info):
         return 0.0
+    pause_paid = False
+    if isinstance(løn_info, dict):
+        if PAID_BREAK_KEY in løn_info:
+            pause_paid = bool(løn_info.get(PAID_BREAK_KEY, False))
+        elif isinstance(løn_info.get(ENTRY_SETTINGS_KEY), dict):
+            pause_paid = bool(løn_info.get(ENTRY_SETTINGS_KEY, {}).get(PAID_BREAK_KEY, False))
+    if pause_paid:
+        return get_shift_duration_hours(løn_info)
     return max(0.0, get_shift_duration_hours(løn_info) - get_shift_pause_hours(løn_info))
 
 
 def calculate_budget_expenses(settings=None, period_start=None, period_end=None):
     settings = normalize_settings(settings if settings is not None else load_settings())
-    monthly_expenses = sum(category["beløb"] for category in get_budget_categories(settings))
-    return scale_monthly_amount_for_period(monthly_expenses, period_start, period_end, settings)
+    return sum(
+        periodize_amount(
+            category["beløb"],
+            category.get("enhed", AMOUNT_UNIT_MONTH),
+            period_start,
+            period_end,
+            settings,
+        )
+        for category in get_budget_categories(settings)
+    )
 
 
 def calculate_disposable_income(total_income, settings=None, period_start=None, period_end=None):
@@ -609,6 +806,170 @@ def get_pension_contribution_rate(settings=None):
         return max(0.0, min(float(settings.get(PENSION_CONTRIBUTION_KEY, 0) or 0), 1.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def get_employer_pension_contribution_rate(settings=None):
+    settings = normalize_settings(settings if settings is not None else load_settings())
+    try:
+        return max(0.0, min(float(settings.get(EMPLOYER_PENSION_CONTRIBUTION_KEY, 0) or 0), 1.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def should_pay_am_contribution(settings, period_start=None, period_end=None):
+    settings = normalize_settings(settings if isinstance(settings, dict) else {})
+    if not settings.get(AM_AGE_RULE_ENABLED_KEY, True):
+        return True
+
+    birth_year = settings.get(BIRTH_YEAR_KEY)
+    if birth_year in ("", None):
+        return True
+
+    try:
+        birth_year = int(birth_year)
+    except (TypeError, ValueError):
+        return True
+
+    reference_date = period_end or period_start or datetime.now().date()
+    if isinstance(reference_date, datetime):
+        reference_date = reference_date.date()
+    calculation_year = reference_date.year
+    if calculation_year >= AM_AGE_RULE_START_YEAR and calculation_year < birth_year + AM_AGE_RULE_MINIMUM_AGE:
+        return False
+    return True
+
+
+def get_effective_am_rate(settings, period_start=None, period_end=None):
+    settings = normalize_settings(settings if isinstance(settings, dict) else {})
+    if not should_pay_am_contribution(settings, period_start, period_end):
+        return 0.0
+    return _normalize_rate(settings.get("am bidrag", 0), 0.0)
+
+
+def get_tax_allowance_for_period(settings, period_start=None, period_end=None, calculation_notes=None):
+    settings = normalize_settings(settings if isinstance(settings, dict) else {})
+    allowance = _coerce_float(settings.get("fradrag", 0), 0.0, 0.0)
+    unit = normalize_amount_unit(settings.get(TAX_ALLOWANCE_UNIT_KEY, AMOUNT_UNIT_MONTH), AMOUNT_UNIT_MONTH)
+    days = _period_days(period_start, period_end)
+
+    def add_note(text):
+        if calculation_notes is not None and text not in calculation_notes:
+            calculation_notes.append(text)
+
+    if unit == AMOUNT_UNIT_PERIOD or days is None:
+        if days is None and unit != AMOUNT_UNIT_PERIOD:
+            add_note("Fradrag er brugt uden periode, så beløbet er ikke periodiseret.")
+        return allowance
+
+    if unit == AMOUNT_UNIT_MONTH:
+        if settings.get(PAY_PERIOD_TYPE_KEY) != PAY_PERIOD_TYPE_MONTH:
+            add_note("Månedsfradrag er estimeret til lønperioden efter antal dage.")
+        return scale_monthly_amount_for_period(allowance, period_start, period_end, settings)
+
+    if unit == AMOUNT_UNIT_TWO_WEEKS:
+        if days != 14:
+            add_note("14-dages fradrag er skaleret, fordi lønperioden ikke er 14 dage.")
+        return allowance if days == 14 else allowance * (days / 14)
+
+    if unit == AMOUNT_UNIT_WEEK:
+        if days != 7:
+            add_note("Ugefradrag er skaleret efter antal dage i lønperioden.")
+        return allowance * (days / 7)
+
+    if unit == AMOUNT_UNIT_DAY:
+        return allowance * days
+
+    return allowance
+
+
+def calculate_atp_for_period(settings, hours=0, period_start=None, period_end=None, calculation_notes=None, gross=0):
+    settings = normalize_settings(settings if isinstance(settings, dict) else {})
+    if not settings.get(ATP_ENABLED_KEY, False) or _coerce_float(gross, 0.0, 0.0) <= 0:
+        return 0.0, 0.0
+
+    calculation = str(settings.get(ATP_CALCULATION_KEY, ATP_CALCULATION_MANUAL) or "").strip().lower()
+    if calculation == ATP_CALCULATION_MANUAL:
+        return (
+            _coerce_float(settings.get(ATP_EMPLOYEE_AMOUNT_KEY, 0), 0.0, 0.0),
+            _coerce_float(settings.get(ATP_EMPLOYER_AMOUNT_KEY, 0), 0.0, 0.0),
+        )
+
+    if calculation_notes is not None:
+        calculation_notes.append("ATP-beregning er ikke manuel, så ATP er sat til 0 i denne version.")
+    return 0.0, 0.0
+
+
+def get_holiday_eligible_salary(entry_info, settings=None):
+    if not isinstance(entry_info, dict) or is_day_off(entry_info):
+        return 0.0
+
+    excluded_types = {
+        "feriepenge",
+        "løn under ferie",
+        "ferietillæg",
+        "diæter",
+        "skattefri rejsegodtgørelse",
+        "omkostningsgodtgørelse",
+    }
+    entry_type = str(entry_info.get(ENTRY_TYPE_KEY, "") or "").strip().lower()
+    if entry_type in excluded_types:
+        return 0.0
+
+    if "ferieberettiget løn" in entry_info:
+        return _coerce_float(entry_info.get("ferieberettiget løn", 0), 0.0, 0.0)
+
+    if "brutto" in entry_info:
+        return _coerce_float(entry_info.get("brutto", 0), 0.0, 0.0)
+
+    paid_hours = get_shift_paid_hours(entry_info)
+    hourly_rate = _coerce_float(entry_info.get("timeløn", 0), 0.0, 0.0)
+    return paid_hours * hourly_rate
+
+
+def _holiday_month_ranges(start, end):
+    if end < start:
+        return []
+    current = date(start.year, start.month, 1)
+    ranges = []
+    while current <= end:
+        last_day = monthrange(current.year, current.month)[1]
+        month_start = current
+        month_end = date(current.year, current.month, last_day)
+        ranges.append((month_start, month_end))
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+    return ranges
+
+
+def get_holiday_year(today=None):
+    today = today or datetime.now().date()
+    if isinstance(today, datetime):
+        today = today.date()
+    start_year = today.year if today.month >= 9 else today.year - 1
+    start = date(start_year, 9, 1)
+    end = date(start_year + 1, 8, 31)
+    request_end = date(start_year + 1, 12, 31)
+    return start, end, request_end
+
+
+def calculate_holiday_days_for_range(start, end):
+    if start is None or end is None or end < start:
+        return 0.0
+
+    total = 0.0
+    for month_start, month_end in _holiday_month_ranges(start, end):
+        active_start = max(start, month_start)
+        active_end = min(end, month_end)
+        active_days = (active_end - active_start).days + 1
+        full_month = active_start == month_start and active_end == month_end
+        total += 2.08 if full_month else min(2.08, active_days * 0.07)
+    return total
+
+
+def calculate_holiday_pay_amount(eligible_salary, holiday_pay_rate):
+    return _coerce_float(eligible_salary, 0.0, 0.0) * (_coerce_float(holiday_pay_rate, 0.0, 0.0) / 100)
 
 
 def _shift_month(year, month, months):
@@ -773,6 +1134,10 @@ def calculate_netto_salary():
             calculation_items.append(
                 {
                     "brutto": brutto,
+                    "timer": timer,
+                    "paid_hours": timer,
+                    "løn_info": løn_info,
+                    "dato": dato_obj,
                     "settings": get_entry_settings(løn_info, settings),
                 }
             )
@@ -846,6 +1211,10 @@ def calculate_all_netto_salaries():
         lønsedler[lønseddel_nøgle]["calculation_items"].append(
             {
                 "brutto": brutto,
+                "timer": timer,
+                "paid_hours": timer,
+                "løn_info": løn_info,
+                "dato": dato_obj,
                 "settings": entry_settings,
             }
         )
@@ -858,8 +1227,18 @@ def calculate_all_netto_salaries():
             lønseddel["periode_slut"],
             settings,
         )
+        lønseddel["breakdown"] = breakdown
+        lønseddel["calculation_notes"] = breakdown.get("calculation_notes", [])
         lønseddel["netto"] = breakdown["netto"]
         lønseddel["pension"] = breakdown["pension"]
+        lønseddel["employee_pension"] = breakdown["employee_pension"]
+        lønseddel["arbejdsgiver_pension"] = breakdown["arbejdsgiver_pension"]
+        lønseddel["employer_pension"] = breakdown["employer_pension"]
+        lønseddel["atp_medarbejder"] = breakdown["atp_medarbejder"]
+        lønseddel["atp_employee"] = breakdown["atp_employee"]
+        lønseddel["atp_arbejdsgiver"] = breakdown["atp_arbejdsgiver"]
+        lønseddel["atp_employer"] = breakdown["atp_employer"]
+        lønseddel["atp_total"] = breakdown["atp_total"]
         lønseddel["am_grundlag"] = breakdown["am_grundlag"]
         lønseddel["am_bidrag"] = breakdown["am_bidrag"]
         lønseddel["efter_am"] = breakdown["efter_am"]
@@ -941,6 +1320,10 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
             current_items.append(
                 {
                     "brutto": brutto,
+                    "timer": timer,
+                    "paid_hours": timer,
+                    "løn_info": løn_info,
+                    "dato": dato_obj,
                     "settings": entry_settings,
                 }
             )
@@ -985,9 +1368,11 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
     estimated_disposable_income = None
     other_income = get_other_income(settings, periode_start, periode_slut)
     if estimated_total_brutto is not None:
+        effective_settings = select_effective_settings_for_period(current_items, settings)
         estimated_total_netto = calculate_salary_breakdown_from_brutto(
             estimated_total_brutto,
-            settings,
+            estimated_total_hours or 0.0,
+            effective_settings,
             periode_start,
             periode_slut,
         )["netto"]
@@ -1054,6 +1439,105 @@ def _blend_forecast_rate(current_rate, historical_rate, progress_ratio):
     return (historical_rate * (1 - progress_ratio)) + (current_rate * progress_ratio)
 
 
+def _normalize_calculation_item(item, fallback_settings=None):
+    item = item if isinstance(item, dict) else {}
+    løn_info = item.get("løn_info") if isinstance(item.get("løn_info"), dict) else {}
+
+    brutto = _coerce_float(item.get("brutto", løn_info.get("brutto", 0)), 0.0, 0.0)
+    if "paid_hours" in item:
+        hours = _coerce_float(item.get("paid_hours"), 0.0, 0.0)
+    elif løn_info:
+        hours = get_shift_paid_hours(løn_info)
+    else:
+        hours = _coerce_float(item.get("timer", 0), 0.0, 0.0)
+
+    item_settings = item.get("settings")
+    if isinstance(item_settings, dict):
+        item_settings = normalize_settings(item_settings)
+    elif løn_info:
+        item_settings = get_entry_settings(løn_info, fallback_settings)
+    else:
+        item_settings = normalize_settings(fallback_settings if isinstance(fallback_settings, dict) else load_settings())
+
+    return {
+        "brutto": brutto,
+        "timer": hours,
+        "paid_hours": hours,
+        "settings": item_settings,
+        "løn_info": løn_info,
+        "dato": item.get("dato"),
+    }
+
+
+def select_effective_settings_for_period(items, fallback_settings=None):
+    selected = None
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("settings"), dict):
+            selected = normalize_settings(item.get("settings"))
+        elif isinstance(item.get("løn_info"), dict):
+            selected = get_entry_settings(item.get("løn_info"), fallback_settings)
+
+    if selected is not None:
+        return selected
+    if isinstance(fallback_settings, dict):
+        return normalize_settings(fallback_settings)
+    return normalize_settings(load_settings())
+
+
+def _breakdown_with_aliases(values):
+    gross = values.get("gross", values.get("brutto", 0.0))
+    paid_hours = values.get("paid_hours", values.get("timer", 0.0))
+    employee_pension = values.get("employee_pension", values.get("pension", 0.0))
+    employer_pension = values.get("employer_pension", values.get("arbejdsgiver_pension", 0.0))
+    atp_employee = values.get("atp_employee", values.get("atp_medarbejder", 0.0))
+    atp_employer = values.get("atp_employer", values.get("atp_arbejdsgiver", 0.0))
+    am_basis = values.get("am_basis", values.get("am_grundlag", 0.0))
+    am_contribution = values.get("am_contribution", values.get("am_bidrag", 0.0))
+    after_am = values.get("after_am", values.get("efter_am", 0.0))
+    tax_allowance = values.get("tax_allowance", values.get("fradrag", 0.0))
+    taxable_income = values.get("taxable_income", values.get("skattegrundlag", 0.0))
+    tax = values.get("tax", values.get("skat", 0.0))
+    net = values.get("net", values.get("netto", 0.0))
+
+    result = dict(values)
+    result.update(
+        {
+            "brutto": gross,
+            "gross": gross,
+            "timer": paid_hours,
+            "paid_hours": paid_hours,
+            "pension": employee_pension,
+            "employee_pension": employee_pension,
+            "arbejdsgiver_pension": employer_pension,
+            "employer_pension": employer_pension,
+            "atp_medarbejder": atp_employee,
+            "atp_employee": atp_employee,
+            "atp_arbejdsgiver": atp_employer,
+            "atp_employer": atp_employer,
+            "atp_total": atp_employee + atp_employer,
+            "am_grundlag": am_basis,
+            "am_basis": am_basis,
+            "am_bidrag": am_contribution,
+            "am_contribution": am_contribution,
+            "efter_am": after_am,
+            "after_am": after_am,
+            "fradrag": tax_allowance,
+            "tax_allowance": tax_allowance,
+            "skattegrundlag": taxable_income,
+            "taxable_income": taxable_income,
+            "skat": tax,
+            "tax": tax,
+            "netto": net,
+            "net": net,
+            "trukket_i_alt": employee_pension + atp_employee + am_contribution + tax,
+            "deductions_total": employee_pension + atp_employee + am_contribution + tax,
+        }
+    )
+    return result
+
+
 def calculate_salary_breakdown(
     brutto,
     skat,
@@ -1062,149 +1546,149 @@ def calculate_salary_breakdown(
     period_start=None,
     period_end=None,
     settings=None,
+    hours=0,
 ):
-    brutto = float(brutto)
-    skat = float(skat)
-    settings = normalize_settings(settings if isinstance(settings, dict) else {})
-    fradrag = scale_monthly_amount_for_period(fradrag, period_start, period_end, settings)
-    am_bidrag = float(am_bidrag)
-    pension_rate = get_pension_contribution_rate(settings)
+    base_settings = dict(settings) if isinstance(settings, dict) else {}
+    base_settings.update(
+        {
+            "skat": skat,
+            "fradrag": fradrag,
+            "am bidrag": am_bidrag,
+        }
+    )
+    return calculate_salary_breakdown_from_brutto(
+        brutto,
+        hours,
+        base_settings,
+        period_start,
+        period_end,
+    )
 
-    pension = brutto * pension_rate
-    am_grundlag = max(0.0, brutto - pension)
-    am_beløb = am_grundlag * am_bidrag
-    efter_am = am_grundlag - am_beløb
-    skattegrundlag = max(0, efter_am - fradrag)
-    skat_beløb = skattegrundlag * skat
-    netto = efter_am - skat_beløb
 
-    return {
-        "brutto": brutto,
-        "pension": pension,
-        "am_grundlag": am_grundlag,
-        "am_bidrag": am_beløb,
-        "efter_am": efter_am,
-        "fradrag": fradrag,
-        "skattegrundlag": skattegrundlag,
-        "skat": skat_beløb,
-        "netto": netto,
-    }
+def calculate_salary_breakdown_from_brutto(brutto, hours=0, settings=None, period_start=None, period_end=None):
+    if isinstance(hours, dict):
+        old_settings = hours
+        old_period_start = settings
+        old_period_end = period_start
+        settings = old_settings
+        period_start = old_period_start
+        period_end = old_period_end
+        hours = 0
+
+    settings = normalize_settings(settings if isinstance(settings, dict) else load_settings())
+    calculation_notes = []
+    if period_start is None or period_end is None:
+        period_start, period_end = get_salary_period_for_date(datetime.now().date(), settings=settings)
+
+    gross = _coerce_float(brutto, 0.0, 0.0)
+    paid_hours = _coerce_float(hours, 0.0, 0.0)
+    employee_pension = gross * get_pension_contribution_rate(settings)
+    employer_pension = gross * get_employer_pension_contribution_rate(settings)
+    atp_employee, atp_employer = calculate_atp_for_period(
+        settings,
+        paid_hours,
+        period_start,
+        period_end,
+        calculation_notes,
+        gross,
+    )
+    effective_am_rate = get_effective_am_rate(settings, period_start, period_end)
+    if effective_am_rate == 0 and _normalize_rate(settings.get("am bidrag", 0), 0.0) > 0:
+        if not should_pay_am_contribution(settings, period_start, period_end):
+            calculation_notes.append("AM-bidrag er sat til 0 efter aldersreglen.")
+
+    am_basis = max(0.0, gross - employee_pension - atp_employee)
+    am_contribution = am_basis * effective_am_rate
+    after_am = am_basis - am_contribution
+    tax_allowance = get_tax_allowance_for_period(settings, period_start, period_end, calculation_notes)
+    taxable_income = max(0.0, after_am - tax_allowance)
+    tax_rate = _normalize_rate(settings.get("skat", 0), 0.0)
+    tax = taxable_income * tax_rate
+    net = after_am - tax
+
+    effective_settings = deepcopy(settings)
+    effective_settings["effektiv am bidrag"] = effective_am_rate
+    effective_settings["effektiv fradrag"] = tax_allowance
+
+    return _breakdown_with_aliases(
+        {
+            "gross": gross,
+            "paid_hours": paid_hours,
+            "employee_pension": employee_pension,
+            "employer_pension": employer_pension,
+            "atp_employee": atp_employee,
+            "atp_employer": atp_employer,
+            "am_basis": am_basis,
+            "am_contribution": am_contribution,
+            "after_am": after_am,
+            "tax_allowance": tax_allowance,
+            "taxable_income": taxable_income,
+            "tax": tax,
+            "net": net,
+            "skat_sats": tax_rate,
+            "tax_rate": tax_rate,
+            "am_sats": effective_am_rate,
+            "am_rate": effective_am_rate,
+            "effective_settings": effective_settings,
+            "calculation_notes": calculation_notes,
+            "item_breakdowns": [],
+        }
+    )
+
+
+def _distributed_item_breakdown(item, totals, share):
+    return _breakdown_with_aliases(
+        {
+            "gross": item["brutto"],
+            "paid_hours": item["paid_hours"],
+            "employee_pension": totals["employee_pension"] * share,
+            "employer_pension": totals["employer_pension"] * share,
+            "atp_employee": totals["atp_employee"] * share,
+            "atp_employer": totals["atp_employer"] * share,
+            "am_basis": totals["am_basis"] * share,
+            "am_contribution": totals["am_contribution"] * share,
+            "after_am": totals["after_am"] * share,
+            "tax_allowance": totals["tax_allowance"] * share,
+            "taxable_income": totals["taxable_income"] * share,
+            "tax": totals["tax"] * share,
+            "net": totals["net"] * share,
+            "effective_settings": item["settings"],
+            "calculation_notes": [],
+            "item_breakdowns": [],
+        }
+    )
 
 
 def calculate_period_salary_breakdown(items, period_start, period_end, fallback_settings=None):
-    calculation_items = []
-    for item in items or []:
-        try:
-            brutto = max(0.0, float(item.get("brutto", 0) or 0))
-        except (TypeError, ValueError):
-            brutto = 0.0
-
-        item_settings = item.get("settings")
-        if not isinstance(item_settings, dict):
-            item_settings = get_entry_settings(item.get("løn_info", {}), fallback_settings)
-        else:
-            item_settings = normalize_settings(item_settings)
-
-        calculation_items.append({"brutto": brutto, "settings": item_settings})
-
+    calculation_items = [
+        _normalize_calculation_item(item, fallback_settings)
+        for item in (items or [])
+    ]
+    effective_settings = select_effective_settings_for_period(calculation_items, fallback_settings)
     total_brutto = sum(item["brutto"] for item in calculation_items)
-    if total_brutto <= 0:
-        effective_settings = (
-            calculation_items[0]["settings"]
-            if calculation_items
-            else normalize_settings(fallback_settings if isinstance(fallback_settings, dict) else load_settings())
-        )
-        breakdown = calculate_salary_breakdown(
-            0,
-            effective_settings.get("skat", 0),
-            effective_settings.get("fradrag", 0),
-            effective_settings.get("am bidrag", 0),
-            period_start,
-            period_end,
-            effective_settings,
-        )
-        breakdown["item_breakdowns"] = [
-            {
-                "brutto": 0.0,
-                "pension": 0.0,
-                "am_grundlag": 0.0,
-                "am_bidrag": 0.0,
-                "efter_am": 0.0,
-                "fradrag": 0.0,
-                "skattegrundlag": 0.0,
-                "skat": 0.0,
-                "netto": 0.0,
-            }
-            for _ in calculation_items
-        ]
-        return breakdown
+    total_hours = sum(item["paid_hours"] for item in calculation_items)
 
-    totals = {
-        "brutto": 0.0,
-        "pension": 0.0,
-        "am_grundlag": 0.0,
-        "am_bidrag": 0.0,
-        "efter_am": 0.0,
-        "fradrag": 0.0,
-        "skattegrundlag": 0.0,
-        "skat": 0.0,
-        "netto": 0.0,
-    }
-    item_breakdowns = []
-    for item in calculation_items:
-        settings = item["settings"]
-        brutto = item["brutto"]
-        share = brutto / total_brutto if total_brutto else 0.0
-        skat_rate = float(settings.get("skat", 0) or 0)
-        am_rate = float(settings.get("am bidrag", 0) or 0)
-        pension_rate = get_pension_contribution_rate(settings)
-        fradrag = scale_monthly_amount_for_period(
-            settings.get("fradrag", 0),
-            period_start,
-            period_end,
-            settings,
-        ) * share
-
-        pension = brutto * pension_rate
-        am_grundlag = max(0.0, brutto - pension)
-        am_beløb = am_grundlag * am_rate
-        efter_am = am_grundlag - am_beløb
-        skattegrundlag = max(0.0, efter_am - fradrag)
-        skat_beløb = skattegrundlag * skat_rate
-        netto = efter_am - skat_beløb
-        item_breakdown = {
-            "brutto": brutto,
-            "pension": pension,
-            "am_grundlag": am_grundlag,
-            "am_bidrag": am_beløb,
-            "efter_am": efter_am,
-            "fradrag": fradrag,
-            "skattegrundlag": skattegrundlag,
-            "skat": skat_beløb,
-            "netto": netto,
-        }
-        item_breakdowns.append(item_breakdown)
-        for key in totals:
-            totals[key] += item_breakdown[key]
-
-    totals["item_breakdowns"] = item_breakdowns
-    return totals
-
-
-def calculate_salary_breakdown_from_brutto(brutto, settings=None, period_start=None, period_end=None):
-    settings = normalize_settings(settings if settings is not None else load_settings())
-    if period_start is None and period_end is None:
-        period_start, period_end = get_salary_period_for_date(datetime.now().date(), settings=settings)
-
-    return calculate_salary_breakdown(
-        brutto,
-        settings.get("skat", 1),
-        settings.get("fradrag", 0),
-        settings.get("am bidrag", 1),
+    breakdown = calculate_salary_breakdown_from_brutto(
+        total_brutto,
+        total_hours,
+        effective_settings,
         period_start,
         period_end,
-        settings,
     )
+
+    if total_brutto > 0:
+        shares = [item["brutto"] / total_brutto for item in calculation_items]
+    elif total_hours > 0:
+        shares = [item["paid_hours"] / total_hours for item in calculation_items]
+    else:
+        shares = [0.0 for _ in calculation_items]
+
+    item_breakdowns = [
+        _distributed_item_breakdown(item, breakdown, share)
+        for item, share in zip(calculation_items, shares)
+    ]
+    breakdown["item_breakdowns"] = item_breakdowns
+    return breakdown
 
 
 def calculate_netto_salary_from_brutto(brutto):

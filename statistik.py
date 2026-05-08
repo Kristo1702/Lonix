@@ -223,15 +223,34 @@ def print_stats(data=None, settings=None):
         ],
     )
 
+    deduction_rows = [
+        ["Samlet pension", _format_money(statistics["deductions"].get("pension", 0))],
+    ]
+    if statistics["deductions"].get("atp_medarbejder", 0) > 0:
+        deduction_rows.append(["Samlet ATP medarbejder", _format_money(statistics["deductions"].get("atp_medarbejder", 0))])
+    deduction_rows.extend(
+        [
+            ["Samlet AM-bidrag", _format_money(statistics["deductions"]["am_bidrag"])],
+            ["Samlet skat", _format_money(statistics["deductions"]["skat"])],
+            [
+                "Samlet trukket i alt",
+                _format_money(
+                    statistics["deductions"].get("pension", 0)
+                    + statistics["deductions"].get("atp_medarbejder", 0)
+                    + statistics["deductions"]["am_bidrag"]
+                    + statistics["deductions"]["skat"]
+                ),
+            ],
+        ]
+    )
+    if statistics["deductions"].get("arbejdsgiver_pension", 0) > 0:
+        deduction_rows.append(["Arbejdsgiverpension", _format_money(statistics["deductions"].get("arbejdsgiver_pension", 0))])
+    if statistics["deductions"].get("atp_arbejdsgiver", 0) > 0:
+        deduction_rows.append(["ATP arbejdsgiver", _format_money(statistics["deductions"].get("atp_arbejdsgiver", 0))])
     _print_table(
         "Fradrag",
         ["Måling", "Beløb"],
-        [
-            ["Samlet pension", _format_money(statistics["deductions"].get("pension", 0))],
-            ["Samlet AM-bidrag", _format_money(statistics["deductions"]["am_bidrag"])],
-            ["Samlet skat", _format_money(statistics["deductions"]["skat"])],
-            ["Samlet trukket i alt", _format_money(statistics["deductions"].get("pension", 0) + statistics["deductions"]["am_bidrag"] + statistics["deductions"]["skat"])],
-        ],
+        deduction_rows,
         right_align={1},
     )
 
@@ -359,6 +378,9 @@ def _build_statistics(data, settings):
 
     deductions = {
         "pension": sum(period.get("pension", 0) for period in periods),
+        "atp_medarbejder": sum(period.get("atp_medarbejder", 0) for period in periods),
+        "atp_arbejdsgiver": sum(period.get("atp_arbejdsgiver", 0) for period in periods),
+        "arbejdsgiver_pension": sum(period.get("arbejdsgiver_pension", 0) for period in periods),
         "am_bidrag": sum(period["am_bidrag"] for period in periods),
         "skat": sum(period["skat"] for period in periods),
     }
@@ -456,6 +478,9 @@ def _group_periods(shifts, settings):
                 "brutto": 0.0,
                 "netto": 0.0,
                 "pension": 0.0,
+                "atp_medarbejder": 0.0,
+                "atp_arbejdsgiver": 0.0,
+                "arbejdsgiver_pension": 0.0,
                 "am_grundlag": 0.0,
                 "am_bidrag": 0.0,
                 "efter_am": 0.0,
@@ -488,6 +513,8 @@ def _group_periods(shifts, settings):
         calculation_items = [
             {
                 "brutto": shift["brutto"],
+                "timer": shift["timer"],
+                "paid_hours": shift["timer"],
                 "settings": shift.get("settings", settings),
             }
             for shift in period["shifts"]
@@ -498,8 +525,12 @@ def _group_periods(shifts, settings):
             period["periode_slut"],
             settings,
         )
+        period["breakdown"] = breakdown
         period["netto"] = breakdown["netto"]
         period["pension"] = breakdown["pension"]
+        period["atp_medarbejder"] = breakdown.get("atp_medarbejder", 0)
+        period["atp_arbejdsgiver"] = breakdown.get("atp_arbejdsgiver", 0)
+        period["arbejdsgiver_pension"] = breakdown.get("arbejdsgiver_pension", 0)
         period["am_grundlag"] = breakdown["am_grundlag"]
         period["am_bidrag"] = breakdown["am_bidrag"]
         period["efter_am"] = breakdown["efter_am"]
@@ -528,6 +559,9 @@ def _group_periods(shifts, settings):
         for shift, shift_breakdown in zip(period["shifts"], breakdown.get("item_breakdowns", [])):
             shift["netto"] = shift_breakdown["netto"]
             shift["pension"] = shift_breakdown["pension"]
+            shift["atp_medarbejder"] = shift_breakdown.get("atp_medarbejder", 0)
+            shift["atp_arbejdsgiver"] = shift_breakdown.get("atp_arbejdsgiver", 0)
+            shift["arbejdsgiver_pension"] = shift_breakdown.get("arbejdsgiver_pension", 0)
             shift["am_bidrag"] = shift_breakdown["am_bidrag"]
             shift["skat"] = shift_breakdown["skat"]
 

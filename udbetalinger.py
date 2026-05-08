@@ -63,7 +63,15 @@ def build_udbetaling_overview(settings, udbetaling):
     else:
         print(Fore.YELLOW + "  Ingen timer registreret")
     print(Fore.BLUE + f"  Brutto løn: {brutto:.0f} kr.")
+    if udbetaling.get("pension", 0) > 0:
+        print(Fore.BLUE + f"  Pension: -{udbetaling.get('pension', 0):.0f} kr.")
+    if udbetaling.get("atp_medarbejder", 0) > 0:
+        print(Fore.BLUE + f"  ATP medarbejder: -{udbetaling.get('atp_medarbejder', 0):.0f} kr.")
     print(Fore.LIGHTGREEN_EX + f"  • Netto løn: {netto_løn:.0f} kr.")
+    if udbetaling.get("arbejdsgiver_pension", 0) > 0:
+        print(Fore.LIGHTBLACK_EX + f"  Arbejdsgiverpension: {udbetaling.get('arbejdsgiver_pension', 0):.0f} kr.")
+    if udbetaling.get("atp_arbejdsgiver", 0) > 0:
+        print(Fore.LIGHTBLACK_EX + f"  ATP arbejdsgiver: {udbetaling.get('atp_arbejdsgiver', 0):.0f} kr.")
 
     print(Fore.WHITE + "\n  ===== ANDEN INDKOMST =====")
     print(Fore.LIGHTGREEN_EX + f"  • Anden indkomst (netto): {anden_indkomst:.0f} kr.")

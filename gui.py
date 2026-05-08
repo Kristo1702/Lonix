@@ -312,6 +312,23 @@ QPushButton#InlineButton {
 QPushButton#InlineButton:hover {
     background: #edf7f4;
 }
+QPushButton#InfoButton {
+    background: #ffffff;
+    color: #1f8a70;
+    border: 1px solid #cfd8e3;
+    border-radius: 12px;
+    padding: 0;
+    font-size: 9pt;
+    font-weight: 900;
+    min-width: 24px;
+    max-width: 24px;
+    min-height: 24px;
+    max-height: 24px;
+}
+QPushButton#InfoButton:hover {
+    background: #edf7f4;
+    border-color: #1f8a70;
+}
 QLineEdit, QComboBox {
     background: #ffffff;
     border: 1px solid #cfd8e3;
@@ -1253,13 +1270,15 @@ class VisibleCheckBox(QCheckBox):
 
 
 def set_form_row_visible(form, field, visible):
-    label = form.labelForField(field)
+    row_widget = field.property("form_row_widget") if hasattr(field, "property") else None
+    target = row_widget if row_widget is not None else field
+    label = form.labelForField(target) or form.labelForField(field)
     if hasattr(form, "setRowVisible"):
-        form.setRowVisible(field, visible)
+        form.setRowVisible(target, visible)
         return
     if label is not None:
         label.setVisible(visible)
-    field.setVisible(visible)
+    target.setVisible(visible)
 
 
 def format_period(period):
@@ -1364,6 +1383,8 @@ def entry_rows(data, settings=None):
                     [
                         {
                             "brutto": row["brutto"],
+                            "timer": row["timer"],
+                            "paid_hours": row["timer"],
                             "settings": row.get("settings", settings),
                         }
                         for row in period_rows
@@ -1544,6 +1565,8 @@ def current_period_summary(data, settings, today=None):
     calculation_items = [
         {
             "brutto": row["brutto"],
+            "timer": row["timer"],
+            "paid_hours": row["timer"],
             "settings": row.get("settings", settings),
         }
         for row in rows
@@ -1600,12 +1623,7 @@ def month_range(start, end):
 
 
 def current_holiday_year(today=None):
-    today = today or datetime.now().date()
-    start_year = today.year if today.month >= 9 else today.year - 1
-    start = date(start_year, 9, 1)
-    end = date(start_year + 1, 8, 31)
-    request_end = date(start_year + 1, 12, 31)
-    return start, end, request_end
+    return ft.get_holiday_year(today)
 
 
 def holiday_pay_settings(settings):
@@ -1623,18 +1641,7 @@ def holiday_pay_settings(settings):
 
 
 def holiday_days_for_range(start, end):
-    if start is None or end is None or end < start:
-        return 0.0
-
-    total = 0.0
-    for month_start, month_end in month_range(start, end):
-        active_start = max(start, month_start)
-        active_end = min(end, month_end)
-        active_days = (active_end - active_start).days + 1
-        full_month = active_start == month_start and active_end == month_end
-        month_days = 2.08 if full_month else min(2.08, active_days * 0.07)
-        total += month_days
-    return total
+    return ft.calculate_holiday_days_for_range(start, end)
 
 
 def _blend_rate(current_rate, historical_rate, progress_ratio):
@@ -1658,7 +1665,7 @@ def _holiday_pay_forecast_daily_salary(rows, settings, today):
     progress_ratio = elapsed_days / period_days
 
     current_brutto = sum(
-        row["brutto"]
+        ft.get_holiday_eligible_salary(row, row.get("settings", settings))
         for row in rows
         if not row.get("is_day_off") and period_start <= row["dato"] <= today
     )
@@ -1683,7 +1690,7 @@ def _holiday_pay_forecast_daily_salary(rows, settings, today):
                 "days": (entry_period_end - entry_period_start).days + 1,
             },
         )
-        period["brutto"] += row["brutto"]
+        period["brutto"] += ft.get_holiday_eligible_salary(row, row.get("settings", settings))
 
     historical_daily_brutto = None
     if historical_periods:
@@ -1700,7 +1707,10 @@ def _holiday_pay_forecast_daily_salary(rows, settings, today):
         if past_rows:
             first_date = min(row["dato"] for row in past_rows)
             observed_days = max(1, (today - first_date).days + 1)
-            historical_daily_brutto = sum(row["brutto"] for row in past_rows) / observed_days
+            historical_daily_brutto = sum(
+                ft.get_holiday_eligible_salary(row, row.get("settings", settings))
+                for row in past_rows
+            ) / observed_days
 
     return _blend_rate(current_daily_brutto, historical_daily_brutto, progress_ratio)
 
@@ -1727,7 +1737,10 @@ def estimate_holiday_pay_total(rows, settings, today, calculation_start, calcula
             for row in rows
             if not row.get("is_day_off") and forecast_start <= row["dato"] <= forecast_end
         ]
-        known_future_salary = sum(row["brutto"] for row in future_rows)
+        known_future_salary = sum(
+            ft.get_holiday_eligible_salary(row, row.get("settings", settings))
+            for row in future_rows
+        )
         known_future_dates = {row["dato"] for row in future_rows}
         future_days = (forecast_end - forecast_start).days + 1
         unknown_future_days = max(0, future_days - len(known_future_dates))
@@ -1735,7 +1748,7 @@ def estimate_holiday_pay_total(rows, settings, today, calculation_start, calcula
         estimated_future_salary = (daily_brutto or 0.0) * unknown_future_days
         future_salary = known_future_salary + estimated_future_salary
 
-    future_holiday_pay = future_salary * (rate / 100)
+    future_holiday_pay = ft.calculate_holiday_pay_amount(future_salary, rate)
     return {
         "forecast_horizon": forecast_horizon,
         "forecast_end": forecast_end,
@@ -1782,8 +1795,8 @@ def holiday_pay_calculation(data, settings, today=None):
         for row in rows
         if not row.get("is_day_off") and has_active_range and calculation_start <= row["dato"] <= calculation_end
     ]
-    eligible_salary = sum(row["brutto"] for row in work_rows)
-    holiday_pay = eligible_salary * (config["rate"] / 100)
+    eligible_salary = sum(ft.get_holiday_eligible_salary(row, row.get("settings", settings)) for row in work_rows)
+    holiday_pay = ft.calculate_holiday_pay_amount(eligible_salary, config["rate"])
     holiday_days = holiday_days_for_range(calculation_start, calculation_end) if has_active_range else 0.0
     period_eligible_salary = 0.0
     period_holiday_pay = 0.0
@@ -1795,25 +1808,29 @@ def holiday_pay_calculation(data, settings, today=None):
             settings=settings,
         )
         period_eligible_salary = sum(
-            row["brutto"]
+            ft.get_holiday_eligible_salary(row, row.get("settings", settings))
             for row in work_rows
             if period_start <= row["dato"] <= period_end
         )
-        period_holiday_pay = period_eligible_salary * (config["rate"] / 100)
+        period_holiday_pay = ft.calculate_holiday_pay_amount(period_eligible_salary, config["rate"])
 
     monthly_rows = []
     if has_active_range:
         for month_start, month_end in month_range(calculation_start, calculation_end):
             active_start = max(calculation_start, month_start)
             active_end = min(calculation_end, month_end)
-            salary = sum(row["brutto"] for row in work_rows if active_start <= row["dato"] <= active_end)
+            salary = sum(
+                ft.get_holiday_eligible_salary(row, row.get("settings", settings))
+                for row in work_rows
+                if active_start <= row["dato"] <= active_end
+            )
             monthly_rows.append(
                 {
                     "label": month_label(month_start),
                     "start": active_start,
                     "end": active_end,
                     "salary": salary,
-                    "holiday_pay": salary * (config["rate"] / 100),
+                    "holiday_pay": ft.calculate_holiday_pay_amount(salary, config["rate"]),
                     "holiday_days": holiday_days_for_range(active_start, active_end),
                 }
             )
@@ -3614,7 +3631,7 @@ class DashboardSalaryCalculatorWidget(QWidget):
             return
 
         try:
-            gross = self._gross_value()
+            gross, hours = self._calculation_values()
         except ValueError as error:
             self.net_label.setText("Netto løn: N/A")
             self.detail_label.setText(str(error))
@@ -3625,33 +3642,27 @@ class DashboardSalaryCalculatorWidget(QWidget):
             self.detail_label.setText("Brug bruttofeltet eller timer + timeløn.")
             return
 
-        breakdown = ft.calculate_salary_breakdown(
-            gross,
-            self.settings.get("skat", 0),
-            self.settings.get("fradrag", 0),
-            self.settings.get("am bidrag", 0),
-            settings=self.settings,
-        )
+        breakdown = ft.calculate_salary_breakdown_from_brutto(gross, hours, self.settings)
         self.net_label.setText(f"Netto løn: {format_money(breakdown['netto'])}")
         self.detail_label.setText(
             f"Brutto: {format_money(gross)} · Pension: {format_number(ft.get_pension_contribution_rate(self.settings) * 100)}% · Skat: {format_number(float(self.settings.get('skat', 0)) * 100)}%"
         )
 
-    def _gross_value(self):
+    def _calculation_values(self):
         gross_text = self.gross_field.text().strip()
         if gross_text:
-            return parse_positive_number(self.gross_field, "Brutto løn", allow_zero=True)
+            return parse_positive_number(self.gross_field, "Brutto løn", allow_zero=True), 0.0
 
         hours_text = self.hours_field.text().strip()
         rate_text = self.rate_field.text().strip()
         if not hours_text and not rate_text:
-            return None
+            return None, 0.0
         if not hours_text or not rate_text:
             raise ValueError("Udfyld både timer og timeløn.")
 
         hours = parse_positive_number(self.hours_field, "Timer", allow_zero=True)
         rate = parse_positive_number(self.rate_field, "Timeløn", allow_zero=True)
-        return hours * rate
+        return hours * rate, hours
 
 
 class DashboardHolidayPayWidget(QWidget):
@@ -4883,18 +4894,28 @@ class DashboardPage(CompactScrollPage):
         rows = [
             ("Brutto løn", format_money(breakdown["brutto"])),
             ("Pension", f"-{format_money(breakdown.get('pension', 0))}"),
-            ("AM-bidrag", f"-{format_money(breakdown['am_bidrag'])}"),
-            ("Efter AM-bidrag", format_money(breakdown["efter_am"])),
-            ("Fradrag", format_money(breakdown["fradrag"])),
-            ("Skattegrundlag", format_money(breakdown["skattegrundlag"])),
-            ("Skat", f"-{format_money(breakdown['skat'])}"),
-            ("Netto løn", format_money(breakdown["netto"])),
         ]
+        if breakdown.get("atp_medarbejder", 0) > 0:
+            rows.append(("ATP medarbejder", f"-{format_money(breakdown.get('atp_medarbejder', 0))}"))
+        rows.extend(
+            [
+                ("AM-bidrag", f"-{format_money(breakdown['am_bidrag'])}"),
+                ("Efter AM-bidrag", format_money(breakdown["efter_am"])),
+                ("Fradrag", format_money(breakdown["fradrag"])),
+                ("Skattegrundlag", format_money(breakdown["skattegrundlag"])),
+                ("Skat", f"-{format_money(breakdown['skat'])}"),
+                ("Netto løn", format_money(breakdown["netto"])),
+            ]
+        )
+        if breakdown.get("arbejdsgiver_pension", 0) > 0:
+            rows.append(("Arbejdsgiverpension", format_money(breakdown.get("arbejdsgiver_pension", 0))))
+        if breakdown.get("atp_arbejdsgiver", 0) > 0:
+            rows.append(("ATP arbejdsgiver", format_money(breakdown.get("atp_arbejdsgiver", 0))))
         self.breakdown_table.setRowCount(len(rows))
         for row_index, (label, value) in enumerate(rows):
             self.breakdown_table.setItem(row_index, 0, table_item(label))
             self.breakdown_table.setItem(row_index, 1, table_item(value, Qt.AlignRight | Qt.AlignVCenter))
-        fit_table_height(self.breakdown_table, len(rows), max_rows=8, min_rows=len(rows))
+        fit_table_height(self.breakdown_table, len(rows), max_rows=len(rows), min_rows=len(rows))
 
     def _fill_recent(self, rows):
         self.recent_table.setRowCount(len(rows))
@@ -5054,12 +5075,13 @@ class ShiftEntryDialog(QDialog):
                 period_start, period_end = ft.get_salary_period_for_date(selected_date, settings=self.settings)
                 netto = ft.calculate_salary_breakdown_from_brutto(
                     brutto,
+                    hours,
                     self.settings,
                     period_start,
                     period_end,
                 )["netto"]
             except ValueError:
-                netto = ft.calculate_salary_breakdown_from_brutto(brutto, self.settings)["netto"]
+                netto = ft.calculate_salary_breakdown_from_brutto(brutto, hours, self.settings)["netto"]
         pause_text = f" | Pause: {format_pause_minutes(pause)} min." if pause > 0 else ""
         self.summary_label.setText(
             f"Vagt: {format_number(hours)} betalte timer á {format_money(rate)}{pause_text}\n"
@@ -5302,16 +5324,16 @@ class CalculatorPage(BasePage):
             set_field_number(self.pension_field, ft.get_pension_contribution_rate(self.settings) * 100)
         self._calculate()
 
-    def _gross(self):
+    def _gross_and_hours(self):
         if self.tabs.currentIndex() == 0:
-            return parse_positive_number(self.brutto_field, "Bruttoløn", allow_zero=True)
+            return parse_positive_number(self.brutto_field, "Bruttoløn", allow_zero=True), 0.0
         hours = parse_positive_number(self.calc_hours_field, "Timer", allow_zero=True)
         rate = parse_positive_number(self.calc_rate_field, "Timeløn", allow_zero=True)
-        return hours * rate
+        return hours * rate, hours
 
     def _calculate(self):
         try:
-            brutto = self._gross()
+            brutto, hours = self._gross_and_hours()
             tax_value = parse_positive_number(self.tax_field, "Skat", allow_zero=True)
             am_value = parse_positive_number(self.am_field, "AM-bidrag", allow_zero=True)
             tax_rate = tax_value / 100 if tax_value > 1 else tax_value
@@ -5330,6 +5352,7 @@ class CalculatorPage(BasePage):
             fradrag,
             am_rate,
             settings={ft.PENSION_CONTRIBUTION_KEY: pension_rate},
+            hours=hours,
         )
         self.net_result.set_values(
             format_money(breakdown["netto"]),
@@ -5338,13 +5361,19 @@ class CalculatorPage(BasePage):
         rows = [
             ("Brutto løn", format_money(breakdown["brutto"])),
             ("Pension", f"-{format_money(breakdown.get('pension', 0))}"),
-            ("AM-bidrag", f"-{format_money(breakdown['am_bidrag'])}"),
-            ("Efter AM-bidrag", format_money(breakdown["efter_am"])),
-            ("Fradrag", format_money(breakdown["fradrag"])),
-            ("Skattegrundlag", format_money(breakdown["skattegrundlag"])),
-            ("Skat", f"-{format_money(breakdown['skat'])}"),
-            ("Netto løn", format_money(breakdown["netto"])),
         ]
+        if breakdown.get("atp_medarbejder", 0) > 0:
+            rows.append(("ATP medarbejder", f"-{format_money(breakdown.get('atp_medarbejder', 0))}"))
+        rows.extend(
+            [
+                ("AM-bidrag", f"-{format_money(breakdown['am_bidrag'])}"),
+                ("Efter AM-bidrag", format_money(breakdown["efter_am"])),
+                ("Fradrag", format_money(breakdown["fradrag"])),
+                ("Skattegrundlag", format_money(breakdown["skattegrundlag"])),
+                ("Skat", f"-{format_money(breakdown['skat'])}"),
+                ("Netto løn", format_money(breakdown["netto"])),
+            ]
+        )
         self.result_table.setRowCount(len(rows))
         for row_index, (label, value) in enumerate(rows):
             self.result_table.setItem(row_index, 0, table_item(label))
@@ -5477,15 +5506,25 @@ class PayrollSlipDialog(QDialog):
         rows = [
             ("Brutto løn", format_money(self.period["brutto"])),
             ("Pension", f"-{format_money(self.period.get('pension', 0))}"),
-            ("AM-bidrag", f"-{format_money(self.period['am_bidrag'])}"),
-            ("Efter AM-bidrag", format_money(self.period.get("efter_am"))),
-            ("Fradrag", format_money(self.period.get("fradrag"))),
-            ("Skattegrundlag", format_money(self.period.get("skattegrundlag"))),
-            ("Skat", f"-{format_money(self.period['skat'])}"),
-            ("Netto løn", format_money(self.period["netto"])),
-            ("Anden indkomst (netto)", format_money(other_income)),
-            ("Total udbetalt", format_money(total)),
         ]
+        if self.period.get("atp_medarbejder", 0) > 0:
+            rows.append(("ATP medarbejder", f"-{format_money(self.period.get('atp_medarbejder', 0))}"))
+        rows.extend(
+            [
+                ("AM-bidrag", f"-{format_money(self.period['am_bidrag'])}"),
+                ("Efter AM-bidrag", format_money(self.period.get("efter_am"))),
+                ("Fradrag", format_money(self.period.get("fradrag"))),
+                ("Skattegrundlag", format_money(self.period.get("skattegrundlag"))),
+                ("Skat", f"-{format_money(self.period['skat'])}"),
+                ("Netto løn", format_money(self.period["netto"])),
+                ("Anden indkomst (netto)", format_money(other_income)),
+                ("Total udbetalt", format_money(total)),
+            ]
+        )
+        if self.period.get("arbejdsgiver_pension", 0) > 0:
+            rows.append(("Arbejdsgiverpension", format_money(self.period.get("arbejdsgiver_pension", 0))))
+        if self.period.get("atp_arbejdsgiver", 0) > 0:
+            rows.append(("ATP arbejdsgiver", format_money(self.period.get("atp_arbejdsgiver", 0))))
 
         table = QTableWidget()
         setup_table(table, ["Post", "Beløb"])
@@ -5746,8 +5785,13 @@ class StatisticsPage(BasePage):
             ),
             MetricCard(
                 "Trukket i alt",
-                format_money(stats["deductions"].get("pension", 0) + stats["deductions"]["am_bidrag"] + stats["deductions"]["skat"]),
-                "Pension, AM-bidrag og skat",
+                format_money(
+                    stats["deductions"].get("pension", 0)
+                    + stats["deductions"].get("atp_medarbejder", 0)
+                    + stats["deductions"]["am_bidrag"]
+                    + stats["deductions"]["skat"]
+                ),
+                "Pension, ATP, AM-bidrag og skat",
             ),
         ]
         for index, card in enumerate(cards):
@@ -5891,15 +5935,34 @@ class StatisticsPage(BasePage):
         )
 
     def _add_deductions(self, stats):
+        rows = [
+            ["Samlet pension", format_money(stats["deductions"].get("pension", 0))],
+        ]
+        if stats["deductions"].get("atp_medarbejder", 0) > 0:
+            rows.append(["Samlet ATP medarbejder", format_money(stats["deductions"].get("atp_medarbejder", 0))])
+        rows.extend(
+            [
+                ["Samlet AM-bidrag", format_money(stats["deductions"]["am_bidrag"])],
+                ["Samlet skat", format_money(stats["deductions"]["skat"])],
+                [
+                    "Samlet trukket",
+                    format_money(
+                        stats["deductions"].get("pension", 0)
+                        + stats["deductions"].get("atp_medarbejder", 0)
+                        + stats["deductions"]["am_bidrag"]
+                        + stats["deductions"]["skat"]
+                    ),
+                ],
+            ]
+        )
+        if stats["deductions"].get("arbejdsgiver_pension", 0) > 0:
+            rows.append(["Arbejdsgiverpension", format_money(stats["deductions"].get("arbejdsgiver_pension", 0))])
+        if stats["deductions"].get("atp_arbejdsgiver", 0) > 0:
+            rows.append(["ATP arbejdsgiver", format_money(stats["deductions"].get("atp_arbejdsgiver", 0))])
         self._add_table(
             "Fradrag",
             ["Måling", "Beløb"],
-            [
-                ["Samlet pension", format_money(stats["deductions"].get("pension", 0))],
-                ["Samlet AM-bidrag", format_money(stats["deductions"]["am_bidrag"])],
-                ["Samlet skat", format_money(stats["deductions"]["skat"])],
-                ["Samlet trukket", format_money(stats["deductions"].get("pension", 0) + stats["deductions"]["am_bidrag"] + stats["deductions"]["skat"])],
-            ],
+            rows,
         )
 
     def _add_forecast(self, stats):
@@ -6791,8 +6854,23 @@ class SettingsPage(BasePage):
 
         self.tax_field = make_text_input(placeholder="fx 49")
         self.fradrag_field = make_text_input(placeholder="fx 0")
+        self.fradrag_unit_combo = ModernComboBox()
+        for label, value in [
+            ("Måned", ft.AMOUNT_UNIT_MONTH),
+            ("14 dage", ft.AMOUNT_UNIT_TWO_WEEKS),
+            ("Uge", ft.AMOUNT_UNIT_WEEK),
+            ("Dag", ft.AMOUNT_UNIT_DAY),
+            ("Periode", ft.AMOUNT_UNIT_PERIOD),
+        ]:
+            self.fradrag_unit_combo.addItem(label, value)
         self.am_field = make_text_input(placeholder="fx 8")
+        self.birth_year_field = make_text_input(placeholder="fx 2008")
+        self.am_age_rule_checkbox = QCheckBox("Brug AM-aldersregel")
         self.pension_field = make_text_input(placeholder="fx 5")
+        self.employer_pension_field = make_text_input(placeholder="fx 10")
+        self.atp_enabled_checkbox = QCheckBox("ATP aktiv")
+        self.atp_employee_field = make_text_input(placeholder="kr pr. periode")
+        self.atp_employer_field = make_text_input(placeholder="kr pr. periode")
         self.other_income_field = make_text_input(placeholder="fx 10742")
         self.disposable_goal_field = make_text_input(placeholder="fx 0")
         self.default_rate_field = make_text_input(placeholder="fx 150")
@@ -6806,24 +6884,171 @@ class SettingsPage(BasePage):
         self.holiday_rate_field = make_text_input(placeholder="12,5")
         self.employment_start_field = make_text_input(placeholder="dd-mm-åååå")
 
-        tax_form.addRow("Skat %", self.tax_field)
-        tax_form.addRow("Fradrag pr. måned", self.fradrag_field)
-        tax_form.addRow("AM-bidrag %", self.am_field)
-        tax_form.addRow("Eget pensionsbidrag %", self.pension_field)
-        tax_form.addRow("Anden indkomst netto pr. måned", self.other_income_field)
-        tax_form.addRow("Timeløn", self.default_rate_field)
+        self._add_info_row(
+            tax_form,
+            "Skat %",
+            self.tax_field,
+            "Skat %",
+            "A-skat er den almindelige skat, der trækkes af din løn efter AM-bidrag og fradrag. Skriv din trækprocent fra skattekortet, fx 39.",
+            required=True,
+        )
+        self._add_info_row(
+            tax_form,
+            "Fradrag",
+            self.fradrag_field,
+            "Fradrag",
+            "Fradrag er det beløb du kan tjene, før der trækkes A-skat. Det sænker ikke AM-bidraget. Skriv beløbet for den enhed du vælger nedenunder.",
+            required=True,
+        )
+        self._add_info_row(
+            tax_form,
+            "Fradrag enhed",
+            self.fradrag_unit_combo,
+            "Fradrag enhed",
+            "Her vælger du, hvad fradragsbeløbet dækker. Hvis dit skattekort viser fradrag pr. måned, skal du vælge Måned.",
+            required=True,
+        )
+        self._add_info_row(
+            tax_form,
+            "AM-bidrag %",
+            self.am_field,
+            "AM-bidrag %",
+            "AM-bidrag er arbejdsmarkedsbidrag. Det trækkes normalt før A-skat. For de fleste er det 8.",
+            required=True,
+        )
+        self._add_info_row(
+            tax_form,
+            "Fødselsår",
+            self.birth_year_field,
+            "Fødselsår",
+            "Dit fødselsår bruges kun til AM-reglen for unge. Skriv fx 2008, eller lad feltet være tomt.",
+        )
+        self._add_info_row(
+            tax_form,
+            "AM-aldersregel",
+            self.am_age_rule_checkbox,
+            "AM-aldersregel",
+            "Slå den til, hvis Lønix skal tage højde for, at unge under 18 fra 2026 ikke altid betaler AM-bidrag.",
+        )
+        self._add_info_row(
+            tax_form,
+            "Eget pensionsbidrag %",
+            self.pension_field,
+            "Eget pensionsbidrag %",
+            "Eget pensionsbidrag er den del af lønnen, du selv betaler til pension. Den trækkes fra før AM-bidrag. Skriv 0 hvis du ikke betaler pension.",
+            required=True,
+        )
+        self._add_info_row(
+            tax_form,
+            "Arbejdsgiver pension %",
+            self.employer_pension_field,
+            "Arbejdsgiver pension %",
+            "Arbejdsgiverpension er pension, din arbejdsgiver betaler oveni. Den trækkes ikke fra din nettoløn. Skriv 0 hvis du ikke bruger den.",
+        )
+        self._add_info_row(
+            tax_form,
+            "ATP aktiv",
+            self.atp_enabled_checkbox,
+            "ATP aktiv",
+            "ATP er en lovpligtig pensionsordning for mange lønmodtagere. Slå til hvis ATP skal med i lønberegningen.",
+        )
+        self._add_info_row(
+            tax_form,
+            "ATP medarbejder",
+            self.atp_employee_field,
+            "ATP medarbejder",
+            "Det ATP-beløb du selv betaler i én lønperiode. Det trækkes fra før AM-bidrag. Skriv 0 hvis du ikke bruger ATP.",
+        )
+        self._add_info_row(
+            tax_form,
+            "ATP arbejdsgiver",
+            self.atp_employer_field,
+            "ATP arbejdsgiver",
+            "Det ATP-beløb arbejdsgiver betaler for én lønperiode. Det trækkes ikke fra din nettoløn.",
+        )
+        self._add_info_row(
+            tax_form,
+            "Anden indkomst netto pr. måned",
+            self.other_income_field,
+            "Anden indkomst netto",
+            "Anden indkomst netto er penge du får udbetalt efter skat ved siden af lønnen, fx SU. Beløbet lægges til efter lønskat.",
+            required=True,
+        )
+        self._add_info_row(
+            tax_form,
+            "Timeløn",
+            self.default_rate_field,
+            "Timeløn",
+            "Timeløn er det du får før skat for én betalt arbejdstime. Den bruges som forslag, når du opretter nye vagter.",
+            required=True,
+        )
 
-        goal_form.addRow("Ønsket rådighedsbeløb pr. måned", self.disposable_goal_field)
-        goal_form.addRow("Lønperiode type", self.period_type_combo)
-        goal_form.addRow("Lønperiode starter d.", self.start_day_field)
-        goal_form.addRow("Lønperiode slutter d.", self.end_day_field)
-        goal_form.addRow("Antal uger", self.period_weeks_field)
-        goal_form.addRow("Første periode starter", self.period_anchor_field)
+        self._add_info_row(
+            goal_form,
+            "Ønsket rådighedsbeløb pr. måned",
+            self.disposable_goal_field,
+            "Ønsket rådighedsbeløb",
+            "Rådighedsbeløb er de penge du har tilbage efter løn, anden indkomst og budgetudgifter. Skriv dit mål pr. måned, eller 0 hvis du ikke vil bruge målet.",
+            required=True,
+        )
+        self._add_info_row(
+            goal_form,
+            "Lønperiode type",
+            self.period_type_combo,
+            "Lønperiode type",
+            "En lønperiode er den periode, lønsedlen dækker. Vælg måned hvis perioden følger datoer i måneden, eller uger hvis den kører i faste ugeblokke.",
+            required=True,
+        )
+        self._add_info_row(
+            goal_form,
+            "Lønperiode starter d.",
+            self.start_day_field,
+            "Lønperiode starter",
+            "Datoen i måneden hvor din månedlige lønperiode starter. Skriv fx 15.",
+            required=True,
+        )
+        self._add_info_row(
+            goal_form,
+            "Lønperiode slutter d.",
+            self.end_day_field,
+            "Lønperiode slutter",
+            "Datoen i måneden hvor din månedlige lønperiode slutter. Skriv fx 14.",
+            required=True,
+        )
+        self._add_info_row(
+            goal_form,
+            "Antal uger",
+            self.period_weeks_field,
+            "Antal uger",
+            "Hvor mange uger der er i én lønperiode, hvis du har valgt Uger. Skriv fx 2 for 14-dages løn.",
+            required=True,
+        )
+        self._add_info_row(
+            goal_form,
+            "Første periode starter",
+            self.period_anchor_field,
+            "Første periode starter",
+            "Startdato for en kendt lønperiode, hvis du har valgt Uger. Lønix tæller de næste perioder ud fra den dato.",
+            required=True,
+        )
         self.pay_period_form = goal_form
         self.period_type_combo.currentIndexChanged.connect(self._update_pay_period_fields)
 
-        holiday_form.addRow("Feriegodtgørelse %", self.holiday_rate_field)
-        holiday_form.addRow("Ansættelsesstart", self.employment_start_field)
+        self._add_info_row(
+            holiday_form,
+            "Feriegodtgørelse %",
+            self.holiday_rate_field,
+            "Feriegodtgørelse %",
+            "Feriegodtgørelse er feriepenge optjent af ferieberettiget løn. Ofte er satsen 12,5.",
+            required=True,
+        )
+        self._add_info_row(
+            holiday_form,
+            "Ansættelsesstart",
+            self.employment_start_field,
+            "Ansættelsesstart",
+            "Datoen du startede i jobbet. Den bruges til feriepenge og feriedage. Feltet kan være tomt.",
+        )
 
         button_row = QHBoxLayout()
         self.root.addLayout(button_row)
@@ -6842,19 +7067,49 @@ class SettingsPage(BasePage):
 
         note = QLabel(
             "Du kan se dine skatteoplysninger på borger.dk -> TastSelv. "
-            "Eget pensionsbidrag trækkes fra brutto før AM-bidrag og skat. Fradrag, anden indkomst, budget og rådighedsmål indtastes som månedstal og tilpasses automatisk lønperioden."
+            "Eget pensionsbidrag og medarbejder-ATP trækkes fra brutto før AM-bidrag og skat. Anden indkomst er netto og lægges til efter skat."
         )
         note.setObjectName("PageSubtitle")
         note.setWordWrap(True)
         self.root.addWidget(note)
+        required_note = QLabel("* betyder, at feltet skal udfyldes. Du kan stadig skrive 0, hvis feltet ikke gælder for dig.")
+        required_note.setObjectName("PageSubtitle")
+        required_note.setWordWrap(True)
+        self.root.addWidget(required_note)
         self.root.addStretch()
+
+    def _add_info_row(self, form, label, field, title, help_text, required=False):
+        label_widget = QWidget()
+        label_layout = QHBoxLayout(label_widget)
+        label_layout.setContentsMargins(0, 0, 0, 0)
+        label_layout.setSpacing(7)
+        info_button = QPushButton("i")
+        info_button.setObjectName("InfoButton")
+        info_button.setCursor(Qt.PointingHandCursor)
+        info_button.setToolTip(f"Forklaring: {label}")
+        info_button.clicked.connect(lambda checked=False, dialog_title=title, text=help_text: self._show_setting_help(dialog_title, text))
+        label_layout.addWidget(info_button, 0, Qt.AlignVCenter)
+        text_label = QLabel(f"{label}{' *' if required else ''}")
+        label_layout.addWidget(text_label, 1, Qt.AlignVCenter)
+        form.addRow(label_widget, field)
+
+    def _show_setting_help(self, title, text):
+        QMessageBox.information(self, title, text)
 
     def refresh(self):
         settings = self.settings if has_required_settings(self.settings) else {
             "skat": 0.39,
             "fradrag": 0,
+            ft.TAX_ALLOWANCE_UNIT_KEY: ft.AMOUNT_UNIT_MONTH,
             "am bidrag": 0.08,
+            ft.BIRTH_YEAR_KEY: None,
+            ft.AM_AGE_RULE_ENABLED_KEY: True,
             ft.PENSION_CONTRIBUTION_KEY: 0,
+            ft.EMPLOYER_PENSION_CONTRIBUTION_KEY: 0,
+            ft.ATP_ENABLED_KEY: False,
+            ft.ATP_CALCULATION_KEY: ft.ATP_CALCULATION_MANUAL,
+            ft.ATP_EMPLOYEE_AMOUNT_KEY: 0,
+            ft.ATP_EMPLOYER_AMOUNT_KEY: 0,
             "anden indkomst netto": 0,
             "ønsket rådighedsbeløb": 0,
             "standard timeløn": 150,
@@ -6869,8 +7124,16 @@ class SettingsPage(BasePage):
         settings = ft.normalize_settings(settings)
         set_field_number(self.tax_field, float(settings.get("skat", 0)) * 100)
         set_field_number(self.fradrag_field, float(settings.get("fradrag", 0)))
+        fradrag_unit_index = self.fradrag_unit_combo.findData(settings.get(ft.TAX_ALLOWANCE_UNIT_KEY, ft.AMOUNT_UNIT_MONTH))
+        self.fradrag_unit_combo.setCurrentIndex(max(0, fradrag_unit_index))
         set_field_number(self.am_field, float(settings.get("am bidrag", 0)) * 100)
+        self.birth_year_field.setText("" if settings.get(ft.BIRTH_YEAR_KEY) in ("", None) else str(settings.get(ft.BIRTH_YEAR_KEY)))
+        self.am_age_rule_checkbox.setChecked(bool(settings.get(ft.AM_AGE_RULE_ENABLED_KEY, True)))
         set_field_number(self.pension_field, ft.get_pension_contribution_rate(settings) * 100)
+        set_field_number(self.employer_pension_field, ft.get_employer_pension_contribution_rate(settings) * 100)
+        self.atp_enabled_checkbox.setChecked(bool(settings.get(ft.ATP_ENABLED_KEY, False)))
+        set_field_number(self.atp_employee_field, float(settings.get(ft.ATP_EMPLOYEE_AMOUNT_KEY, 0)))
+        set_field_number(self.atp_employer_field, float(settings.get(ft.ATP_EMPLOYER_AMOUNT_KEY, 0)))
         set_field_number(self.other_income_field, ft.get_other_income(settings))
         set_field_number(self.disposable_goal_field, float(settings.get("ønsket rådighedsbeløb", 0)))
         set_field_number(self.default_rate_field, ft.get_default_hourly_rate(settings))
@@ -6917,6 +7180,11 @@ class SettingsPage(BasePage):
             tax = parse_positive_number(self.tax_field, "Skat", allow_zero=True)
             am = parse_positive_number(self.am_field, "AM-bidrag", allow_zero=True)
             pension = parse_positive_number(self.pension_field, "Eget pensionsbidrag", allow_zero=True)
+            employer_pension = parse_positive_number(self.employer_pension_field, "Arbejdsgiver pension", allow_zero=True)
+            birth_year_text = self.birth_year_field.text().strip()
+            birth_year = int(birth_year_text) if birth_year_text else None
+            if birth_year is not None and (birth_year < 1900 or birth_year > datetime.now().year):
+                raise ValueError("Fødselsår skal være et gyldigt årstal.")
             holiday_rate = parse_positive_number(self.holiday_rate_field, "Feriegodtgørelse")
             employment_start_text = self.employment_start_field.text().strip()
             employment_start = parse_date_text(employment_start_text) if employment_start_text else None
@@ -6937,8 +7205,24 @@ class SettingsPage(BasePage):
             updated_settings = {
                 "skat": tax / 100 if tax > 1 else tax,
                 "fradrag": parse_positive_number(self.fradrag_field, "Fradrag", allow_zero=True),
+                ft.TAX_ALLOWANCE_UNIT_KEY: self.fradrag_unit_combo.currentData() or ft.AMOUNT_UNIT_MONTH,
                 "am bidrag": am / 100 if am > 1 else am,
+                ft.BIRTH_YEAR_KEY: birth_year,
+                ft.AM_AGE_RULE_ENABLED_KEY: self.am_age_rule_checkbox.isChecked(),
                 ft.PENSION_CONTRIBUTION_KEY: pension / 100 if pension > 1 else pension,
+                ft.EMPLOYER_PENSION_CONTRIBUTION_KEY: employer_pension / 100 if employer_pension > 1 else employer_pension,
+                ft.ATP_ENABLED_KEY: self.atp_enabled_checkbox.isChecked(),
+                ft.ATP_CALCULATION_KEY: ft.ATP_CALCULATION_MANUAL,
+                ft.ATP_EMPLOYEE_AMOUNT_KEY: parse_positive_number(
+                    self.atp_employee_field,
+                    "ATP medarbejder",
+                    allow_zero=True,
+                ),
+                ft.ATP_EMPLOYER_AMOUNT_KEY: parse_positive_number(
+                    self.atp_employer_field,
+                    "ATP arbejdsgiver",
+                    allow_zero=True,
+                ),
                 "anden indkomst netto": parse_positive_number(
                     self.other_income_field,
                     "Anden indkomst",
