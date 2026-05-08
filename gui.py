@@ -3659,9 +3659,9 @@ class DashboardHolidayPayWidget(QWidget):
                 f"Total orventet om ½ år: {format_money(forecast_total)} estimeret."
             )
         self.detail_label.setText(
-            f"{request_text}\n"
-            "Udbetaling: tidligst 1 måned før første feriedag. "
-            f"Beregnet fra {format_long_date(calculation['calculation_start'])} til {format_long_date(calculation['calculation_end'])}."
+            f"• {request_text}\n"
+            "• Udbetaling: tidligst 1 måned før første feriedag.\n\n"
+            f"• Beregnet fra {format_long_date(calculation['calculation_start'])} til {format_long_date(calculation['calculation_end'])}."
         )
         self.days_chip.value_label.setText(f"{format_number(calculation['holiday_days'])} dage")
 
