@@ -10,12 +10,14 @@ def _format_hours(value):
 
 
 def build_overview(settings, netto_løn, brutto_løn, timer, forecast=None, rådighed=False):
-    anden_indkomst = ft.get_other_income(settings)
-    faste_udgifter = ft.calculate_budget_expenses(settings)
+    periode_start = forecast.get("periode_start") if forecast else None
+    periode_slut = forecast.get("periode_slut") if forecast else None
+    anden_indkomst = ft.get_other_income(settings, periode_start, periode_slut)
+    faste_udgifter = ft.calculate_budget_expenses(settings, periode_start, periode_slut)
     lønperiode = ft.get_pay_period_description(settings)
 
     total_netto = anden_indkomst + netto_løn
-    til_rådighed = ft.calculate_disposable_income(total_netto, settings)
+    til_rådighed = ft.calculate_disposable_income(total_netto, settings, periode_start, periode_slut)
 
     estimeret_total = None
     estimeret_til_rådighed = None
@@ -53,7 +55,7 @@ def build_overview(settings, netto_løn, brutto_løn, timer, forecast=None, råd
     if estimeret_total is not None:
         print(Fore.GREEN + f"  - Estimeret total udbetalt: {estimeret_total:.0f} kr.")
     if rådighed:
-        print(Fore.LIGHTBLACK_EX + f"  Budgetterede faste udgifter: {faste_udgifter:.0f} kr.")
+        print(Fore.LIGHTBLACK_EX + f"  Udgifter i lønperioden: {faste_udgifter:.0f} kr.")
         print(Fore.GREEN + f"  - Rådighedsbeløb nu: {til_rådighed:.0f} kr.")
         if estimeret_til_rådighed is not None:
             print(Fore.GREEN + f"  - Estimeret rådighedsbeløb: {estimeret_til_rådighed:.0f} kr.")

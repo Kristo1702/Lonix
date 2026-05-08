@@ -227,9 +227,10 @@ def print_stats(data=None, settings=None):
         "Fradrag",
         ["Måling", "Beløb"],
         [
+            ["Samlet pension", _format_money(statistics["deductions"].get("pension", 0))],
             ["Samlet AM-bidrag", _format_money(statistics["deductions"]["am_bidrag"])],
             ["Samlet skat", _format_money(statistics["deductions"]["skat"])],
-            ["Samlet trukket i alt", _format_money(statistics["deductions"]["am_bidrag"] + statistics["deductions"]["skat"])],
+            ["Samlet trukket i alt", _format_money(statistics["deductions"].get("pension", 0) + statistics["deductions"]["am_bidrag"] + statistics["deductions"]["skat"])],
         ],
         right_align={1},
     )
@@ -254,7 +255,7 @@ def print_stats(data=None, settings=None):
                 _format_optional(statistics["forecast"]["estimated_total_income"], _format_money),
             ],
             [
-                "Budgetterede faste udgifter",
+                "Udgifter i lønperioden",
                 _format_money(statistics["forecast"]["budget_expenses"]),
             ],
             [
@@ -357,6 +358,7 @@ def _build_statistics(data, settings):
         }
 
     deductions = {
+        "pension": sum(period.get("pension", 0) for period in periods),
         "am_bidrag": sum(period["am_bidrag"] for period in periods),
         "skat": sum(period["skat"] for period in periods),
     }
@@ -387,9 +389,10 @@ def _build_statistics(data, settings):
 
 def _parse_shifts(data):
     shifts = []
-    for entry in data:
+    for index, entry in enumerate(data):
         dato_str, løn_info = next(iter(entry.items()))
         dato = datetime.strptime(dato_str, "%d-%m-%Y").date()
+        entry_settings = ft.get_entry_settings(løn_info)
         is_day_off = ft.is_day_off(løn_info)
         varighed = ft.get_shift_duration_hours(løn_info)
         pause = ft.get_shift_pause_hours(løn_info)
@@ -398,6 +401,7 @@ def _parse_shifts(data):
 
         shifts.append(
             {
+                "id": ft.get_entry_id(løn_info) or f"legacy-{dato_str}-{index}",
                 "dato": dato,
                 "varighed": varighed,
                 "timer": timer,
@@ -407,6 +411,7 @@ def _parse_shifts(data):
                 "netto": 0.0,
                 "am_bidrag": 0.0,
                 "skat": 0.0,
+                "settings": entry_settings,
                 "is_day_off": is_day_off,
             }
         )
@@ -437,7 +442,7 @@ def _group_periods(shifts, settings):
     for shift in shifts:
         periode_start, periode_slut = ft.get_salary_period_for_date(
             shift["dato"],
-            settings=settings,
+            settings=shift.get("settings", settings),
         )
         period_key = (periode_start, periode_slut)
 
@@ -450,11 +455,16 @@ def _group_periods(shifts, settings):
                 "pause": 0.0,
                 "brutto": 0.0,
                 "netto": 0.0,
+                "pension": 0.0,
+                "am_grundlag": 0.0,
                 "am_bidrag": 0.0,
                 "efter_am": 0.0,
                 "fradrag": 0.0,
                 "skattegrundlag": 0.0,
                 "skat": 0.0,
+                "anden_indkomst": 0.0,
+                "budget_expenses": 0.0,
+                "disposable_goal": 0.0,
                 "vagter": 0,
                 "fridage": 0,
                 "registreringer": 0,
@@ -475,22 +485,51 @@ def _group_periods(shifts, settings):
 
     sorted_periods = sorted(periods.values(), key=lambda period: period["periode_start"])
     for period in sorted_periods:
-        breakdown = ft.calculate_salary_breakdown_from_brutto(period["brutto"])
+        calculation_items = [
+            {
+                "brutto": shift["brutto"],
+                "settings": shift.get("settings", settings),
+            }
+            for shift in period["shifts"]
+        ]
+        breakdown = ft.calculate_period_salary_breakdown(
+            calculation_items,
+            period["periode_start"],
+            period["periode_slut"],
+            settings,
+        )
         period["netto"] = breakdown["netto"]
+        period["pension"] = breakdown["pension"]
+        period["am_grundlag"] = breakdown["am_grundlag"]
         period["am_bidrag"] = breakdown["am_bidrag"]
         period["efter_am"] = breakdown["efter_am"]
         period["fradrag"] = breakdown["fradrag"]
         period["skattegrundlag"] = breakdown["skattegrundlag"]
         period["skat"] = breakdown["skat"]
+        period["anden_indkomst"] = ft.calculate_period_other_income(
+            calculation_items,
+            period["periode_start"],
+            period["periode_slut"],
+            settings,
+        )
+        period["budget_expenses"] = ft.calculate_period_budget_expenses(
+            calculation_items,
+            period["periode_start"],
+            period["periode_slut"],
+            settings,
+        )
+        period["disposable_goal"] = ft.calculate_period_disposable_goal(
+            calculation_items,
+            period["periode_start"],
+            period["periode_slut"],
+            settings,
+        )
 
-        if period["brutto"] == 0:
-            continue
-
-        for shift in period["shifts"]:
-            share = shift["brutto"] / period["brutto"]
-            shift["netto"] = period["netto"] * share
-            shift["am_bidrag"] = period["am_bidrag"] * share
-            shift["skat"] = period["skat"] * share
+        for shift, shift_breakdown in zip(period["shifts"], breakdown.get("item_breakdowns", [])):
+            shift["netto"] = shift_breakdown["netto"]
+            shift["pension"] = shift_breakdown["pension"]
+            shift["am_bidrag"] = shift_breakdown["am_bidrag"]
+            shift["skat"] = shift_breakdown["skat"]
 
     return sorted_periods
 

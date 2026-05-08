@@ -758,6 +758,78 @@ def normalize_clock_text(value):
     return f"{(minutes // 60) % 24:02d}:{minutes % 60:02d}"
 
 
+def shift_time_interval(row):
+    if row.get("is_day_off"):
+        return None
+
+    start = row.get("start")
+    slut = row.get("slut")
+    if not start or not slut:
+        return None
+
+    try:
+        start_minutes = parse_clock_minutes(str(start))
+        end_minutes = parse_clock_minutes(str(slut))
+    except ValueError:
+        return None
+
+    if end_minutes <= start_minutes:
+        end_minutes += 24 * 60
+    return start_minutes, end_minutes
+
+
+def intervals_overlap(first, second):
+    if first is None or second is None:
+        return False
+    return first[0] < second[1] and second[0] < first[1]
+
+
+def rows_on_date(rows, target_date, exclude_ids=None):
+    exclude_ids = {str(entry_id) for entry_id in (exclude_ids or set())}
+    return [
+        row
+        for row in rows
+        if row.get("dato") == target_date and str(row.get("id")) not in exclude_ids
+    ]
+
+
+def date_has_day_off(rows, target_date, exclude_ids=None):
+    return any(row.get("is_day_off") for row in rows_on_date(rows, target_date, exclude_ids))
+
+
+def find_time_overlap(row, rows, exclude_ids=None):
+    current_interval = shift_time_interval(row)
+    if current_interval is None:
+        return None
+
+    for other in rows_on_date(rows, row.get("dato"), exclude_ids):
+        if other.get("is_day_off"):
+            continue
+        if intervals_overlap(current_interval, shift_time_interval(other)):
+            return other
+    return None
+
+
+def validate_shift_conflicts(rows):
+    by_date = {}
+    for row in rows:
+        by_date.setdefault(row.get("dato"), []).append(row)
+
+    for row_date, date_rows in by_date.items():
+        has_day_off = any(row.get("is_day_off") for row in date_rows)
+        has_work = any(not row.get("is_day_off") for row in date_rows)
+        if has_day_off and has_work:
+            raise ValueError(f"{format_date(row_date)} er markeret som fridag og kan ikke samtidig have vagter.")
+
+        work_rows = [row for row in date_rows if not row.get("is_day_off")]
+        for index, row in enumerate(work_rows):
+            overlap = find_time_overlap(row, work_rows[index + 1:])
+            if overlap is not None:
+                raise ValueError(
+                    f"Vagterne {format_work_time(row)} og {format_work_time(overlap)} overlapper den {format_date(row_date)}."
+                )
+
+
 def most_used_shift_time(data, key, fallback):
     time_stats = {}
     for entry_index, entry in enumerate(data or []):
@@ -1244,9 +1316,11 @@ def average_or_none(values):
 
 def entry_rows(data, settings=None):
     rows = []
-    for entry in data:
+    for index, entry in enumerate(data):
         dato_str, info = next(iter(entry.items()))
         dato = parse_date_key(dato_str)
+        entry_id = ft.get_entry_id(info) or f"legacy-{dato_str}-{index}"
+        entry_settings = ft.get_entry_settings(info, settings)
         is_day_off = ft.is_day_off(info)
         duration = ft.get_shift_duration_hours(info)
         pause = ft.get_shift_pause_hours(info)
@@ -1254,6 +1328,8 @@ def entry_rows(data, settings=None):
         timeløn = float(info.get("timeløn", 0))
 
         row = {
+            "id": entry_id,
+            "registreret": str(info.get(ft.ENTRY_CREATED_KEY, "")) if isinstance(info, dict) else "",
             "dato": dato,
             "varighed": duration,
             "timer": timer,
@@ -1261,6 +1337,7 @@ def entry_rows(data, settings=None):
             "timeløn": timeløn,
             "brutto": timer * timeløn,
             "is_day_off": is_day_off,
+            "settings": entry_settings,
         }
 
         if info.get("start"):
@@ -1278,20 +1355,25 @@ def entry_rows(data, settings=None):
             for row in rows:
                 period_key = ft.get_salary_period_for_date(
                     row["dato"],
-                    settings=settings,
+                    settings=row.get("settings", settings),
                 )
                 periods.setdefault(period_key, []).append(row)
 
-            for period_rows in periods.values():
-                period_brutto = sum(row["brutto"] for row in period_rows)
-                period_netto = ft.calculate_salary_breakdown(
-                    period_brutto,
-                    settings.get("skat", 0),
-                    settings.get("fradrag", 0),
-                    settings.get("am bidrag", 0),
-                )["netto"]
-                for row in period_rows:
-                    row["netto"] = period_netto * (row["brutto"] / period_brutto) if period_brutto else 0.0
+            for (period_start, period_end), period_rows in periods.items():
+                breakdown = ft.calculate_period_salary_breakdown(
+                    [
+                        {
+                            "brutto": row["brutto"],
+                            "settings": row.get("settings", settings),
+                        }
+                        for row in period_rows
+                    ],
+                    period_start,
+                    period_end,
+                    settings,
+                )
+                for row, row_breakdown in zip(period_rows, breakdown.get("item_breakdowns", [])):
+                    row["netto"] = row_breakdown["netto"]
     except (OSError, ValueError, TypeError):
         for row in rows:
             row["netto"] = 0.0
@@ -1299,19 +1381,34 @@ def entry_rows(data, settings=None):
     for row in rows:
         row.setdefault("netto", 0.0)
 
-    return sorted(rows, key=lambda row: row["dato"], reverse=True)
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["dato"],
+            str(row.get("start", "")),
+            str(row.get("id", "")),
+        ),
+        reverse=True,
+    )
 
 
 def save_entry_rows(rows):
     ensure_storage()
     clean_rows = sorted(rows, key=lambda row: row["dato"])
+    validate_shift_conflicts(clean_rows)
 
     payload = []
     for row in clean_rows:
+        entry_settings = ft.settings_snapshot(row.get("settings"))
+        entry_id = str(row.get("id") or ft.new_entry_id())
+        created_at = str(row.get("registreret") or datetime.now().isoformat(timespec="seconds"))
         if row.get("is_day_off"):
             payload.append(
                 {
                     date_to_key(row["dato"]): {
+                        ft.ENTRY_ID_KEY: entry_id,
+                        ft.ENTRY_CREATED_KEY: created_at,
+                        ft.ENTRY_SETTINGS_KEY: entry_settings,
                         ft.ENTRY_TYPE_KEY: ft.DAY_OFF_ENTRY_TYPE,
                         "timer": 0,
                         "timeløn": 0,
@@ -1323,6 +1420,9 @@ def save_entry_rows(rows):
         pause = max(0.0, float(row.get("pause", 0) or 0))
         duration = max(0.0, float(row.get("varighed", float(row["timer"]) + pause) or 0))
         entry_info = {
+            ft.ENTRY_ID_KEY: entry_id,
+            ft.ENTRY_CREATED_KEY: created_at,
+            ft.ENTRY_SETTINGS_KEY: entry_settings,
             "timer": duration,
             "timeløn": float(row["timeløn"]),
         }
@@ -1346,23 +1446,37 @@ def save_entry_rows(rows):
         json.dump(payload, file, ensure_ascii=False, indent=4)
 
 
-def upsert_entry(entry_date, hours, rate, original_date=None, start=None, slut=None, pause=0):
+def upsert_entry(
+    entry_date,
+    hours,
+    rate,
+    original_id=None,
+    start=None,
+    slut=None,
+    pause=0,
+    entry_settings=None,
+    replace_date=False,
+):
     rows = entry_rows(ft.load_data())
-    target_key = original_date or entry_date
-
-    rows = [row for row in rows if row["dato"] not in {target_key, entry_date}]
+    new_id = str(original_id or ft.new_entry_id())
+    if replace_date:
+        rows = [row for row in rows if row["dato"] != entry_date]
+    else:
+        rows = [row for row in rows if str(row.get("id")) != new_id]
 
     duration = float(hours)
     pause = max(0.0, float(pause or 0))
     paid_hours = max(0.0, duration - pause)
 
     new_row = {
+        "id": new_id,
         "dato": entry_date,
         "varighed": duration,
         "timer": paid_hours,
         "pause": pause,
         "timeløn": float(rate),
         "brutto": paid_hours * float(rate),
+        "settings": ft.settings_snapshot(entry_settings),
     }
 
     if start and slut:
@@ -1371,14 +1485,16 @@ def upsert_entry(entry_date, hours, rate, original_date=None, start=None, slut=N
 
     rows.append(new_row)
     save_entry_rows(rows)
+    return new_id
 
 
-def upsert_day_off(entry_date, original_date=None):
+def upsert_day_off(entry_date, original_id=None, entry_settings=None):
     rows = entry_rows(ft.load_data())
-    target_key = original_date or entry_date
-    rows = [row for row in rows if row["dato"] not in {target_key, entry_date}]
+    new_id = str(original_id or ft.new_entry_id())
+    rows = [row for row in rows if str(row.get("id")) != new_id]
     rows.append(
         {
+            "id": new_id,
             "dato": entry_date,
             "varighed": 0.0,
             "timer": 0.0,
@@ -1386,13 +1502,15 @@ def upsert_day_off(entry_date, original_date=None):
             "timeløn": 0.0,
             "brutto": 0.0,
             "is_day_off": True,
+            "settings": ft.settings_snapshot(entry_settings),
         }
     )
     save_entry_rows(rows)
+    return new_id
 
 
-def delete_entry(entry_date):
-    rows = [row for row in entry_rows(ft.load_data()) if row["dato"] != entry_date]
+def delete_entry(entry_id):
+    rows = [row for row in entry_rows(ft.load_data()) if str(row.get("id")) != str(entry_id)]
     save_entry_rows(rows)
 
 
@@ -1423,11 +1541,18 @@ def current_period_summary(data, settings, today=None):
     day_off_rows = [row for row in rows if row.get("is_day_off")]
     timer = sum(row["timer"] for row in work_rows)
     brutto = sum(row["brutto"] for row in work_rows)
-    breakdown = ft.calculate_salary_breakdown(
-        brutto,
-        settings.get("skat", 0),
-        settings.get("fradrag", 0),
-        settings.get("am bidrag", 0),
+    calculation_items = [
+        {
+            "brutto": row["brutto"],
+            "settings": row.get("settings", settings),
+        }
+        for row in rows
+    ]
+    breakdown = ft.calculate_period_salary_breakdown(
+        calculation_items,
+        periode_start,
+        periode_slut,
+        settings,
     )
     return {
         "periode_start": periode_start,
@@ -1436,6 +1561,9 @@ def current_period_summary(data, settings, today=None):
         "brutto": brutto,
         "netto": breakdown["netto"],
         "breakdown": breakdown,
+        "other_income": ft.calculate_period_other_income(calculation_items, periode_start, periode_slut, settings),
+        "budget_expenses": ft.calculate_period_budget_expenses(calculation_items, periode_start, periode_slut, settings),
+        "disposable_goal": ft.calculate_period_disposable_goal(calculation_items, periode_start, periode_slut, settings),
         "rows": rows,
         "work_rows": work_rows,
         "day_off_rows": day_off_rows,
@@ -1580,12 +1708,14 @@ def _holiday_pay_forecast_daily_salary(rows, settings, today):
 def estimate_holiday_pay_total(rows, settings, today, calculation_start, calculation_end, ferie_end, current_holiday_pay, rate):
     forecast_horizon = add_months(today, HOLIDAY_PAY_FORECAST_MONTHS)
     forecast_end = min(forecast_horizon, ferie_end)
+    forecast_holiday_days = holiday_days_for_range(calculation_start, forecast_end) if forecast_end >= calculation_start else 0.0
     if forecast_end <= calculation_end:
         return {
             "forecast_horizon": forecast_horizon,
             "forecast_end": forecast_end,
             "forecast_total_holiday_pay": current_holiday_pay,
             "forecast_future_holiday_pay": 0.0,
+            "forecast_holiday_days": forecast_holiday_days,
         }
 
     forecast_start = max(calculation_end + timedelta(days=1), calculation_start)
@@ -1611,6 +1741,7 @@ def estimate_holiday_pay_total(rows, settings, today, calculation_start, calcula
         "forecast_end": forecast_end,
         "forecast_total_holiday_pay": current_holiday_pay + future_holiday_pay,
         "forecast_future_holiday_pay": future_holiday_pay,
+        "forecast_holiday_days": forecast_holiday_days,
     }
 
 
@@ -3352,7 +3483,7 @@ class DashboardBudgetWidget(QWidget):
         header.setSpacing(10)
         root.addLayout(header)
 
-        self.total_label = QLabel("Samlede udgifter: 0 kr.")
+        self.total_label = QLabel("Samlede udgifter pr. måned: 0 kr.")
         self.total_label.setStyleSheet("color: #111827; font-size: 16pt; font-weight: 900;")
         header.addWidget(self.total_label, 1)
 
@@ -3378,7 +3509,7 @@ class DashboardBudgetWidget(QWidget):
     def update_budget(self, categories):
         clear_layout(self.body_layout)
         budget_total = sum(item["beløb"] for item in categories)
-        self.total_label.setText(f"Samlede udgifter: {format_money(budget_total)}")
+        self.total_label.setText(f"Samlede udgifter pr. måned: {format_money(budget_total)}")
 
         if not categories:
             empty = QLabel("Ingen budgetposter endnu.")
@@ -3499,10 +3630,11 @@ class DashboardSalaryCalculatorWidget(QWidget):
             self.settings.get("skat", 0),
             self.settings.get("fradrag", 0),
             self.settings.get("am bidrag", 0),
+            settings=self.settings,
         )
         self.net_label.setText(f"Netto løn: {format_money(breakdown['netto'])}")
         self.detail_label.setText(
-            f"Brutto: {format_money(gross)} · Skat: {format_number(float(self.settings.get('skat', 0)) * 100)}%"
+            f"Brutto: {format_money(gross)} · Pension: {format_number(ft.get_pension_contribution_rate(self.settings) * 100)}% · Skat: {format_number(float(self.settings.get('skat', 0)) * 100)}%"
         )
 
     def _gross_value(self):
@@ -3566,6 +3698,8 @@ class DashboardHolidayPayWidget(QWidget):
 
         self.days_chip = self._chip("Feriedage", "-", "#2563eb")
         self.info_row.addWidget(self.days_chip, 0, Qt.AlignLeft)
+        self.forecast_days_chip = self._chip("Forventet feriedage om ½ år", "-", "#0f766e")
+        self.info_row.addWidget(self.forecast_days_chip, 0, Qt.AlignLeft)
         self.info_row.addStretch()
 
         self.detail_label = QLabel()
@@ -3594,7 +3728,7 @@ class DashboardHolidayPayWidget(QWidget):
     def _chip(self, title, value, accent):
         chip = QFrame()
         chip.setObjectName("Card")
-        chip.setFixedSize(190, 82)
+        chip.setFixedSize(210, 88)
         chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         chip.setStyleSheet(
             f"""
@@ -3620,6 +3754,7 @@ class DashboardHolidayPayWidget(QWidget):
 
         title_label = QLabel(title)
         title_label.setStyleSheet("color: #64748b; font-size: 8.5pt; font-weight: 800;")
+        title_label.setWordWrap(True)
         value_label = QLabel(value)
         value_label.setStyleSheet("color: #0f172a; font-size: 12pt; font-weight: 900;")
         value_label.setMinimumHeight(28)
@@ -3633,6 +3768,7 @@ class DashboardHolidayPayWidget(QWidget):
         configured = bool(calculation and calculation.get("configured"))
         self.details_button.setVisible(configured)
         self.days_chip.setVisible(configured)
+        self.forecast_days_chip.setVisible(configured)
         self.total_amount_label.setVisible(configured)
         self.setup_button.setVisible(not configured)
 
@@ -3658,6 +3794,10 @@ class DashboardHolidayPayWidget(QWidget):
             f"• Beregnet fra {format_long_date(calculation['calculation_start'])} til {format_long_date(calculation['calculation_end'])}."
         )
         self.days_chip.value_label.setText(f"{format_number(calculation['holiday_days'])} dage")
+        forecast_days = calculation.get("forecast_holiday_days")
+        self.forecast_days_chip.value_label.setText(
+            f"{format_number(forecast_days)} dage" if forecast_days is not None else "N/A"
+        )
 
     def _open_details(self):
         if self.calculation and self.calculation.get("configured"):
@@ -4501,18 +4641,18 @@ class DashboardPage(CompactScrollPage):
 
         summary = current_period_summary(self.data, self.settings)
         forecast = ft.calculate_salary_forecast(self.data, self.settings)
-        other_income = ft.get_other_income(self.settings)
-        budget_expenses = ft.calculate_budget_expenses(self.settings)
-        previous_period = self._last_complete_period_info(other_income, budget_expenses)
+        other_income = summary.get("other_income", ft.get_other_income(self.settings, summary["periode_start"], summary["periode_slut"]))
+        budget_expenses = summary.get("budget_expenses", ft.calculate_budget_expenses(self.settings, summary["periode_start"], summary["periode_slut"]))
+        previous_period = self._last_complete_period_info()
 
         total_now = summary["netto"] + other_income
-        available_now = ft.calculate_disposable_income(total_now, self.settings)
+        available_now = total_now - budget_expenses
         estimated_total = forecast.get("estimated_total_income") if forecast else None
         estimated_available = forecast.get("estimated_disposable_income") if forecast else None
         estimated_netto = forecast.get("estimated_netto") if forecast else None
         estimated_brutto = forecast.get("estimated_brutto") if forecast else None
         estimated_hours = forecast.get("estimated_hours") if forecast else None
-        disposable_goal = ft.get_disposable_income_goal(self.settings)
+        disposable_goal = summary.get("disposable_goal", ft.get_disposable_income_goal(self.settings, summary["periode_start"], summary["periode_slut"]))
         show_other_income = other_income > 0
         self._arrange_cards(show_other_income)
         today = datetime.now().date()
@@ -4636,11 +4776,19 @@ class DashboardPage(CompactScrollPage):
         self.dashboard_container.updateGeometry()
         self._sync_compact_body_size()
 
-    def _last_complete_period_info(self, other_income, budget_expenses):
+    def _last_complete_period_info(self):
         _, complete_periods = build_periods(self.data, self.settings)
         if not complete_periods:
             return None
         period = complete_periods[-1]
+        other_income = period.get(
+            "anden_indkomst",
+            ft.get_other_income(self.settings, period["periode_start"], period["periode_slut"]),
+        )
+        budget_expenses = period.get(
+            "budget_expenses",
+            ft.calculate_budget_expenses(self.settings, period["periode_start"], period["periode_slut"]),
+        )
         total_income = period["netto"] + other_income
         return {
             "netto": period["netto"],
@@ -4734,6 +4882,7 @@ class DashboardPage(CompactScrollPage):
     def _fill_breakdown(self, breakdown):
         rows = [
             ("Brutto løn", format_money(breakdown["brutto"])),
+            ("Pension", f"-{format_money(breakdown.get('pension', 0))}"),
             ("AM-bidrag", f"-{format_money(breakdown['am_bidrag'])}"),
             ("Efter AM-bidrag", format_money(breakdown["efter_am"])),
             ("Fradrag", format_money(breakdown["fradrag"])),
@@ -4769,6 +4918,7 @@ class ShiftEntryDialog(QDialog):
         super().__init__(parent)
         self.window = window
         self.saved_date = None
+        self.saved_id = None
 
         self.setModal(True)
         self.setWindowTitle("Tilføj vagt")
@@ -4897,12 +5047,58 @@ class ShiftEntryDialog(QDialog):
             return
 
         brutto = hours * rate
-        netto = ft.calculate_salary_breakdown_from_brutto(brutto)["netto"] if has_required_settings(self.settings) else None
+        netto = None
+        if has_required_settings(self.settings):
+            try:
+                selected_date = parse_date_text(self.date_edit.text())
+                period_start, period_end = ft.get_salary_period_for_date(selected_date, settings=self.settings)
+                netto = ft.calculate_salary_breakdown_from_brutto(
+                    brutto,
+                    self.settings,
+                    period_start,
+                    period_end,
+                )["netto"]
+            except ValueError:
+                netto = ft.calculate_salary_breakdown_from_brutto(brutto, self.settings)["netto"]
         pause_text = f" | Pause: {format_pause_minutes(pause)} min." if pause > 0 else ""
         self.summary_label.setText(
             f"Vagt: {format_number(hours)} betalte timer á {format_money(rate)}{pause_text}\n"
             f"Brutto: {format_money(brutto)}  |  Netto: {format_money(netto)}"
         )
+
+    def _existing_date_choice(self, selected_date, existing_rows):
+        date_rows = rows_on_date(existing_rows, selected_date)
+        if not date_rows:
+            return "add"
+
+        if any(row.get("is_day_off") for row in date_rows):
+            QMessageBox.warning(
+                self,
+                "Dato er fridag",
+                f"{format_date(selected_date)} er markeret som fridag. Fjern fridagen før du indberetter en vagt på datoen.",
+            )
+            return None
+
+        message = QMessageBox(self)
+        message.setWindowTitle("Dato findes allerede")
+        message.setWindowIcon(app_icon())
+        message.setText(
+            f"{format_date(selected_date)} findes allerede i databasen.\n\n"
+            "Vil du overskrive dagens vagter eller tilføje en ny vagt?"
+        )
+        overwrite_button = message.addButton("Overskriv vagt", QMessageBox.AcceptRole)
+        add_button = message.addButton("Tilføj ny vagt", QMessageBox.ActionRole)
+        cancel_button = message.addButton("Annuller", QMessageBox.RejectRole)
+        message.exec_()
+
+        clicked = message.clickedButton()
+        if clicked == overwrite_button:
+            return "overwrite"
+        if clicked == add_button:
+            return "add"
+        if clicked == cancel_button:
+            return None
+        return None
 
     def _save_entry(self):
         try:
@@ -4922,24 +5118,25 @@ class ShiftEntryDialog(QDialog):
             return
 
         key = date_to_key(selected_date)
-        exists = any(key in entry for entry in ft.load_data())
-        if exists:
-            answer = QMessageBox.question(
-                self,
-                "Overskriv registrering",
-                f"Der findes allerede en registrering for {key}. Vil du overskrive den med en vagt?",
-            )
-            if answer != QMessageBox.Yes:
-                return
+        existing_rows = entry_rows(ft.load_data(), self.settings)
+        choice = self._existing_date_choice(selected_date, existing_rows)
+        if choice is None:
+            return
 
-        upsert_entry(
-            selected_date,
-            duration,
-            rate,
-            start=start_time,
-            slut=end_time,
-            pause=pause,
-        )
+        try:
+            self.saved_id = upsert_entry(
+                selected_date,
+                duration,
+                rate,
+                start=start_time,
+                slut=end_time,
+                pause=pause,
+                entry_settings=self.settings,
+                replace_date=choice == "overwrite",
+            )
+        except ValueError as error:
+            QMessageBox.warning(self, "Vagt kan ikke gemmes", str(error))
+            return
         self.saved_date = selected_date
 
         show_success_message(
@@ -4955,6 +5152,7 @@ class DayOffEntryDialog(QDialog):
         super().__init__(parent)
         self.window = window
         self.saved_date = None
+        self.saved_id = None
 
         self.setModal(True)
         self.setWindowTitle("Indberet fridag")
@@ -5001,17 +5199,20 @@ class DayOffEntryDialog(QDialog):
             return
 
         key = date_to_key(selected_date)
-        exists = any(key in entry for entry in ft.load_data())
-        if exists:
-            answer = QMessageBox.question(
+        existing_rows = entry_rows(ft.load_data(), self.window.settings)
+        if rows_on_date(existing_rows, selected_date):
+            QMessageBox.warning(
                 self,
-                "Overskriv registrering",
-                f"Der findes allerede en registrering for {key}. Vil du overskrive den med en fridag?",
+                "Dato findes allerede",
+                f"{format_date(selected_date)} findes allerede i databasen. Fjern registreringerne på datoen før du markerer den som fridag.",
             )
-            if answer != QMessageBox.Yes:
-                return
+            return
 
-        upsert_day_off(selected_date)
+        try:
+            self.saved_id = upsert_day_off(selected_date, entry_settings=self.window.settings)
+        except ValueError as error:
+            QMessageBox.warning(self, "Fridag kan ikke gemmes", str(error))
+            return
         self.saved_date = selected_date
         show_success_message(self, "Fridag gemt", f"{key} blev gemt som fridag.")
         self.accept()
@@ -5070,9 +5271,12 @@ class CalculatorPage(BasePage):
         self.tax_field.textChanged.connect(self._calculate)
         self.am_field = make_text_input("8", "fx 8")
         self.am_field.textChanged.connect(self._calculate)
-        tax_form.addRow("Fradrag", self.fradrag_field)
+        self.pension_field = make_text_input("0", "fx 5")
+        self.pension_field.textChanged.connect(self._calculate)
+        tax_form.addRow("Fradrag pr. måned", self.fradrag_field)
         tax_form.addRow("Skat %", self.tax_field)
         tax_form.addRow("AM-bidrag %", self.am_field)
+        tax_form.addRow("Pension %", self.pension_field)
 
         tax_note = QLabel("Du kan se dine skatteoplysninger på borger.dk -> TastSelv.")
         tax_note.setObjectName("PageSubtitle")
@@ -5095,6 +5299,7 @@ class CalculatorPage(BasePage):
             set_field_number(self.fradrag_field, float(self.settings.get("fradrag", 0)))
             set_field_number(self.tax_field, float(self.settings.get("skat", 0)) * 100)
             set_field_number(self.am_field, float(self.settings.get("am bidrag", 0)) * 100)
+            set_field_number(self.pension_field, ft.get_pension_contribution_rate(self.settings) * 100)
         self._calculate()
 
     def _gross(self):
@@ -5111,6 +5316,8 @@ class CalculatorPage(BasePage):
             am_value = parse_positive_number(self.am_field, "AM-bidrag", allow_zero=True)
             tax_rate = tax_value / 100 if tax_value > 1 else tax_value
             am_rate = am_value / 100 if am_value > 1 else am_value
+            pension_value = parse_positive_number(self.pension_field, "Pension", allow_zero=True)
+            pension_rate = pension_value / 100 if pension_value > 1 else pension_value
             fradrag = parse_positive_number(self.fradrag_field, "Fradrag", allow_zero=True)
         except ValueError as error:
             self.net_result.set_values("N/A", str(error))
@@ -5122,6 +5329,7 @@ class CalculatorPage(BasePage):
             tax_rate,
             fradrag,
             am_rate,
+            settings={ft.PENSION_CONTRIBUTION_KEY: pension_rate},
         )
         self.net_result.set_values(
             format_money(breakdown["netto"]),
@@ -5129,6 +5337,7 @@ class CalculatorPage(BasePage):
         )
         rows = [
             ("Brutto løn", format_money(breakdown["brutto"])),
+            ("Pension", f"-{format_money(breakdown.get('pension', 0))}"),
             ("AM-bidrag", f"-{format_money(breakdown['am_bidrag'])}"),
             ("Efter AM-bidrag", format_money(breakdown["efter_am"])),
             ("Fradrag", format_money(breakdown["fradrag"])),
@@ -5217,7 +5426,11 @@ class PayrollSlipDialog(QDialog):
         )
         layout.addLayout(title_box, 1)
 
-        total = self.period["netto"] + ft.get_other_income(self.settings)
+        other_income = self.period.get(
+            "anden_indkomst",
+            ft.get_other_income(self.settings, self.period["periode_start"], self.period["periode_slut"]),
+        )
+        total = self.period["netto"] + other_income
         total_box = QVBoxLayout()
         total_box.setSpacing(4)
         total_box.addWidget(self._label("Total udbetalt", "color: #64748b; font-weight: 850;"))
@@ -5243,6 +5456,7 @@ class PayrollSlipDialog(QDialog):
             ("Betalte timer", f"{format_number(self.period['timer'])} t.", "#7c3aed"),
             ("Antal vagter", str(shift_count), "#475569"),
             ("Fridage", str(day_off_count), DAY_OFF_ACCENT),
+            ("Pension", format_money(self.period.get("pension", 0)), "#0f766e"),
             ("Gns. timeløn", format_money(avg_rate), "#0f766e"),
             ("Timer før pause", f"{format_number(duration)} t.", "#2563eb"),
             ("Pause", f"{format_pause_minutes(pause)} min.", "#d97706"),
@@ -5255,10 +5469,14 @@ class PayrollSlipDialog(QDialog):
         panel, layout = make_panel("Beregning")
         root.addWidget(panel)
 
-        other_income = ft.get_other_income(self.settings)
+        other_income = self.period.get(
+            "anden_indkomst",
+            ft.get_other_income(self.settings, self.period["periode_start"], self.period["periode_slut"]),
+        )
         total = self.period["netto"] + other_income
         rows = [
             ("Brutto løn", format_money(self.period["brutto"])),
+            ("Pension", f"-{format_money(self.period.get('pension', 0))}"),
             ("AM-bidrag", f"-{format_money(self.period['am_bidrag'])}"),
             ("Efter AM-bidrag", format_money(self.period.get("efter_am"))),
             ("Fradrag", format_money(self.period.get("fradrag"))),
@@ -5332,9 +5550,11 @@ class PaymentsPage(BasePage):
         _, complete_periods = build_periods(self.data, self.settings)
         self.payments = list(reversed(complete_periods))
         self.payments_table.setRowCount(len(self.payments))
-        other_income = ft.get_other_income(self.settings) if has_required_settings(self.settings) else 0
-
         for row_index, period in enumerate(self.payments):
+            other_income = period.get(
+                "anden_indkomst",
+                ft.get_other_income(self.settings, period["periode_start"], period["periode_slut"]) if has_required_settings(self.settings) else 0,
+            )
             total = period["netto"] + other_income
             shift_count = int(period.get("vagter", 0))
             if not shift_count:
@@ -5526,8 +5746,8 @@ class StatisticsPage(BasePage):
             ),
             MetricCard(
                 "Trukket i alt",
-                format_money(stats["deductions"]["am_bidrag"] + stats["deductions"]["skat"]),
-                "AM-bidrag og skat",
+                format_money(stats["deductions"].get("pension", 0) + stats["deductions"]["am_bidrag"] + stats["deductions"]["skat"]),
+                "Pension, AM-bidrag og skat",
             ),
         ]
         for index, card in enumerate(cards):
@@ -5675,9 +5895,10 @@ class StatisticsPage(BasePage):
             "Fradrag",
             ["Måling", "Beløb"],
             [
+                ["Samlet pension", format_money(stats["deductions"].get("pension", 0))],
                 ["Samlet AM-bidrag", format_money(stats["deductions"]["am_bidrag"])],
                 ["Samlet skat", format_money(stats["deductions"]["skat"])],
-                ["Samlet trukket", format_money(stats["deductions"]["am_bidrag"] + stats["deductions"]["skat"])],
+                ["Samlet trukket", format_money(stats["deductions"].get("pension", 0) + stats["deductions"]["am_bidrag"] + stats["deductions"]["skat"])],
             ],
         )
 
@@ -5693,23 +5914,250 @@ class StatisticsPage(BasePage):
                 ["Estimerede timer", format_number(forecast["estimated_hours"])],
                 ["Forventet løn", f"{format_money(forecast['estimated_brutto'])} / {format_money(forecast['estimated_netto'])}"],
                 ["Forventet total inkl. anden indkomst", format_money(forecast["estimated_total_income"])],
-                ["Samlede udgifter", format_money(forecast["budget_expenses"])],
+                ["Udgifter i lønperioden", format_money(forecast["budget_expenses"])],
                 ["Forventet rådighedsbeløb", format_money(forecast["estimated_disposable_income"])],
             ]
         self._add_table("Prognose", ["Måling", "Værdi"], rows)
+
+
+class ShiftBulkEditDialog(QDialog):
+    def __init__(self, parent, window, rows):
+        super().__init__(parent)
+        self.window = window
+        self.rows = [dict(row) for row in rows]
+        self.saved_ids = []
+
+        count = len(self.rows)
+        self.setModal(True)
+        self.setWindowTitle(f"Rediger {count} markeret")
+        self.setWindowIcon(app_icon())
+        self.setMinimumSize(520, 620)
+        self.resize(620, 720)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(14)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        root.addWidget(scroll, 1)
+
+        body = QWidget()
+        scroll.setWidget(body)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(14)
+
+        shift_panel, shift_layout = make_panel("Vagt")
+        body_layout.addWidget(shift_panel)
+        shift_form = QFormLayout()
+        shift_form.setVerticalSpacing(12)
+        shift_layout.addLayout(shift_form)
+
+        self.date_field = make_text_input(placeholder="Behold datoer")
+        self.hours_field = make_text_input(placeholder="Behold timer")
+        self.start_field = make_text_input(placeholder="Behold start")
+        self.end_field = make_text_input(placeholder="Behold slut")
+        self.rate_field = make_text_input(placeholder="Behold timeløn")
+        self.pause_field = make_text_input(placeholder="Behold pause")
+
+        shift_form.addRow("Dato", self.date_field)
+        shift_form.addRow("Timer før pause", self.hours_field)
+        shift_form.addRow("Start", self.start_field)
+        shift_form.addRow("Slut", self.end_field)
+        shift_form.addRow("Timeløn", self.rate_field)
+        shift_form.addRow("Pause (minutter)", self.pause_field)
+
+        settings_panel, settings_layout = make_panel("Gemte indstillinger")
+        body_layout.addWidget(settings_panel)
+        settings_form = QFormLayout()
+        settings_form.setVerticalSpacing(12)
+        settings_layout.addLayout(settings_form)
+
+        self.tax_field = make_text_input(placeholder="Behold skat")
+        self.fradrag_field = make_text_input(placeholder="Behold fradrag")
+        self.am_field = make_text_input(placeholder="Behold AM-bidrag")
+        self.pension_field = make_text_input(placeholder="Behold pension")
+        self.other_income_field = make_text_input(placeholder="Behold anden indkomst")
+        self.budget_field = make_text_input(placeholder="Behold budget")
+        self.goal_field = make_text_input(placeholder="Behold rådighedsmål")
+
+        settings_form.addRow("Skat %", self.tax_field)
+        settings_form.addRow("Fradrag pr. måned", self.fradrag_field)
+        settings_form.addRow("AM-bidrag %", self.am_field)
+        settings_form.addRow("Eget pensionsbidrag %", self.pension_field)
+        settings_form.addRow("Anden indkomst pr. måned", self.other_income_field)
+        settings_form.addRow("Budget pr. måned", self.budget_field)
+        settings_form.addRow("Rådighedsmål pr. måned", self.goal_field)
+
+        note = QLabel(
+            "Tomme felter bevarer den enkelte vagts værdi. Fradrag, budget, anden indkomst og rådighedsmål gemmes som månedstal på vagten."
+        )
+        note.setObjectName("PageSubtitle")
+        note.setWordWrap(True)
+        body_layout.addWidget(note)
+
+        button_row = QHBoxLayout()
+        root.addLayout(button_row)
+        save_button = QPushButton(f"Gem {count} markeret")
+        save_button.clicked.connect(self._save)
+        button_row.addWidget(save_button)
+        cancel_button = QPushButton("Annuller")
+        cancel_button.setObjectName("SecondaryButton")
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(cancel_button)
+        button_row.addStretch()
+
+        self._fill_common_values()
+
+    def _common(self, values):
+        cleaned = list(values)
+        if not cleaned:
+            return None
+        first = cleaned[0]
+        if all(value == first for value in cleaned):
+            return first
+        return None
+
+    def _fill_number_if_common(self, field, values, decimals=2, scale=1.0):
+        value = self._common(values)
+        if value is None:
+            return
+        set_field_number(field, float(value) * scale, decimals=decimals)
+
+    def _fill_common_values(self):
+        common_date = self._common([row["dato"] for row in self.rows])
+        if common_date is not None:
+            self.date_field.setText(format_date(common_date))
+
+        work_rows = [row for row in self.rows if not row.get("is_day_off")]
+        self._fill_number_if_common(self.hours_field, [row.get("varighed", row.get("timer", 0)) for row in work_rows])
+        common_start = self._common([row.get("start", "") for row in work_rows])
+        common_end = self._common([row.get("slut", "") for row in work_rows])
+        if common_start:
+            self.start_field.setText(str(common_start))
+        if common_end:
+            self.end_field.setText(str(common_end))
+        self._fill_number_if_common(self.rate_field, [row.get("timeløn", 0) for row in work_rows])
+        self._fill_number_if_common(self.pause_field, [pause_minutes(row.get("pause", 0)) for row in work_rows])
+
+        settings_rows = [ft.normalize_settings(row.get("settings", self.window.settings)) for row in self.rows]
+        self._fill_number_if_common(self.tax_field, [settings.get("skat", 0) for settings in settings_rows], scale=100)
+        self._fill_number_if_common(self.fradrag_field, [settings.get("fradrag", 0) for settings in settings_rows])
+        self._fill_number_if_common(self.am_field, [settings.get("am bidrag", 0) for settings in settings_rows], scale=100)
+        self._fill_number_if_common(self.pension_field, [ft.get_pension_contribution_rate(settings) for settings in settings_rows], scale=100)
+        self._fill_number_if_common(self.other_income_field, [ft.get_other_income(settings) for settings in settings_rows])
+        self._fill_number_if_common(self.budget_field, [ft.calculate_budget_expenses(settings) for settings in settings_rows])
+        self._fill_number_if_common(self.goal_field, [ft.get_disposable_income_goal(settings) for settings in settings_rows])
+
+    def _optional_number(self, field, label, allow_zero=True):
+        if not field.text().strip():
+            return None
+        return parse_positive_number(field, label, allow_zero=allow_zero)
+
+    def _updated_settings(self, current_settings):
+        settings = ft.settings_snapshot(current_settings)
+        tax = self._optional_number(self.tax_field, "Skat", allow_zero=True)
+        fradrag = self._optional_number(self.fradrag_field, "Fradrag", allow_zero=True)
+        am = self._optional_number(self.am_field, "AM-bidrag", allow_zero=True)
+        pension = self._optional_number(self.pension_field, "Eget pensionsbidrag", allow_zero=True)
+        other_income = self._optional_number(self.other_income_field, "Anden indkomst", allow_zero=True)
+        budget = self._optional_number(self.budget_field, "Budget", allow_zero=True)
+        goal = self._optional_number(self.goal_field, "Rådighedsmål", allow_zero=True)
+
+        if tax is not None:
+            settings["skat"] = tax / 100 if tax > 1 else tax
+        if fradrag is not None:
+            settings["fradrag"] = fradrag
+        if am is not None:
+            settings["am bidrag"] = am / 100 if am > 1 else am
+        if pension is not None:
+            settings[ft.PENSION_CONTRIBUTION_KEY] = pension / 100 if pension > 1 else pension
+        if other_income is not None:
+            settings["anden indkomst netto"] = other_income
+        if budget is not None:
+            settings["budget kategorier"] = (
+                [{"navn": "Faste udgifter", "beløb": budget}]
+                if budget > 0
+                else []
+            )
+            settings["udgifter"] = budget
+        if goal is not None:
+            settings["ønsket rådighedsbeløb"] = goal
+
+        return ft.settings_snapshot(settings)
+
+    def _save(self):
+        try:
+            selected_date = parse_date_text(self.date_field.text()) if self.date_field.text().strip() else None
+            duration_value = self._optional_number(self.hours_field, "Timer", allow_zero=False)
+            rate_value = self._optional_number(self.rate_field, "Timeløn", allow_zero=False)
+            pause_value = self._optional_number(self.pause_field, "Pause", allow_zero=True)
+            pause_hours_value = None if pause_value is None else max(0.0, pause_value / 60)
+
+            start = self.start_field.text().strip()
+            end = self.end_field.text().strip()
+            if bool(start) != bool(end):
+                raise ValueError("Start og slut skal enten begge udfyldes eller begge være tomme.")
+            duration_from_time = calculate_hours_from_times(start, end) if start and end else None
+
+            target_ids = {str(row.get("id")) for row in self.rows}
+            all_rows = entry_rows(ft.load_data(), self.window.settings)
+            updated_rows = []
+            for row in all_rows:
+                if str(row.get("id")) not in target_ids:
+                    updated_rows.append(row)
+                    continue
+
+                updated = dict(row)
+                if selected_date is not None:
+                    updated["dato"] = selected_date
+                updated["settings"] = self._updated_settings(updated.get("settings", self.window.settings))
+
+                if not updated.get("is_day_off"):
+                    if duration_from_time is not None:
+                        updated["start"] = start
+                        updated["slut"] = end
+                        updated["varighed"] = duration_from_time
+                    elif duration_value is not None:
+                        updated["varighed"] = duration_value
+                        updated.pop("start", None)
+                        updated.pop("slut", None)
+
+                    if pause_hours_value is not None:
+                        updated["pause"] = pause_hours_value
+                    if rate_value is not None:
+                        updated["timeløn"] = rate_value
+
+                    updated["timer"] = max(0.0, float(updated.get("varighed", 0) or 0) - float(updated.get("pause", 0) or 0))
+                    if updated["timer"] <= 0:
+                        raise ValueError("Pause må ikke være lige så lang som eller længere end vagten.")
+                    updated["brutto"] = updated["timer"] * float(updated.get("timeløn", 0) or 0)
+
+                updated_rows.append(updated)
+
+            save_entry_rows(updated_rows)
+            self.saved_ids = list(target_ids)
+            self.accept()
+        except ValueError as error:
+            QMessageBox.warning(self, "Ugyldig ændring", str(error))
+
 
 class HistoryPage(BasePage):
     def __init__(self, window):
         super().__init__(
             window,
             "Vagter",
-            "Alle registrerede vagter og fridage sorteret med nyeste først. Tilføj, rediger, marker eller slet registreringer her.",
+            "Alle registrerede vagter og fridage sorteret med nyeste først. Marker rækker for at redigere eller slette flere på én gang.",
         )
         self.rows = []
         self.selected_original_date = None
+        self.selected_original_id = None
         self.selected_has_time = False
         self.selected_is_day_off = False
         self.pending_select_date = None
+        self.pending_select_id = None
         self.pending_select_row = None
 
         top = QHBoxLayout()
@@ -5743,6 +6191,10 @@ class HistoryPage(BasePage):
         day_off_button.clicked.connect(self._add_day_off)
         toolbar.addWidget(day_off_button)
         toolbar.addStretch()
+        self.edit_checked_button = QPushButton("Rediger 0 markeret")
+        self.edit_checked_button.clicked.connect(self._edit_checked_rows)
+        self.edit_checked_button.hide()
+        toolbar.addWidget(self.edit_checked_button)
         self.delete_checked_button = QPushButton("Slet markerede")
         self.delete_checked_button.setObjectName("SecondaryButton")
         self.delete_checked_button.clicked.connect(self._delete_checked_rows)
@@ -5753,10 +6205,12 @@ class HistoryPage(BasePage):
         setup_table(self.table, ["", "Dato", "Timer", "Pause", "Netto"])
         setup_shift_table_columns(self.table, 2, check_column=0)
         self.table.itemSelectionChanged.connect(self._load_selected_row)
+        self.table.cellClicked.connect(self._toggle_row_check)
         layout.addWidget(self.table)
 
         edit_panel, edit_layout = make_panel("Rediger valgt registrering")
         self.edit_panel = edit_panel
+        self.edit_panel.hide()
         self.edit_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.edit_panel.setFixedHeight(HISTORY_PANEL_HEIGHT)
         content.addWidget(edit_panel, 1)
@@ -5805,7 +6259,7 @@ class HistoryPage(BasePage):
         self._update_edit_mode(False)
 
     def refresh(self):
-        previous_selected_date = self.selected_original_date
+        previous_selected_id = self.selected_original_id
         self.rows = entry_rows(self.data, self.settings)
         work_count = count_work_rows(self.rows)
         day_off_count = count_day_off_rows(self.rows)
@@ -5834,10 +6288,11 @@ class HistoryPage(BasePage):
         setup_shift_table_columns(self.table, 2, check_column=0)
         self.table.blockSignals(False)
         self._update_checked_rows()
-        self._select_after_refresh(previous_selected_date)
+        self._select_after_refresh(previous_selected_id)
 
     def _set_check_widget(self, row_index):
         checkbox = VisibleCheckBox()
+        checkbox.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         checkbox.stateChanged.connect(self._update_checked_rows)
 
         wrapper = QWidget()
@@ -5848,35 +6303,37 @@ class HistoryPage(BasePage):
         layout.addWidget(checkbox)
         self.table.setCellWidget(row_index, 0, wrapper)
 
-    def _row_index_for_date(self, target_date):
-        if target_date is None:
+    def _row_index_for_id(self, target_id):
+        if target_id is None:
             return None
         for row_index, row in enumerate(self.rows):
-            if row["dato"] == target_date:
+            if str(row.get("id")) == str(target_id):
                 return row_index
         return None
 
-    def _select_after_refresh(self, previous_selected_date):
+    def _select_after_refresh(self, previous_selected_id):
         self.table.clearSelection()
 
         if not self.rows:
             self.pending_select_date = None
+            self.pending_select_id = None
             self.pending_select_row = None
             self._clear_edit_fields()
             return
 
-        selected_index = self._row_index_for_date(self.pending_select_date)
+        selected_index = self._row_index_for_id(self.pending_select_id)
 
         if selected_index is None and self.pending_select_row is not None:
             selected_index = min(self.pending_select_row, len(self.rows) - 1)
 
         if selected_index is None:
-            selected_index = self._row_index_for_date(previous_selected_date)
+            selected_index = self._row_index_for_id(previous_selected_id)
 
         if selected_index is None:
             selected_index = 0
 
         self.pending_select_date = None
+        self.pending_select_id = None
         self.pending_select_row = None
         self.table.selectRow(selected_index)
 
@@ -5891,22 +6348,55 @@ class HistoryPage(BasePage):
 
     def _update_checked_rows(self, state=None):
         count = len(self._checked_row_indexes())
+        self.edit_checked_button.setVisible(count > 0)
         self.delete_checked_button.setVisible(count > 0)
         if count == 1:
+            self.edit_checked_button.setText("Rediger 1 markeret")
             self.delete_checked_button.setText("Slet 1 markeret")
         else:
+            self.edit_checked_button.setText(f"Rediger {count} markerede")
             self.delete_checked_button.setText(f"Slet {count} markerede")
+
+    def _toggle_row_check(self, row_index, column_index):
+        if row_index < 0 or row_index >= self.table.rowCount():
+            return
+        wrapper = self.table.cellWidget(row_index, 0)
+        checkbox = wrapper.findChild(QCheckBox) if wrapper is not None else None
+        if checkbox is None:
+            return
+        checkbox.blockSignals(True)
+        checkbox.setChecked(not checkbox.isChecked())
+        checkbox.blockSignals(False)
+        self._update_checked_rows()
 
     def _add_shift(self):
         dialog = ShiftEntryDialog(self, self.window)
         if dialog.exec_() == QDialog.Accepted and dialog.saved_date is not None:
             self.pending_select_date = dialog.saved_date
+            self.pending_select_id = dialog.saved_id
             self.window.refresh_all()
 
     def _add_day_off(self):
         dialog = DayOffEntryDialog(self, self.window)
         if dialog.exec_() == QDialog.Accepted and dialog.saved_date is not None:
             self.pending_select_date = dialog.saved_date
+            self.pending_select_id = dialog.saved_id
+            self.window.refresh_all()
+
+    def _edit_checked_rows(self):
+        checked_indexes = self._checked_row_indexes()
+        checked_rows = [
+            self.rows[row_index]
+            for row_index in checked_indexes
+            if 0 <= row_index < len(self.rows)
+        ]
+        if not checked_rows:
+            return
+
+        dialog = ShiftBulkEditDialog(self, self.window, checked_rows)
+        if dialog.exec_() == QDialog.Accepted:
+            self.pending_select_id = dialog.saved_ids[0] if dialog.saved_ids else None
+            self.pending_select_row = min(checked_indexes)
             self.window.refresh_all()
 
     def _update_edit_mode(self, has_time):
@@ -5927,6 +6417,7 @@ class HistoryPage(BasePage):
 
         row = self.rows[selected]
         self.selected_original_date = row["dato"]
+        self.selected_original_id = row.get("id")
         self.selected_is_day_off = bool(row.get("is_day_off"))
 
         has_time = bool(row.get("start") and row.get("slut")) and not self.selected_is_day_off
@@ -5958,6 +6449,7 @@ class HistoryPage(BasePage):
 
     def _clear_edit_fields(self):
         self.selected_original_date = None
+        self.selected_original_id = None
         self.selected_has_time = False
         self.selected_is_day_off = False
 
@@ -6032,7 +6524,7 @@ class HistoryPage(BasePage):
             )
 
     def _save_selected_row(self):
-        if self.selected_original_date is None:
+        if self.selected_original_id is None:
             QMessageBox.information(self, "Ingen registrering valgt", "Vælg først en registrering i tabellen.")
             return
 
@@ -6051,39 +6543,30 @@ class HistoryPage(BasePage):
             QMessageBox.warning(self, "Ugyldig ændring", str(error))
             return
 
-        target_exists = any(
-            parse_date_key(next(iter(entry.keys()))) == selected_date
-            for entry in self.data
-            if parse_date_key(next(iter(entry.keys()))) != self.selected_original_date
-        )
-
-        if target_exists:
-            answer = QMessageBox.question(
-                self,
-                "Overskriv eksisterende dato",
-                f"Der findes allerede en anden vagt for {format_date(selected_date)}. Vil du overskrive den?",
-            )
-            if answer != QMessageBox.Yes:
-                return
-
-        if self.selected_is_day_off:
-            upsert_day_off(selected_date, self.selected_original_date)
-        else:
-            upsert_entry(
-                selected_date,
-                duration,
-                rate,
-                self.selected_original_date,
-                start=start,
-                slut=slut,
-                pause=pause,
-            )
+        try:
+            if self.selected_is_day_off:
+                new_id = upsert_day_off(selected_date, self.selected_original_id, self.window.settings)
+            else:
+                new_id = upsert_entry(
+                    selected_date,
+                    duration,
+                    rate,
+                    self.selected_original_id,
+                    start=start,
+                    slut=slut,
+                    pause=pause,
+                    entry_settings=self.window.settings,
+                )
+        except ValueError as error:
+            QMessageBox.warning(self, "Registrering kan ikke gemmes", str(error))
+            return
 
         self.pending_select_date = selected_date
+        self.pending_select_id = new_id
         self.window.refresh_all()
 
     def _delete_selected_row(self):
-        if self.selected_original_date is None:
+        if self.selected_original_id is None:
             QMessageBox.information(self, "Ingen registrering valgt", "Vælg først en registrering i tabellen.")
             return
 
@@ -6098,7 +6581,7 @@ class HistoryPage(BasePage):
         if answer != QMessageBox.Yes:
             return
 
-        delete_entry(self.selected_original_date)
+        delete_entry(self.selected_original_id)
         self.pending_select_row = selected_index
         self.window.refresh_all()
 
@@ -6107,15 +6590,15 @@ class HistoryPage(BasePage):
         if not checked_indexes:
             return
 
-        checked_dates = {
-            self.rows[row_index]["dato"]
+        checked_ids = {
+            str(self.rows[row_index].get("id"))
             for row_index in checked_indexes
             if 0 <= row_index < len(self.rows)
         }
-        if not checked_dates:
+        if not checked_ids:
             return
 
-        count = len(checked_dates)
+        count = len(checked_ids)
         label = "registrering" if count == 1 else "registreringer"
         answer = QMessageBox.question(
             self,
@@ -6129,7 +6612,7 @@ class HistoryPage(BasePage):
         remaining_rows = [
             row
             for row in entry_rows(ft.load_data())
-            if row["dato"] not in checked_dates
+            if str(row.get("id")) not in checked_ids
         ]
         save_entry_rows(remaining_rows)
         self.pending_select_row = min(checked_indexes)
@@ -6196,7 +6679,7 @@ class BudgetPage(BasePage):
         super().__init__(
             window,
             "Budget",
-            "Planlæg faste udgifter i budgetposter, som bruges i rådighedsberegningerne.",
+            "Planlæg faste månedlige udgifter, som automatisk tilpasses lønperioden i rådighedsberegningerne.",
         )
         self.categories = []
 
@@ -6211,7 +6694,7 @@ class BudgetPage(BasePage):
         self.root.addWidget(table_panel, 1)
         header = QHBoxLayout()
         header.setSpacing(10)
-        intro = QLabel("Posterne her er dine faste udgifter for perioden.")
+        intro = QLabel("Posterne her er månedlige beløb. Lønix omregner dem automatisk til den valgte lønperiode.")
         intro.setObjectName("PageSubtitle")
         intro.setWordWrap(True)
         header.addWidget(intro, 1)
@@ -6241,7 +6724,7 @@ class BudgetPage(BasePage):
         return sum(item["beløb"] for item in self.categories)
 
     def _update_total_label(self):
-        self.total_expenses_label.setText(f"Samlede udgifter: {format_money(self._budget_total())}")
+        self.total_expenses_label.setText(f"Samlede udgifter pr. måned: {format_money(self._budget_total())}")
 
     def _fill_table(self):
         self.table.setRowCount(len(self.categories))
@@ -6288,7 +6771,7 @@ class SettingsPage(BasePage):
         super().__init__(
             window,
             "Indstillinger",
-            "Tilpas skat, anden indkomst, rådighedsmål og lønperiode. Faste udgifter styres på Budget-siden.",
+            "Tilpas skat, månedstal, rådighedsmål og lønperiode. Faste udgifter styres på Budget-siden.",
         )
 
         def add_settings_form(title):
@@ -6309,6 +6792,7 @@ class SettingsPage(BasePage):
         self.tax_field = make_text_input(placeholder="fx 49")
         self.fradrag_field = make_text_input(placeholder="fx 0")
         self.am_field = make_text_input(placeholder="fx 8")
+        self.pension_field = make_text_input(placeholder="fx 5")
         self.other_income_field = make_text_input(placeholder="fx 10742")
         self.disposable_goal_field = make_text_input(placeholder="fx 0")
         self.default_rate_field = make_text_input(placeholder="fx 150")
@@ -6323,12 +6807,13 @@ class SettingsPage(BasePage):
         self.employment_start_field = make_text_input(placeholder="dd-mm-åååå")
 
         tax_form.addRow("Skat %", self.tax_field)
-        tax_form.addRow("Fradrag", self.fradrag_field)
+        tax_form.addRow("Fradrag pr. måned", self.fradrag_field)
         tax_form.addRow("AM-bidrag %", self.am_field)
-        tax_form.addRow("Anden indkomst (netto)", self.other_income_field)
+        tax_form.addRow("Eget pensionsbidrag %", self.pension_field)
+        tax_form.addRow("Anden indkomst netto pr. måned", self.other_income_field)
         tax_form.addRow("Timeløn", self.default_rate_field)
 
-        goal_form.addRow("Ønsket rådighedsbeløb", self.disposable_goal_field)
+        goal_form.addRow("Ønsket rådighedsbeløb pr. måned", self.disposable_goal_field)
         goal_form.addRow("Lønperiode type", self.period_type_combo)
         goal_form.addRow("Lønperiode starter d.", self.start_day_field)
         goal_form.addRow("Lønperiode slutter d.", self.end_day_field)
@@ -6357,7 +6842,7 @@ class SettingsPage(BasePage):
 
         note = QLabel(
             "Du kan se dine skatteoplysninger på borger.dk -> TastSelv. "
-            "Ændringer påvirker beregninger og prognoser med det samme, men ændrer ikke dine gemte vagter."
+            "Eget pensionsbidrag trækkes fra brutto før AM-bidrag og skat. Fradrag, anden indkomst, budget og rådighedsmål indtastes som månedstal og tilpasses automatisk lønperioden."
         )
         note.setObjectName("PageSubtitle")
         note.setWordWrap(True)
@@ -6369,6 +6854,7 @@ class SettingsPage(BasePage):
             "skat": 0.39,
             "fradrag": 0,
             "am bidrag": 0.08,
+            ft.PENSION_CONTRIBUTION_KEY: 0,
             "anden indkomst netto": 0,
             "ønsket rådighedsbeløb": 0,
             "standard timeløn": 150,
@@ -6384,6 +6870,7 @@ class SettingsPage(BasePage):
         set_field_number(self.tax_field, float(settings.get("skat", 0)) * 100)
         set_field_number(self.fradrag_field, float(settings.get("fradrag", 0)))
         set_field_number(self.am_field, float(settings.get("am bidrag", 0)) * 100)
+        set_field_number(self.pension_field, ft.get_pension_contribution_rate(settings) * 100)
         set_field_number(self.other_income_field, ft.get_other_income(settings))
         set_field_number(self.disposable_goal_field, float(settings.get("ønsket rådighedsbeløb", 0)))
         set_field_number(self.default_rate_field, ft.get_default_hourly_rate(settings))
@@ -6429,6 +6916,7 @@ class SettingsPage(BasePage):
         try:
             tax = parse_positive_number(self.tax_field, "Skat", allow_zero=True)
             am = parse_positive_number(self.am_field, "AM-bidrag", allow_zero=True)
+            pension = parse_positive_number(self.pension_field, "Eget pensionsbidrag", allow_zero=True)
             holiday_rate = parse_positive_number(self.holiday_rate_field, "Feriegodtgørelse")
             employment_start_text = self.employment_start_field.text().strip()
             employment_start = parse_date_text(employment_start_text) if employment_start_text else None
@@ -6450,6 +6938,7 @@ class SettingsPage(BasePage):
                 "skat": tax / 100 if tax > 1 else tax,
                 "fradrag": parse_positive_number(self.fradrag_field, "Fradrag", allow_zero=True),
                 "am bidrag": am / 100 if am > 1 else am,
+                ft.PENSION_CONTRIBUTION_KEY: pension / 100 if pension > 1 else pension,
                 "anden indkomst netto": parse_positive_number(
                     self.other_income_field,
                     "Anden indkomst",
@@ -6492,17 +6981,17 @@ class IntroductionDialog(QDialog):
         self.setModal(True)
         self.setWindowTitle("Introduktion")
         self.setWindowIcon(app_icon())
-        self.setMinimumSize(760, 620)
-        self.resize(820, 680)
+        self.setMinimumSize(820, 700)
+        self.resize(900, 760)
 
         self.steps = [
             {
                 "key": "welcome",
                 "title": "Velkommen til Lønix",
                 "text": (
-                    "Denne korte introduktion hjælper dig med at sætte programmet op.\n\n"
-                    "Lønix bruges til at registrere vagter, beregne løn, holde styr på faste udgifter "
-                    "og se hvor meget du har til rådighed i lønperioden."
+                    "Denne korte introduktion hjælper dig med at sætte programmet op og forstå de vigtigste sider.\n\n"
+                    "Lønix registrerer vagter og fridage, beregner løn efter skat, pension og fradrag, "
+                    "holder styr på månedlige budgetposter og viser hvor meget du har til rådighed i lønperioden."
                 ),
             },
             {
@@ -6512,7 +7001,9 @@ class IntroductionDialog(QDialog):
                 "text": (
                     "Overblik viser den aktuelle lønperiode.\n\n"
                     "Siden består af widgets, som viser forskellige dele af din økonomi: løn, timer, budget, "
-                    "rådighedsbeløb, estimater og statistik.\n\n"
+                    "rådighedsbeløb, estimater, feriepenge, feriedage og statistik.\n\n"
+                    "Fradrag, budget, anden indkomst og rådighedsmål indtastes som månedstal. Lønix omregner dem "
+                    "automatisk til den valgte lønperiode i beregningerne.\n\n"
                     "Du kan personliggøre Overblik ved at trykke på widget-knappen øverst til højre. "
                     "Her kan du flytte, fjerne og tilføje widgets, så forsiden passer til det du bruger mest."
                 ),
@@ -6523,8 +7014,10 @@ class IntroductionDialog(QDialog):
                 "title": "Vagter",
                 "text": (
                     "Vagter viser alle registrerede vagter.\n\n"
-                    "Her kan du tilføje en ny vagt, indberette fridage, angive pause i minutter, rette fejl, "
-                    "markere flere registreringer eller slette en registrering."
+                    "Her kan du tilføje flere vagter på samme dag, indberette fridage, angive pause i minutter, "
+                    "rette fejl, markere flere registreringer og redigere eller slette dem samlet.\n\n"
+                    "En fridag blokerer for vagter på datoen, og vagter med start- og sluttid må ikke overlappe. "
+                    "Hver registrering gemmes med sit eget ID og en kopi af de indstillinger, der gjaldt på tidspunktet."
                 ),
             },
             {
@@ -6532,9 +7025,9 @@ class IntroductionDialog(QDialog):
                 "page": 2,
                 "title": "Budget",
                 "text": (
-                    "Budget er dine faste udgifter for perioden.\n\n"
+                    "Budget er dine faste månedlige udgifter.\n\n"
                     "Tilføj de poster du faktisk har, for eksempel husleje, abonnementer eller forsikring. "
-                    "Budgettet bruges til at beregne rådighedsbeløb."
+                    "Budgettet bruges til at beregne rådighedsbeløb, og beløbene skaleres automatisk til lønperioden."
                 ),
             },
             {
@@ -6543,8 +7036,9 @@ class IntroductionDialog(QDialog):
                 "title": "Lønsedler",
                 "text": (
                     "Lønsedler viser afsluttede lønperioder.\n\n"
-                    "Her kan du se vagter, betalte timer, pauser, brutto, netto og total udbetaling "
-                    "for tidligere perioder."
+                    "Her kan du se vagter, fridage, betalte timer, pauser, brutto, pension, skat, netto og total "
+                    "udbetaling for tidligere perioder. Gamle lønsedler bruger de gemte vagtindstillinger, så de ikke "
+                    "ændrer sig bare fordi du senere retter skat, fradrag, pension eller budget."
                 ),
             },
             {
@@ -6553,7 +7047,8 @@ class IntroductionDialog(QDialog):
                 "title": "Statistik",
                 "text": (
                     "Statistik samler nøgletal og grafer.\n\n"
-                    "Brug siden til at se udvikling i timer, løn og mønstre over tid."
+                    "Brug siden til at se gennemsnit, rekorder, lønperioder, udvikling, arbejdsmønstre, fradrag "
+                    "og prognoser over tid."
                 ),
             },
             {
@@ -6562,7 +7057,8 @@ class IntroductionDialog(QDialog):
                 "title": "Lønberegner",
                 "text": (
                     "Lønberegneren er til hurtige beregninger.\n\n"
-                    "Du kan beregne netto ud fra bruttoløn eller ud fra timer og timeløn uden at gemme en vagt."
+                    "Du kan beregne netto ud fra bruttoløn eller ud fra timer og timeløn uden at gemme en vagt. "
+                    "Beregningen tager højde for fradrag pr. måned, AM-bidrag, skat og eget pensionsbidrag."
                 ),
             },
             {
@@ -6570,8 +7066,10 @@ class IntroductionDialog(QDialog):
                 "page": 6,
                 "title": "Indstillinger",
                 "text": (
-                    "Indstillinger styrer skat, fradrag, anden indkomst, standardtimeløn og lønperiode.\n\n"
-                    "Angiv også dit ønskede rådighedsbeløb. Det bruges som mål i Overblik og Budget."
+                    "Indstillinger styrer skat, eget pensionsbidrag, fradrag pr. måned, anden indkomst pr. måned, "
+                    "standardtimeløn, rådighedsmål pr. måned, lønperiode og feriepenge.\n\n"
+                    "Budgetposter redigeres på Budget-siden, men de gemmes også som månedstal og bruges i alle "
+                    "rådighedsberegninger."
                 ),
             },
             {
@@ -6580,7 +7078,8 @@ class IntroductionDialog(QDialog):
                 "title": "Dine grundoplysninger",
                 "text": (
                     "Udfyld de vigtigste tal. De gemmes i Indstillinger og bruges i resten af programmet.\n\n"
-                    "Lad et felt stå tomt, hvis du vil bruge standardværdien i feltets placeholder."
+                    "Fradrag, anden indkomst og rådighedsmål er månedstal. Budget sættes bagefter på Budget-siden "
+                    "og er også pr. måned. Lad et felt stå tomt, hvis du vil bruge standardværdien i feltets placeholder."
                 ),
             },
             {
@@ -6588,8 +7087,9 @@ class IntroductionDialog(QDialog):
                 "title": "Du er klar",
                 "text": (
                     "Introduktionen er færdig.\n\n"
-                    "Start med at tilføje dine vagter og dine faste udgifter i Budget. "
-                    "Du kan altid starte introduktionen igen fra Indstillinger."
+                    "Start med at tilføje dine vagter og dine faste månedlige udgifter i Budget. "
+                    "Du kan altid starte introduktionen igen fra Indstillinger, og du kan konvertere gamle data "
+                    "med database converter script.py hvis en ældre database mangler vagt-ID eller gemte indstillinger."
                 ),
             },
         ]
@@ -6617,7 +7117,7 @@ class IntroductionDialog(QDialog):
 
         self.visual_frame = QFrame()
         self.visual_frame.setObjectName("Card")
-        self.visual_frame.setMinimumHeight(220)
+        self.visual_frame.setMinimumHeight(275)
         self.visual_frame.setStyleSheet(
             """
             QFrame#Card {
@@ -6630,10 +7130,15 @@ class IntroductionDialog(QDialog):
         self.visual_layout = QVBoxLayout(self.visual_frame)
         self.visual_layout.setContentsMargins(20, 18, 20, 18)
         self.visual_layout.setSpacing(12)
-        root.addWidget(self.visual_frame)
+        root.addWidget(self.visual_frame, 1)
 
         self.setup_widget = self._build_setup_widget()
-        root.addWidget(self.setup_widget)
+        self.setup_scroll = QScrollArea()
+        self.setup_scroll.setWidgetResizable(True)
+        self.setup_scroll.setFrameShape(QFrame.NoFrame)
+        self.setup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setup_scroll.setWidget(self.setup_widget)
+        root.addWidget(self.setup_scroll, 1)
 
         button_row = QHBoxLayout()
         button_row.addStretch()
@@ -6653,6 +7158,8 @@ class IntroductionDialog(QDialog):
     def _build_setup_widget(self):
         wrapper = QFrame()
         wrapper.setObjectName("Card")
+        wrapper.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        wrapper.setMinimumHeight(470)
         wrapper.setStyleSheet(
             """
             QFrame#Card {
@@ -6710,60 +7217,99 @@ class IntroductionDialog(QDialog):
 
         self.setup_other_income = make_text_input(placeholder="0 kr")
         self.setup_tax = make_text_input(placeholder="40%")
+        self.setup_pension = make_text_input(placeholder="0%")
         self.setup_fradrag = make_text_input(placeholder="0 kr")
         self.setup_goal = make_text_input(placeholder="0 kr")
+        self.setup_period_type = ModernComboBox()
+        self.setup_period_type.addItem("Måned", ft.PAY_PERIOD_TYPE_MONTH)
+        self.setup_period_type.addItem("Uger", ft.PAY_PERIOD_TYPE_WEEKS)
         self.setup_start = make_text_input(placeholder="15")
         self.setup_end = make_text_input(placeholder="14")
+        self.setup_period_weeks = make_text_input(placeholder="2")
+        self.setup_period_anchor = make_text_input(placeholder=ft.DEFAULT_PAY_PERIOD_ANCHOR)
         self.setup_rate = make_text_input(placeholder="150 kr")
 
         fields = [
-            ("Anden indkomst netto", self.setup_other_income),
             ("Skatteprocent", self.setup_tax),
+            ("Eget pensionsbidrag", self.setup_pension),
             ("Timeløn", self.setup_rate),
-            ("Fradrag", self.setup_fradrag),
-            ("Ønsket rådighedsbeløb", self.setup_goal),
-            ("Lønperiode startdag", self.setup_start),
-            ("Lønperiode slutdag", self.setup_end),
+            ("Fradrag pr. måned", self.setup_fradrag),
+            ("Anden indkomst netto pr. måned", self.setup_other_income),
+            ("Ønsket rådighedsbeløb pr. måned", self.setup_goal),
+            ("Lønperiode type", self.setup_period_type),
+            ("Lønperiode startdag", self.setup_start, "month_start"),
+            ("Lønperiode slutdag", self.setup_end, "month_end"),
+            ("Antal uger", self.setup_period_weeks, "weeks"),
+            ("Første periode starter", self.setup_period_anchor, "anchor"),
         ]
+        self.setup_period_cells = {}
 
-        def add_field(index, label_text, field):
+        def add_field(index, label_text, field, key=None):
             row = index // 2
             column = index % 2
 
             cell = QWidget()
             cell.setObjectName("SetupCell")
+            cell.setMinimumHeight(68)
             cell_layout = QVBoxLayout(cell)
-            cell_layout.setContentsMargins(8, 6, 8, 8)
+            cell_layout.setContentsMargins(8, 7, 8, 8)
             cell_layout.setSpacing(4)
 
             label = QLabel(label_text)
             label.setObjectName("SetupFieldLabel")
             label.setWordWrap(False)
 
-            field.setMinimumWidth(250)
-            field.setMinimumHeight(30)
+            field.setMinimumWidth(220)
+            field.setFixedHeight(34)
 
             cell_layout.addWidget(label)
             cell_layout.addWidget(field)
             grid.addWidget(cell, row, column)
+            if key:
+                self.setup_period_cells[key] = cell
 
-        for index, (label_text, field) in enumerate(fields):
-            add_field(index, label_text, field)
+        for index, field_info in enumerate(fields):
+            label_text, field = field_info[:2]
+            key = field_info[2] if len(field_info) > 2 else None
+            add_field(index, label_text, field, key)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
+        self.setup_period_type.currentIndexChanged.connect(self._update_setup_pay_period_fields)
+        self._update_setup_pay_period_fields()
 
         return wrapper
 
+    def _update_setup_pay_period_fields(self, *_args):
+        is_week_period = self.setup_period_type.currentData() == ft.PAY_PERIOD_TYPE_WEEKS
+        for key in ("month_start", "month_end"):
+            cell = self.setup_period_cells.get(key)
+            if cell is not None:
+                cell.setVisible(not is_week_period)
+        for key in ("weeks", "anchor"):
+            cell = self.setup_period_cells.get(key)
+            if cell is not None:
+                cell.setVisible(is_week_period)
+
     def _fill_existing_values(self):
-        settings = self.window.settings
+        settings = ft.normalize_settings(self.window.settings)
         set_field_number(self.setup_other_income, ft.get_other_income(settings))
         set_field_number(self.setup_tax, float(settings.get("skat", 0.4)) * 100)
+        set_field_number(self.setup_pension, ft.get_pension_contribution_rate(settings) * 100)
         set_field_number(self.setup_fradrag, float(settings.get("fradrag", 0)))
         set_field_number(self.setup_goal, ft.get_disposable_income_goal(settings))
+        period_type_index = self.setup_period_type.findData(settings.get(ft.PAY_PERIOD_TYPE_KEY, ft.PAY_PERIOD_TYPE_MONTH))
+        if period_type_index < 0:
+            period_type_index = 0
+        self.setup_period_type.blockSignals(True)
+        self.setup_period_type.setCurrentIndex(period_type_index)
+        self.setup_period_type.blockSignals(False)
         self.setup_start.setText(str(int(settings.get("løn start", 15))))
         self.setup_end.setText(str(int(settings.get("løn slut", 14))))
+        self.setup_period_weeks.setText(str(int(settings.get(ft.PAY_PERIOD_WEEKS_KEY, ft.DEFAULT_PAY_PERIOD_WEEKS))))
+        self.setup_period_anchor.setText(str(settings.get(ft.PAY_PERIOD_ANCHOR_KEY, ft.DEFAULT_PAY_PERIOD_ANCHOR)))
         set_field_number(self.setup_rate, ft.get_default_hourly_rate(settings))
+        self._update_setup_pay_period_fields()
 
     def _current_step(self):
         return self.steps[self.step_index]
@@ -6777,7 +7323,7 @@ class IntroductionDialog(QDialog):
         self.body_label.setText(step["text"])
         self.step_label.setText(f"{self.step_index + 1} / {len(self.steps)}")
 
-        self.setup_widget.setVisible(is_setup_step)
+        self.setup_scroll.setVisible(is_setup_step)
 
         if is_setup_step:
             self.visual_frame.hide()
@@ -6785,7 +7331,7 @@ class IntroductionDialog(QDialog):
         else:
             self.visual_frame.show()
             self.body_label.setMinimumHeight(0)
-            self.visual_frame.setMinimumHeight(220)
+            self.visual_frame.setMinimumHeight(275)
             self.visual_frame.setMaximumHeight(16777215)
             self._set_visual(step["key"])
 
@@ -6833,24 +7379,27 @@ class IntroductionDialog(QDialog):
             }
             """
         )
-        card.setMinimumHeight(76)
+        card.setMinimumHeight(100)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(13, 11, 13, 11)
+        layout.setContentsMargins(13, 10, 13, 10)
         layout.setSpacing(4)
         accent_bar = QFrame()
         accent_bar.setFixedSize(34, 4)
         accent_bar.setStyleSheet(f"background: {accent}; border-radius: 2px;")
         title_label = QLabel(title)
         title_label.setStyleSheet("color: #64748b; font-weight: 800;")
+        title_label.setWordWrap(True)
         value_label = QLabel(value)
-        value_label.setStyleSheet("color: #0f172a; font-size: 14pt; font-weight: 900;")
+        value_label.setStyleSheet("color: #0f172a; font-size: 13pt; font-weight: 900;")
+        value_label.setMinimumHeight(24)
         layout.addWidget(accent_bar, 0, Qt.AlignLeft)
         layout.addWidget(title_label)
         layout.addWidget(value_label)
         if subtitle:
             subtitle_label = QLabel(subtitle)
-            subtitle_label.setStyleSheet("color: #64748b;")
+            subtitle_label.setStyleSheet("color: #64748b; font-size: 9pt;")
             subtitle_label.setWordWrap(True)
+            subtitle_label.setMinimumHeight(18)
             layout.addWidget(subtitle_label)
         return card
 
@@ -6951,9 +7500,9 @@ class IntroductionDialog(QDialog):
         self._visual_title("Et roligt overblik over det, du faktisk skal bruge")
         self._visual_flow(
             [
-                ("Vagter", "Gem timer og pause", "#1f8a70"),
-                ("Netto", "Se løn efter skat", "#2563eb"),
-                ("Budget", "Hold øje med rådighed", "#d97706"),
+                ("Vagter", "Gem timer, pause og fridage", "#1f8a70"),
+                ("Beregning", "Skat, pension og fradrag", "#2563eb"),
+                ("Rådighed", "Budget og mål pr. periode", "#d97706"),
             ]
         )
         self.visual_layout.addWidget(self._mini_bar("Rådighed i perioden", 62))
@@ -6962,9 +7511,9 @@ class IntroductionDialog(QDialog):
         self._visual_title("Overblik er bygget af små widgets")
         grid = QGridLayout()
         grid.setSpacing(10)
-        grid.addWidget(self._mini_card("Netto løn", "3.600 kr.", "#1f8a70", "Efter skat"), 0, 0)
-        grid.addWidget(self._mini_card("Rådighed", "1.850 kr.", "#d97706", "Efter budget"), 0, 1)
-        grid.addWidget(self._mini_card("Timer", "24,5 t.", "#7c3aed", "Denne periode"), 1, 0)
+        grid.addWidget(self._mini_card("Netto løn", "3.600 kr.", "#1f8a70", "Efter pension og skat"), 0, 0)
+        grid.addWidget(self._mini_card("Rådighed", "1.850 kr.", "#d97706", "Månedstal skaleret"), 0, 1)
+        grid.addWidget(self._mini_card("Ferie", "8,7 dage", "#7c3aed", "Inkl. ½-års estimat"), 1, 0)
         grid.addWidget(self._mini_card("Widgets", "Tilpas", "#0f766e", "Flyt, fjern og tilføj"), 1, 1)
         self.visual_layout.addLayout(grid)
 
@@ -6980,6 +7529,8 @@ class IntroductionDialog(QDialog):
                 ("Pause", "0 min."),
                 ("Timeløn", "150 kr."),
                 ("Netto", "331 kr."),
+                ("ID", "Gemmes automatisk"),
+                ("Snapshot", "Dine satser gemmes"),
             ]
         ):
             form.addWidget(self._mini_row(left, right), index // 2, index % 2)
@@ -6991,7 +7542,8 @@ class IntroductionDialog(QDialog):
         rows.setSpacing(8)
         rows.addWidget(self._mini_row("Maj 2026", "Netto 8.240 kr."))
         rows.addWidget(self._mini_row("Vagter og timer", "8 vagter · 52 t."))
-        rows.addWidget(self._mini_row("Detaljer", "Pause · skat · total"))
+        rows.addWidget(self._mini_row("Detaljer", "Pause · pension · skat · total"))
+        rows.addWidget(self._mini_row("Historik", "Bruger gemte vagtindstillinger"))
         self.visual_layout.addLayout(rows)
 
     def _visual_statistics(self):
@@ -7001,16 +7553,17 @@ class IntroductionDialog(QDialog):
         grid.addWidget(self._mini_bar("Timer pr. periode", 78, "#7c3aed"), 0, 0)
         grid.addWidget(self._mini_bar("Netto løn", 64, "#1f8a70"), 1, 0)
         grid.addWidget(self._mini_bar("Udvikling", 52, "#2563eb"), 2, 0)
-        grid.addWidget(self._mini_card("Nøgletal", "Snit", "#475569", "Bedste periode og gennemsnit"), 0, 1, 3, 1)
+        grid.addWidget(self._mini_card("Nøgletal", "Snit", "#475569", "Rekorder, fradrag og prognose"), 0, 1, 3, 1)
         self.visual_layout.addLayout(grid)
 
     def _visual_budget(self):
-        self._visual_title("Budget er bare de faste poster, du vil trække fra")
+        self._visual_title("Budget er månedlige faste poster")
         rows = QVBoxLayout()
         rows.setSpacing(8)
         rows.addWidget(self._mini_row("Husleje", "5.200 kr."))
         rows.addWidget(self._mini_row("Forsikring", "350 kr."))
         rows.addWidget(self._mini_row("Abonnementer", "199 kr."))
+        rows.addWidget(self._mini_row("Omregning", "Tilpasses lønperioden"))
         rows.addWidget(self._mini_row("Rådighed", "Indkomst minus budget"))
         self.visual_layout.addLayout(rows)
 
@@ -7018,10 +7571,11 @@ class IntroductionDialog(QDialog):
         self._visual_title("Vagter giver dig en enkel liste, du kan rette i")
         rows = QVBoxLayout()
         rows.setSpacing(8)
-        rows.addWidget(self._mini_row("Tilføj vagt/fridag", "Dato · timer · pause"))
-        rows.addWidget(self._mini_row("06 maj", "14:00 - 18:00 · 331 kr."))
-        rows.addWidget(self._mini_row("Rediger", "Ret den valgte række"))
-        rows.addWidget(self._mini_row("Marker", "Slet flere på én gang"))
+        rows.addWidget(self._mini_row("Tilføj vagt/fridag", "Dato · tid · pause"))
+        rows.addWidget(self._mini_row("Flere vagter", "Samme dato uden overlap"))
+        rows.addWidget(self._mini_row("Fridag", "Blokerer for vagter"))
+        rows.addWidget(self._mini_row("Rediger markerede", "En eller flere på én gang"))
+        rows.addWidget(self._mini_row("Snapshot", "Satser gemmes pr. vagt"))
         self.visual_layout.addLayout(rows)
 
     def _visual_calculator(self):
@@ -7029,7 +7583,7 @@ class IntroductionDialog(QDialog):
         self._visual_flow(
             [
                 ("Brutto", "3.000 kr.", "#2563eb"),
-                ("Skat", "Dine satser", "#64748b"),
+                ("Satser", "Fradrag og pension", "#64748b"),
                 ("Netto", "1.795 kr.", "#1f8a70"),
             ]
         )
@@ -7039,23 +7593,25 @@ class IntroductionDialog(QDialog):
         self._visual_title("Indstillinger er de tal resten af appen regner med")
         rows = QVBoxLayout()
         rows.setSpacing(8)
-        rows.addWidget(self._mini_row("Skat og fradrag", "Netto løn"))
-        rows.addWidget(self._mini_row("Anden indkomst", "Total indkomst"))
-        rows.addWidget(self._mini_row("Rådighedsmål", "Mål i Overblik"))
-        rows.addWidget(self._mini_row("Lønperiode", "Datoer og estimater"))
+        rows.addWidget(self._mini_row("Skat, AM og pension", "Netto løn"))
+        rows.addWidget(self._mini_row("Månedstal", "Fradrag, indkomst og mål"))
+        rows.addWidget(self._mini_row("Lønperiode", "Måned eller uger"))
+        rows.addWidget(self._mini_row("Feriepenge", "Beløb og feriedage"))
         self.visual_layout.addLayout(rows)
 
     def _visual_setup(self):
         self._visual_title("Udfyld kun de tal, du kender nu")
         self.visual_layout.addWidget(self._mini_row("Skat", "40%"))
+        self.visual_layout.addWidget(self._mini_row("Pension", "0%"))
         self.visual_layout.addWidget(self._mini_row("Timeløn", "150 kr."))
+        self.visual_layout.addWidget(self._mini_row("Månedstal", "Fradrag og mål"))
 
     def _visual_done(self):
         self._visual_title("Klar til at bruge Lønix")
         rows = QVBoxLayout()
         rows.setSpacing(8)
         rows.addWidget(self._mini_row("1. Tilføj vagter", "Vagter-sektionen"))
-        rows.addWidget(self._mini_row("2. Tilføj budget", "Budget-sektionen"))
+        rows.addWidget(self._mini_row("2. Tilføj månedligt budget", "Budget-sektionen"))
         rows.addWidget(self._mini_row("3. Følg med", "Overblik åbner nu"))
         self.visual_layout.addLayout(rows)
 
@@ -7073,25 +7629,54 @@ class IntroductionDialog(QDialog):
         debug_window_log("IntroductionDialog._save_setup_step")
         try:
             tax_value = self._field_number(self.setup_tax, 40, "Skatteprocent", allow_zero=True)
+            pension_value = self._field_number(self.setup_pension, 0, "Eget pensionsbidrag", allow_zero=True)
             am_value = float(self.window.settings.get("am bidrag", 0.08))
             new_settings = dict(self.window.settings) if isinstance(self.window.settings, dict) else {}
-            new_settings.update(
-                {
-                    "skat": tax_value / 100 if tax_value > 1 else tax_value,
-                    "fradrag": self._field_number(self.setup_fradrag, 0, "Fradrag", allow_zero=True),
-                    "am bidrag": am_value,
-                    "anden indkomst netto": self._field_number(self.setup_other_income, 0, "Anden indkomst", allow_zero=True),
-                    "ønsket rådighedsbeløb": self._field_number(
-                        self.setup_goal,
-                        0,
-                        "Ønsket rådighedsbeløb",
-                        allow_zero=True,
-                    ),
-                    "standard timeløn": self._field_number(self.setup_rate, 150, "Timeløn", allow_zero=False),
-                    "løn start": self._field_int(self.setup_start, 15, "Lønperiode start"),
-                    "løn slut": self._field_int(self.setup_end, 14, "Lønperiode slut"),
-                }
-            )
+            existing_settings = ft.normalize_settings(new_settings)
+            period_type = self.setup_period_type.currentData() or ft.PAY_PERIOD_TYPE_MONTH
+            updated_settings = {
+                "skat": tax_value / 100 if tax_value > 1 else tax_value,
+                ft.PENSION_CONTRIBUTION_KEY: pension_value / 100 if pension_value > 1 else pension_value,
+                "fradrag": self._field_number(self.setup_fradrag, 0, "Fradrag", allow_zero=True),
+                "am bidrag": am_value,
+                "anden indkomst netto": self._field_number(self.setup_other_income, 0, "Anden indkomst", allow_zero=True),
+                "ønsket rådighedsbeløb": self._field_number(
+                    self.setup_goal,
+                    0,
+                    "Ønsket rådighedsbeløb",
+                    allow_zero=True,
+                ),
+                "standard timeløn": self._field_number(self.setup_rate, 150, "Timeløn", allow_zero=False),
+                ft.PAY_PERIOD_TYPE_KEY: period_type,
+            }
+            if period_type == ft.PAY_PERIOD_TYPE_WEEKS:
+                anchor_text = self.setup_period_anchor.text().strip()
+                updated_settings.update(
+                    {
+                        "løn start": int(existing_settings.get("løn start", 15)),
+                        "løn slut": int(existing_settings.get("løn slut", 14)),
+                        ft.PAY_PERIOD_WEEKS_KEY: (
+                            parse_int_field(self.setup_period_weeks, "Antal uger", 1, 52)
+                            if self.setup_period_weeks.text().strip()
+                            else ft.DEFAULT_PAY_PERIOD_WEEKS
+                        ),
+                        ft.PAY_PERIOD_ANCHOR_KEY: (
+                            date_to_key(parse_date_text(anchor_text))
+                            if anchor_text
+                            else existing_settings.get(ft.PAY_PERIOD_ANCHOR_KEY, ft.DEFAULT_PAY_PERIOD_ANCHOR)
+                        ),
+                    }
+                )
+            else:
+                updated_settings.update(
+                    {
+                        "løn start": self._field_int(self.setup_start, 15, "Lønperiode start"),
+                        "løn slut": self._field_int(self.setup_end, 14, "Lønperiode slut"),
+                        ft.PAY_PERIOD_WEEKS_KEY: int(existing_settings.get(ft.PAY_PERIOD_WEEKS_KEY, ft.DEFAULT_PAY_PERIOD_WEEKS)),
+                        ft.PAY_PERIOD_ANCHOR_KEY: existing_settings.get(ft.PAY_PERIOD_ANCHOR_KEY, ft.DEFAULT_PAY_PERIOD_ANCHOR),
+                    }
+                )
+            new_settings.update(updated_settings)
         except ValueError as error:
             QMessageBox.warning(self, "Ugyldige oplysninger", str(error))
             return False

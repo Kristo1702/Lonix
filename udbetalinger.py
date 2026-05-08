@@ -43,7 +43,10 @@ def build_udbetaling_overview(settings, udbetaling):
     fridage = udbetaling.get("fridage", 0)
     brutto = udbetaling.get("brutto", 0)
     netto_løn = udbetaling.get("netto", 0)
-    anden_indkomst = ft.get_other_income(settings)
+    anden_indkomst = udbetaling.get(
+        "anden_indkomst",
+        ft.get_other_income(settings, periode_start, periode_slut),
+    )
     total_udbetalt = netto_løn + anden_indkomst
     titel = _get_udbetaling_titel(udbetaling)
 

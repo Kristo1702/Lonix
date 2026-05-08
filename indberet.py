@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime, timedelta
 
@@ -69,17 +70,16 @@ def save_shift(hours, rate, pause=0):
             dato = dato - timedelta(days=1)
 
         dato = dato.strftime("%d-%m-%Y")
-
         gemt_data = ft.load_data()
-        findes_allerede = any(dato in entry for entry in gemt_data)
-
-        if findes_allerede:
-            ft.header("Hovedmenu > Vagter > Tilføj vagt > Gem")
-            overwrite = input(
-                Fore.YELLOW + f"Du har allerede data for denne dato: {dato}.\nØnsker du at overskrive dataen? (j/n): ").strip().lower()
-
-            if overwrite != "j":
-                return False, None
+        eksisterende = [entry for entry in gemt_data if dato in entry]
+        if any(ft.is_day_off(entry[dato]) for entry in eksisterende):
+            ft.error_message(
+                sti="Hovedmenu > Vagter > Tilføj vagt > Gem",
+                besked=f"{dato} er markeret som fridag. Fjern fridagen før du indberetter en vagt på datoen.",
+                ugyldigt_valg=False,
+                get_input=True,
+            )
+            return False, None
 
         shift_info = {
             "timer": hours,
@@ -91,7 +91,32 @@ def save_shift(hours, rate, pause=0):
 
         data = {dato: shift_info}
 
-        ft.save_data(data)
+        if eksisterende:
+            ft.header("Hovedmenu > Vagter > Tilføj vagt > Gem")
+            choice = input(
+                Fore.YELLOW
+                + f"{dato} findes allerede i databasen.\n"
+                + "(o) Overskriv vagt\n"
+                + "(t) Tilføj ny vagt\n"
+                + "(a) Annuller\n\nVælg: "
+                + Style.RESET_ALL
+            ).strip().lower()
+
+            if choice == "o":
+                cleaned_data = [entry for entry in gemt_data if dato not in entry]
+                cleaned_data.append({dato: ft.normalize_entry_info(shift_info)})
+                cleaned_data = sorted(
+                    cleaned_data,
+                    key=lambda entry: datetime.strptime(next(iter(entry)), "%d-%m-%Y"),
+                )
+                with open("data/løn.txt", "w", encoding="utf-8") as file:
+                    json.dump(cleaned_data, file, ensure_ascii=False, indent=4)
+            elif choice == "t":
+                ft.save_data(data)
+            else:
+                return False, None
+        else:
+            ft.save_data(data)
         return True, dato
 
     except Exception as e:

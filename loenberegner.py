@@ -115,7 +115,7 @@ def _read_tax_rate(path):
         return tax_rate
 
 
-def _print_result(path, breakdown, tax_rate, extra_lines=None):
+def _print_result(path, breakdown, tax_rate, pension_rate=0, extra_lines=None):
     ft.header(path)
     separator = ft.ui_line(36)
     extra_lines = extra_lines or []
@@ -126,6 +126,8 @@ def _print_result(path, breakdown, tax_rate, extra_lines=None):
 
     print(Fore.WHITE + "\n  ===== BEREGNING =====")
     print(Fore.BLUE + f"  Brutto løn: {_format_money(breakdown['brutto'])}")
+    if pension_rate > 0:
+        print(Fore.BLUE + f"  Pension ({_format_number(pension_rate * 100)}%): -{_format_money(breakdown['pension'])}")
     print(Fore.BLUE + f"  AM-bidrag ({_format_number(AM_BIDRAG * 100)}%): -{_format_money(breakdown['am_bidrag'])}")
     print(Fore.BLUE + f"  Efter AM-bidrag: {_format_money(breakdown['efter_am'])}")
     print(Fore.BLUE + f"  Fradrag: {_format_money(breakdown['fradrag'])}")
@@ -175,8 +177,16 @@ def _calculate_from_hours():
 def _calculate_with_brutto(path, brutto, extra_lines=None):
     fradrag = _read_non_negative_number(path, "Fradrag i kr")
     tax_rate = _read_tax_rate(path)
-    breakdown = ft.calculate_salary_breakdown(brutto, tax_rate, fradrag, AM_BIDRAG)
-    _print_result(path, breakdown, tax_rate, extra_lines)
+    pension = _read_non_negative_number(path, "Eget pensionsbidrag % (fx 5 eller 0)")
+    pension_rate = pension / 100 if pension > 1 else pension
+    breakdown = ft.calculate_salary_breakdown(
+        brutto,
+        tax_rate,
+        fradrag,
+        AM_BIDRAG,
+        settings={ft.PENSION_CONTRIBUTION_KEY: pension_rate},
+    )
+    _print_result(path, breakdown, tax_rate, pension_rate, extra_lines)
 
 
 def main():
