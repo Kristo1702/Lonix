@@ -4,7 +4,7 @@ import re
 import sys
 import time
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from colorama import Fore, Style, init
 
@@ -13,11 +13,18 @@ init()
 OTHER_INCOME_KEY = "anden indkomst netto"
 DEFAULT_HOURLY_RATE_KEY = "standard timeløn"
 INTRODUCTION_DONE_KEY = "introduktion gennemført"
+PAY_PERIOD_TYPE_KEY = "lønperiode type"
+PAY_PERIOD_TYPE_MONTH = "måned"
+PAY_PERIOD_TYPE_WEEKS = "uger"
+PAY_PERIOD_WEEKS_KEY = "lønperiode uger"
+PAY_PERIOD_ANCHOR_KEY = "lønperiode ankerdato"
 ENTRY_TYPE_KEY = "type"
 DAY_OFF_ENTRY_TYPE = "fridag"
 REQUIRED_SETTINGS_KEYS = ["skat", "fradrag", "am bidrag", OTHER_INCOME_KEY, "løn start", "løn slut"]
 DEFAULT_FIXED_EXPENSES = 0
 DEFAULT_HOURLY_RATE = 150
+DEFAULT_PAY_PERIOD_WEEKS = 2
+DEFAULT_PAY_PERIOD_ANCHOR = "01-01-2024"
 LEGACY_DEFAULT_FIXED_EXPENSES = 8250
 LEGACY_DEFAULT_OTHER_INCOME = 9539 + 1203
 
@@ -166,6 +173,9 @@ def load_settings():
             "ønsket rådighedsbeløb": 1000,
             "løn start": 15,
             "løn slut": 14,
+            PAY_PERIOD_TYPE_KEY: PAY_PERIOD_TYPE_MONTH,
+            PAY_PERIOD_WEEKS_KEY: DEFAULT_PAY_PERIOD_WEEKS,
+            PAY_PERIOD_ANCHOR_KEY: DEFAULT_PAY_PERIOD_ANCHOR,
         }
         with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
             json.dump(default_data, file, ensure_ascii=False, indent=4)
@@ -190,6 +200,59 @@ def save_settings(new_settings):
 
     with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
         json.dump(new_settings, file, ensure_ascii=False, indent=4)
+
+
+def _coerce_int(value, default, minimum, maximum):
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _parse_settings_date(value, default=None):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    text = str(value or "").strip()
+    for pattern in ("%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+
+    if default is None:
+        return None
+    return _parse_settings_date(default)
+
+
+def _settings_date_key(value, default):
+    parsed = _parse_settings_date(value, default)
+    if parsed is None:
+        parsed = _parse_settings_date(default)
+    return parsed.strftime("%d-%m-%Y")
+
+
+def _normalize_pay_period_type(value):
+    text = str(value or "").strip().lower()
+    if text in {
+        PAY_PERIOD_TYPE_WEEKS,
+        "uge",
+        "ugentlig",
+        "ugentligt",
+        "weekly",
+        "weeks",
+        "14 dage",
+        "14-dage",
+        "14-dages",
+        "14 dages løn",
+        "14-dagesløn",
+        "2 uger",
+    }:
+        return PAY_PERIOD_TYPE_WEEKS
+    return PAY_PERIOD_TYPE_MONTH
 
 
 def normalize_settings(settings):
@@ -262,6 +325,22 @@ def normalize_settings(settings):
         normalized[INTRODUCTION_DONE_KEY] = bool(normalized.get(old_introduction_key, False))
     normalized.pop(old_introduction_key, None)
     normalized[INTRODUCTION_DONE_KEY] = bool(normalized.get(INTRODUCTION_DONE_KEY, False))
+
+    normalized["løn start"] = _coerce_int(normalized.get("løn start", 15), 15, 1, 31)
+    normalized["løn slut"] = _coerce_int(normalized.get("løn slut", 14), 14, 1, 31)
+    normalized[PAY_PERIOD_TYPE_KEY] = _normalize_pay_period_type(
+        normalized.get(PAY_PERIOD_TYPE_KEY, PAY_PERIOD_TYPE_MONTH)
+    )
+    normalized[PAY_PERIOD_WEEKS_KEY] = _coerce_int(
+        normalized.get(PAY_PERIOD_WEEKS_KEY, DEFAULT_PAY_PERIOD_WEEKS),
+        DEFAULT_PAY_PERIOD_WEEKS,
+        1,
+        52,
+    )
+    normalized[PAY_PERIOD_ANCHOR_KEY] = _settings_date_key(
+        normalized.get(PAY_PERIOD_ANCHOR_KEY, DEFAULT_PAY_PERIOD_ANCHOR),
+        DEFAULT_PAY_PERIOD_ANCHOR,
+    )
 
     return normalized
 
@@ -375,7 +454,7 @@ def _safe_date(year, month, day):
     return date(year, month, day)
 
 
-def get_salary_period_for_date(dato_obj, løn_start, løn_slut):
+def _get_monthly_salary_period_for_date(dato_obj, løn_start, løn_slut):
     løn_start = int(løn_start)
     løn_slut = int(løn_slut)
 
@@ -412,6 +491,67 @@ def get_salary_period_for_date(dato_obj, løn_start, løn_slut):
     return next_start, next_end
 
 
+def _get_week_salary_period_for_date(dato_obj, settings):
+    weeks = _coerce_int(
+        settings.get(PAY_PERIOD_WEEKS_KEY, DEFAULT_PAY_PERIOD_WEEKS),
+        DEFAULT_PAY_PERIOD_WEEKS,
+        1,
+        52,
+    )
+    anchor = _parse_settings_date(settings.get(PAY_PERIOD_ANCHOR_KEY), DEFAULT_PAY_PERIOD_ANCHOR)
+    period_days = weeks * 7
+    period_offset = (dato_obj - anchor).days // period_days
+    start = anchor + timedelta(days=period_offset * period_days)
+    end = start + timedelta(days=period_days - 1)
+    return start, end
+
+
+def get_salary_period_for_date(dato_obj, løn_start=None, løn_slut=None, settings=None):
+    if isinstance(løn_start, dict) and settings is None:
+        settings = løn_start
+        løn_start = None
+        løn_slut = None
+
+    if settings is None:
+        settings = {
+            "løn start": 15 if løn_start is None else løn_start,
+            "løn slut": 14 if løn_slut is None else løn_slut,
+        }
+    else:
+        settings = dict(settings)
+        if løn_start is not None and "løn start" not in settings:
+            settings["løn start"] = løn_start
+        if løn_slut is not None and "løn slut" not in settings:
+            settings["løn slut"] = løn_slut
+
+    settings = normalize_settings(settings)
+    if settings.get(PAY_PERIOD_TYPE_KEY) == PAY_PERIOD_TYPE_WEEKS:
+        return _get_week_salary_period_for_date(dato_obj, settings)
+
+    return _get_monthly_salary_period_for_date(
+        dato_obj,
+        settings.get("løn start", 15),
+        settings.get("løn slut", 14),
+    )
+
+
+def get_pay_period_description(settings=None):
+    settings = normalize_settings(settings if settings is not None else load_settings())
+    if settings.get(PAY_PERIOD_TYPE_KEY) == PAY_PERIOD_TYPE_WEEKS:
+        weeks = _coerce_int(
+            settings.get(PAY_PERIOD_WEEKS_KEY, DEFAULT_PAY_PERIOD_WEEKS),
+            DEFAULT_PAY_PERIOD_WEEKS,
+            1,
+            52,
+        )
+        anchor = _parse_settings_date(settings.get(PAY_PERIOD_ANCHOR_KEY), DEFAULT_PAY_PERIOD_ANCHOR)
+        if weeks == 1:
+            return f"Hver uge fra {anchor.strftime('%d-%m-%Y')}"
+        return f"Hver {weeks}. uge fra {anchor.strftime('%d-%m-%Y')}"
+
+    return f"d. {settings.get('løn start', 15)} - d. {settings.get('løn slut', 14)}"
+
+
 def calculate_netto_salary():
     settings = load_settings()
     data = load_data()
@@ -435,10 +575,7 @@ def calculate_netto_salary():
 
     i_dag = datetime.now().date()
 
-    løn_start = settings.get("løn start")
-    løn_slut = settings.get("løn slut")
-
-    periode_start, periode_slut = get_salary_period_for_date(i_dag, løn_start, løn_slut)
+    periode_start, periode_slut = get_salary_period_for_date(i_dag, settings=settings)
 
     total_timer = 0
     total_brutto = 0
@@ -477,14 +614,11 @@ def calculate_all_netto_salaries():
         )
         return None
 
-    løn_start = settings.get("løn start")
-    løn_slut = settings.get("løn slut")
-
     lønsedler = {}
     for entry in data:
         dato_str, løn_info = next(iter(entry.items()))
         dato_obj = datetime.strptime(dato_str, "%d-%m-%Y").date()
-        periode_start, periode_slut = get_salary_period_for_date(dato_obj, løn_start, løn_slut)
+        periode_start, periode_slut = get_salary_period_for_date(dato_obj, settings=settings)
 
         lønseddel_nøgle = (periode_start, periode_slut)
         if lønseddel_nøgle not in lønsedler:
@@ -540,9 +674,7 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
     if today is None:
         today = datetime.now().date()
 
-    løn_start = settings.get("løn start")
-    løn_slut = settings.get("løn slut")
-    periode_start, periode_slut = get_salary_period_for_date(today, løn_start, løn_slut)
+    periode_start, periode_slut = get_salary_period_for_date(today, settings=settings)
 
     total_days = (periode_slut - periode_start).days + 1
     elapsed_days = min(max((today - periode_start).days + 1, 1), total_days)
@@ -560,7 +692,7 @@ def calculate_salary_forecast(data=None, settings=None, today=None):
         timeløn = float(løn_info.get("timeløn", 0))
         brutto = timer * timeløn
 
-        entry_periode_start, entry_periode_slut = get_salary_period_for_date(dato_obj, løn_start, løn_slut)
+        entry_periode_start, entry_periode_slut = get_salary_period_for_date(dato_obj, settings=settings)
         period_key = (entry_periode_start, entry_periode_slut)
         if period_key not in historical_periods:
             historical_periods[period_key] = {

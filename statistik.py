@@ -291,8 +291,7 @@ def _build_statistics(data, settings):
 
     current_period_start, current_period_end = ft.get_salary_period_for_date(
         datetime.now().date(),
-        settings.get("løn start"),
-        settings.get("løn slut"),
+        settings=settings,
     )
 
     totals = {
@@ -438,8 +437,7 @@ def _group_periods(shifts, settings):
     for shift in shifts:
         periode_start, periode_slut = ft.get_salary_period_for_date(
             shift["dato"],
-            settings.get("løn start"),
-            settings.get("løn slut"),
+            settings=settings,
         )
         period_key = (periode_start, periode_slut)
 
@@ -535,8 +533,7 @@ def _get_complete_periods(periods, settings):
 
     current_period_start, _ = ft.get_salary_period_for_date(
         datetime.now().date(),
-        settings.get("løn start"),
-        settings.get("løn slut"),
+        settings=settings,
     )
 
     return [

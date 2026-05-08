@@ -107,8 +107,7 @@ def main():
     i_dag = datetime.now().date()
     igangværende_start, igangværende_slut = ft.get_salary_period_for_date(
         i_dag,
-        settings.get("løn start"),
-        settings.get("løn slut")
+        settings=settings
     )
     udbetalinger = [
         udbetaling for udbetaling in udbetalinger

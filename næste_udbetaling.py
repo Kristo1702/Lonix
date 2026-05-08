@@ -12,8 +12,7 @@ def _format_hours(value):
 def build_overview(settings, netto_løn, brutto_løn, timer, forecast=None, rådighed=False):
     anden_indkomst = ft.get_other_income(settings)
     faste_udgifter = ft.calculate_budget_expenses(settings)
-    løn_start = settings.get("løn start", 15)
-    løn_slut = settings.get("løn slut", 14)
+    lønperiode = ft.get_pay_period_description(settings)
 
     total_netto = anden_indkomst + netto_løn
     til_rådighed = ft.calculate_disposable_income(total_netto, settings)
@@ -31,7 +30,7 @@ def build_overview(settings, netto_løn, brutto_løn, timer, forecast=None, råd
     print(Fore.LIGHTGREEN_EX + f"  - Anden indkomst (netto): {anden_indkomst:.0f} kr.")
 
     print(Fore.WHITE + "\n  ===== LØN =====")
-    print(Fore.LIGHTBLACK_EX + f"  OBS: Lønperiode fra d.{løn_start} - d.{løn_slut}")
+    print(Fore.LIGHTBLACK_EX + f"  OBS: Lønperiode: {lønperiode}")
     if timer > 0:
         timeløn = brutto_løn / timer
         print(Fore.BLUE + f"  Registreret nu: {_format_hours(timer)} t. á {timeløn:.0f} kr.")

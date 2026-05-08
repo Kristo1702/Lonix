@@ -1278,8 +1278,7 @@ def entry_rows(data, settings=None):
             for row in rows:
                 period_key = ft.get_salary_period_for_date(
                     row["dato"],
-                    settings.get("løn start"),
-                    settings.get("løn slut"),
+                    settings=settings,
                 )
                 periods.setdefault(period_key, []).append(row)
 
@@ -1412,8 +1411,7 @@ def current_period_summary(data, settings, today=None):
 
     periode_start, periode_slut = ft.get_salary_period_for_date(
         today,
-        settings.get("løn start"),
-        settings.get("løn slut"),
+        settings=settings,
     )
 
     rows = [
@@ -1526,9 +1524,7 @@ def _holiday_pay_forecast_daily_salary(rows, settings, today):
     if not has_required_settings(settings):
         return None
 
-    løn_start = settings.get("løn start")
-    løn_slut = settings.get("løn slut")
-    period_start, period_end = ft.get_salary_period_for_date(today, løn_start, løn_slut)
+    period_start, period_end = ft.get_salary_period_for_date(today, settings=settings)
     period_days = max(1, (period_end - period_start).days + 1)
     elapsed_days = min(max((today - period_start).days + 1, 1), period_days)
     progress_ratio = elapsed_days / period_days
@@ -1547,8 +1543,7 @@ def _holiday_pay_forecast_daily_salary(rows, settings, today):
 
         entry_period_start, entry_period_end = ft.get_salary_period_for_date(
             row["dato"],
-            løn_start,
-            løn_slut,
+            settings=settings,
         )
         if entry_period_end >= period_start:
             continue
@@ -1666,8 +1661,7 @@ def holiday_pay_calculation(data, settings, today=None):
     if has_required_settings(settings):
         period_start, period_end = ft.get_salary_period_for_date(
             today,
-            settings.get("løn start"),
-            settings.get("løn slut"),
+            settings=settings,
         )
         period_eligible_salary = sum(
             row["brutto"]
@@ -3055,8 +3049,8 @@ class GoalHeaderWidget(QWidget):
     ):
         styles = {
             "success": ("MÅLET ER OPNÅET", "#16a34a"),
-            "warning": ("ESTIMERET AT OPNÅ", "#d97706"),
-            "danger": ("ESTIMERET IKKE AT OPNÅ", "#dc2626"),
+            "warning": ("FORVENTES AT OPNÅ", "#d97706"),
+            "danger": ("FORVENTES IKKE AT OPNÅ", "#dc2626"),
             "neutral": ("IKKE INDSTILLET", "#64748b"),
             "empty": ("INGEN VAGTER", "#64748b"),
         }
@@ -3656,7 +3650,7 @@ class DashboardHolidayPayWidget(QWidget):
         else:
             self.total_amount_label.setText(
                 f"Total optjent: {format_money(calculation['holiday_pay'])}\n"
-                f"Total orventet om ½ år: {format_money(forecast_total)} estimeret."
+                f"Total forventet om ½ år: {format_money(forecast_total)} estimeret."
             )
         self.detail_label.setText(
             f"• {request_text}\n"
@@ -4538,7 +4532,7 @@ class DashboardPage(CompactScrollPage):
         self.hours_card.set_values(f"{format_number(summary['timer'])} t.", f"{work_count} vagter i perioden{day_off_suffix}")
         self.gross_card.set_values(format_money(summary["brutto"]), "Før skat")
         self.period_card.set_values(
-            f"d. {self.settings.get('løn start')} - d. {self.settings.get('løn slut')}",
+            ft.get_pay_period_description(self.settings),
             format_period(summary),
         )
         estimated_hours_text = f"{format_number(estimated_hours)} t." if estimated_hours is not None else "N/A"
@@ -5697,10 +5691,10 @@ class StatisticsPage(BasePage):
                 ["Registreret løn nu", f"{format_money(forecast['current_brutto'])} / {format_money(forecast['current_netto'])}"],
                 ["Registrerede timer", format_number(forecast["current_hours"])],
                 ["Estimerede timer", format_number(forecast["estimated_hours"])],
-                ["Estimeret løn", f"{format_money(forecast['estimated_brutto'])} / {format_money(forecast['estimated_netto'])}"],
-                ["Estimeret total inkl. anden indkomst", format_money(forecast["estimated_total_income"])],
+                ["Forventet løn", f"{format_money(forecast['estimated_brutto'])} / {format_money(forecast['estimated_netto'])}"],
+                ["Forventet total inkl. anden indkomst", format_money(forecast["estimated_total_income"])],
                 ["Samlede udgifter", format_money(forecast["budget_expenses"])],
-                ["Estimeret rådighedsbeløb", format_money(forecast["estimated_disposable_income"])],
+                ["Forventet rådighedsbeløb", format_money(forecast["estimated_disposable_income"])],
             ]
         self._add_table("Prognose", ["Måling", "Værdi"], rows)
 
@@ -6294,7 +6288,7 @@ class SettingsPage(BasePage):
         super().__init__(
             window,
             "Indstillinger",
-            "Tilpas skat, anden indkomst, rådighedsmål og lønperiodens datoer. Faste udgifter styres på Budget-siden.",
+            "Tilpas skat, anden indkomst, rådighedsmål og lønperiode. Faste udgifter styres på Budget-siden.",
         )
 
         def add_settings_form(title):
@@ -6318,8 +6312,13 @@ class SettingsPage(BasePage):
         self.other_income_field = make_text_input(placeholder="fx 10742")
         self.disposable_goal_field = make_text_input(placeholder="fx 0")
         self.default_rate_field = make_text_input(placeholder="fx 150")
+        self.period_type_combo = ModernComboBox()
+        self.period_type_combo.addItem("Måned", ft.PAY_PERIOD_TYPE_MONTH)
+        self.period_type_combo.addItem("Uger", ft.PAY_PERIOD_TYPE_WEEKS)
         self.start_day_field = make_text_input(placeholder="1-31")
         self.end_day_field = make_text_input(placeholder="1-31")
+        self.period_weeks_field = make_text_input(placeholder="fx 2")
+        self.period_anchor_field = make_text_input(placeholder="dd-mm-åååå")
         self.holiday_rate_field = make_text_input(placeholder="12,5")
         self.employment_start_field = make_text_input(placeholder="dd-mm-åååå")
 
@@ -6330,8 +6329,13 @@ class SettingsPage(BasePage):
         tax_form.addRow("Timeløn", self.default_rate_field)
 
         goal_form.addRow("Ønsket rådighedsbeløb", self.disposable_goal_field)
+        goal_form.addRow("Lønperiode type", self.period_type_combo)
         goal_form.addRow("Lønperiode starter d.", self.start_day_field)
         goal_form.addRow("Lønperiode slutter d.", self.end_day_field)
+        goal_form.addRow("Antal uger", self.period_weeks_field)
+        goal_form.addRow("Første periode starter", self.period_anchor_field)
+        self.pay_period_form = goal_form
+        self.period_type_combo.currentIndexChanged.connect(self._update_pay_period_fields)
 
         holiday_form.addRow("Feriegodtgørelse %", self.holiday_rate_field)
         holiday_form.addRow("Ansættelsesstart", self.employment_start_field)
@@ -6370,21 +6374,41 @@ class SettingsPage(BasePage):
             "standard timeløn": 150,
             "løn start": 21,
             "løn slut": 20,
+            ft.PAY_PERIOD_TYPE_KEY: ft.PAY_PERIOD_TYPE_MONTH,
+            ft.PAY_PERIOD_WEEKS_KEY: ft.DEFAULT_PAY_PERIOD_WEEKS,
+            ft.PAY_PERIOD_ANCHOR_KEY: ft.DEFAULT_PAY_PERIOD_ANCHOR,
             HOLIDAY_PAY_RATE_KEY: DEFAULT_HOLIDAY_PAY_RATE,
             HOLIDAY_PAY_EMPLOYMENT_START_KEY: "",
         }
+        settings = ft.normalize_settings(settings)
         set_field_number(self.tax_field, float(settings.get("skat", 0)) * 100)
         set_field_number(self.fradrag_field, float(settings.get("fradrag", 0)))
         set_field_number(self.am_field, float(settings.get("am bidrag", 0)) * 100)
         set_field_number(self.other_income_field, ft.get_other_income(settings))
         set_field_number(self.disposable_goal_field, float(settings.get("ønsket rådighedsbeløb", 0)))
         set_field_number(self.default_rate_field, ft.get_default_hourly_rate(settings))
+        period_type_index = self.period_type_combo.findData(settings.get(ft.PAY_PERIOD_TYPE_KEY, ft.PAY_PERIOD_TYPE_MONTH))
+        if period_type_index < 0:
+            period_type_index = 0
+        self.period_type_combo.blockSignals(True)
+        self.period_type_combo.setCurrentIndex(period_type_index)
+        self.period_type_combo.blockSignals(False)
         self.start_day_field.setText(str(int(settings.get("løn start", 15))))
         self.end_day_field.setText(str(int(settings.get("løn slut", 14))))
+        self.period_weeks_field.setText(str(int(settings.get(ft.PAY_PERIOD_WEEKS_KEY, ft.DEFAULT_PAY_PERIOD_WEEKS))))
+        self.period_anchor_field.setText(str(settings.get(ft.PAY_PERIOD_ANCHOR_KEY, ft.DEFAULT_PAY_PERIOD_ANCHOR)))
+        self._update_pay_period_fields()
         holiday_settings = holiday_pay_settings(settings)
         set_field_number(self.holiday_rate_field, holiday_settings["rate"])
         employment_start = holiday_settings["employment_start"] or first_work_entry_date(self.data)
         self.employment_start_field.setText(format_date(employment_start) if employment_start else "")
+
+    def _update_pay_period_fields(self, *_args):
+        is_week_period = self.period_type_combo.currentData() == ft.PAY_PERIOD_TYPE_WEEKS
+        set_form_row_visible(self.pay_period_form, self.start_day_field, not is_week_period)
+        set_form_row_visible(self.pay_period_form, self.end_day_field, not is_week_period)
+        set_form_row_visible(self.pay_period_form, self.period_weeks_field, is_week_period)
+        set_form_row_visible(self.pay_period_form, self.period_anchor_field, is_week_period)
 
     def focus_disposable_goal(self):
         self.disposable_goal_field.setFocus()
@@ -6409,6 +6433,19 @@ class SettingsPage(BasePage):
             employment_start_text = self.employment_start_field.text().strip()
             employment_start = parse_date_text(employment_start_text) if employment_start_text else None
             new_settings = dict(self.settings) if isinstance(self.settings, dict) else {}
+            existing_pay_period = ft.normalize_settings(new_settings)
+            period_type = self.period_type_combo.currentData() or ft.PAY_PERIOD_TYPE_MONTH
+            period_weeks = (
+                parse_int_field(self.period_weeks_field, "Antal uger", 1, 52)
+                if self.period_weeks_field.text().strip()
+                else int(existing_pay_period.get(ft.PAY_PERIOD_WEEKS_KEY, ft.DEFAULT_PAY_PERIOD_WEEKS))
+            )
+            period_anchor_text = self.period_anchor_field.text().strip()
+            period_anchor = (
+                parse_date_text(period_anchor_text)
+                if period_anchor_text
+                else parse_optional_settings_date(existing_pay_period.get(ft.PAY_PERIOD_ANCHOR_KEY))
+            )
             updated_settings = {
                 "skat": tax / 100 if tax > 1 else tax,
                 "fradrag": parse_positive_number(self.fradrag_field, "Fradrag", allow_zero=True),
@@ -6429,6 +6466,9 @@ class SettingsPage(BasePage):
                 ),
                 "løn start": parse_int_field(self.start_day_field, "Lønperiode starter", 1, 31),
                 "løn slut": parse_int_field(self.end_day_field, "Lønperiode slutter", 1, 31),
+                ft.PAY_PERIOD_TYPE_KEY: period_type,
+                ft.PAY_PERIOD_WEEKS_KEY: period_weeks,
+                ft.PAY_PERIOD_ANCHOR_KEY: date_to_key(period_anchor) if period_anchor else ft.DEFAULT_PAY_PERIOD_ANCHOR,
                 HOLIDAY_PAY_RATE_KEY: holiday_rate,
                 HOLIDAY_PAY_EMPLOYMENT_START_KEY: date_to_key(employment_start) if employment_start else "",
             }
