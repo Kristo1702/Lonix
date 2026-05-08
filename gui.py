@@ -133,6 +133,7 @@ DASHBOARD_WIDGET_TITLES = {
 HOLIDAY_PAY_RATE_KEY = "feriegodtgørelse"
 HOLIDAY_PAY_EMPLOYMENT_START_KEY = "ansættelsesstart"
 DEFAULT_HOLIDAY_PAY_RATE = 12.5
+HOLIDAY_PAY_FORECAST_MONTHS = 6
 
 MONTH_NAMES = {
     1: "Januar",
@@ -1449,6 +1450,14 @@ def next_month(year, month):
     return year, month + 1
 
 
+def add_months(value, months):
+    month_index = value.month - 1 + months
+    year = value.year + (month_index // 12)
+    month = (month_index % 12) + 1
+    day = min(value.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
 def month_range(start, end):
     if end < start:
         return []
@@ -1500,6 +1509,114 @@ def holiday_days_for_range(start, end):
         month_days = 2.08 if full_month else min(2.08, active_days * 0.07)
         total += month_days
     return total
+
+
+def _blend_rate(current_rate, historical_rate, progress_ratio):
+    if current_rate is None and historical_rate is None:
+        return None
+    if current_rate is None:
+        return historical_rate
+    if historical_rate is None:
+        return current_rate
+    progress_ratio = max(0.0, min(float(progress_ratio), 1.0))
+    return (historical_rate * (1 - progress_ratio)) + (current_rate * progress_ratio)
+
+
+def _holiday_pay_forecast_daily_salary(rows, settings, today):
+    if not has_required_settings(settings):
+        return None
+
+    løn_start = settings.get("løn start")
+    løn_slut = settings.get("løn slut")
+    period_start, period_end = ft.get_salary_period_for_date(today, løn_start, løn_slut)
+    period_days = max(1, (period_end - period_start).days + 1)
+    elapsed_days = min(max((today - period_start).days + 1, 1), period_days)
+    progress_ratio = elapsed_days / period_days
+
+    current_brutto = sum(
+        row["brutto"]
+        for row in rows
+        if not row.get("is_day_off") and period_start <= row["dato"] <= today
+    )
+    current_daily_brutto = current_brutto / elapsed_days
+
+    historical_periods = {}
+    for row in rows:
+        if row.get("is_day_off"):
+            continue
+
+        entry_period_start, entry_period_end = ft.get_salary_period_for_date(
+            row["dato"],
+            løn_start,
+            løn_slut,
+        )
+        if entry_period_end >= period_start:
+            continue
+
+        period = historical_periods.setdefault(
+            (entry_period_start, entry_period_end),
+            {
+                "brutto": 0.0,
+                "days": (entry_period_end - entry_period_start).days + 1,
+            },
+        )
+        period["brutto"] += row["brutto"]
+
+    historical_daily_brutto = None
+    if historical_periods:
+        historical_days = sum(period["days"] for period in historical_periods.values())
+        historical_brutto = sum(period["brutto"] for period in historical_periods.values())
+        if historical_days > 0:
+            historical_daily_brutto = historical_brutto / historical_days
+    else:
+        past_rows = [
+            row
+            for row in rows
+            if not row.get("is_day_off") and row["dato"] <= today
+        ]
+        if past_rows:
+            first_date = min(row["dato"] for row in past_rows)
+            observed_days = max(1, (today - first_date).days + 1)
+            historical_daily_brutto = sum(row["brutto"] for row in past_rows) / observed_days
+
+    return _blend_rate(current_daily_brutto, historical_daily_brutto, progress_ratio)
+
+
+def estimate_holiday_pay_total(rows, settings, today, calculation_start, calculation_end, ferie_end, current_holiday_pay, rate):
+    forecast_horizon = add_months(today, HOLIDAY_PAY_FORECAST_MONTHS)
+    forecast_end = min(forecast_horizon, ferie_end)
+    if forecast_end <= calculation_end:
+        return {
+            "forecast_horizon": forecast_horizon,
+            "forecast_end": forecast_end,
+            "forecast_total_holiday_pay": current_holiday_pay,
+            "forecast_future_holiday_pay": 0.0,
+        }
+
+    forecast_start = max(calculation_end + timedelta(days=1), calculation_start)
+    if forecast_start > forecast_end:
+        future_salary = 0.0
+    else:
+        future_rows = [
+            row
+            for row in rows
+            if not row.get("is_day_off") and forecast_start <= row["dato"] <= forecast_end
+        ]
+        known_future_salary = sum(row["brutto"] for row in future_rows)
+        known_future_dates = {row["dato"] for row in future_rows}
+        future_days = (forecast_end - forecast_start).days + 1
+        unknown_future_days = max(0, future_days - len(known_future_dates))
+        daily_brutto = _holiday_pay_forecast_daily_salary(rows, settings, today)
+        estimated_future_salary = (daily_brutto or 0.0) * unknown_future_days
+        future_salary = known_future_salary + estimated_future_salary
+
+    future_holiday_pay = future_salary * (rate / 100)
+    return {
+        "forecast_horizon": forecast_horizon,
+        "forecast_end": forecast_end,
+        "forecast_total_holiday_pay": current_holiday_pay + future_holiday_pay,
+        "forecast_future_holiday_pay": future_holiday_pay,
+    }
 
 
 def month_label(value):
@@ -1576,6 +1693,17 @@ def holiday_pay_calculation(data, settings, today=None):
                 }
             )
 
+    forecast = estimate_holiday_pay_total(
+        rows,
+        settings,
+        today,
+        calculation_start,
+        calculation_end if has_active_range else calculation_start - timedelta(days=1),
+        ferie_end,
+        holiday_pay,
+        config["rate"],
+    )
+
     base.update(
         {
             "configured": True,
@@ -1591,6 +1719,7 @@ def holiday_pay_calculation(data, settings, today=None):
             "work_rows": work_rows,
             "monthly_rows": monthly_rows,
             "request_available_now": request_start <= today <= request_end,
+            **forecast,
         }
     )
     return base
@@ -3521,10 +3650,17 @@ class DashboardHolidayPayWidget(QWidget):
 
         request_text = f"Ferie kan holdes frem til {format_long_date(calculation['request_end'])}.\n"
         self.amount_label.setText(f"Optjent denne lønperiode: {format_money(calculation.get('period_holiday_pay', 0))}")
-        self.total_amount_label.setText(f"Total optjent: {format_money(calculation['holiday_pay'])}")
+        forecast_total = calculation.get("forecast_total_holiday_pay")
+        if forecast_total is None:
+            self.total_amount_label.setText(f"Total optjent: {format_money(calculation['holiday_pay'])}")
+        else:
+            self.total_amount_label.setText(
+                f"Total optjent: {format_money(calculation['holiday_pay'])}\n"
+                f"Total orventet om ½ år: {format_money(forecast_total)} estimeret."
+            )
         self.detail_label.setText(
             f"{request_text}\n"
-            "Udbetaling: tidligst 1 måned før første feriedag."
+            "Udbetaling: tidligst 1 måned før første feriedag. "
             f"Beregnet fra {format_long_date(calculation['calculation_start'])} til {format_long_date(calculation['calculation_end'])}."
         )
         self.days_chip.value_label.setText(f"{format_number(calculation['holiday_days'])} dage")
