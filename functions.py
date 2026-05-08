@@ -231,7 +231,7 @@ def load_settings():
 
     if not os.path.exists("data/oplysninger.txt"):
         default_data = {
-            "skat": 0.4,
+            "skat": 0.39,
             "fradrag": 0,
             TAX_ALLOWANCE_UNIT_KEY: AMOUNT_UNIT_MONTH,
             "am bidrag": 0.08,
@@ -250,7 +250,7 @@ def load_settings():
             INTRODUCTION_DONE_KEY: False,
             "udgifter": DEFAULT_FIXED_EXPENSES,
             "budget kategorier": [],
-            "ønsket rådighedsbeløb": 1000,
+            "ønsket rådighedsbeløb": 0,
             DISPOSABLE_GOAL_UNIT_KEY: AMOUNT_UNIT_MONTH,
             "løn start": 15,
             "løn slut": 14,
@@ -590,10 +590,10 @@ def normalize_settings(settings):
     normalized.pop("boligstøtte", None)
 
     if "ønsket rådighedsbeløb" not in normalized:
-        normalized["ønsket rådighedsbeløb"] = float(normalized.get("rådighed advarsel", 1000) or 0)
+        normalized["ønsket rådighedsbeløb"] = float(normalized.get("rådighed advarsel", 0) or 0)
     normalized.pop("rådighed advarsel", None)
 
-    normalized["skat"] = _normalize_rate(normalized.get("skat", 0.4), 0.4)
+    normalized["skat"] = _normalize_rate(normalized.get("skat", 0.39), 0.39)
     normalized["fradrag"] = _coerce_float(normalized.get("fradrag", 0), 0.0, 0.0)
     normalized["am bidrag"] = _normalize_rate(normalized.get("am bidrag", 0.08), 0.08)
     normalized[PENSION_CONTRIBUTION_KEY] = _normalize_rate(

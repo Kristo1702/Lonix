@@ -329,6 +329,16 @@ QPushButton#InfoButton:hover {
     background: #edf7f4;
     border-color: #1f8a70;
 }
+QLabel#SettingsSectionLabel {
+    color: #111827;
+    font-size: 10pt;
+    font-weight: 900;
+    padding-top: 10px;
+}
+QLabel#SettingsSectionHint {
+    color: #6b7280;
+    font-size: 9pt;
+}
 QLineEdit, QComboBox {
     background: #ffffff;
     border: 1px solid #cfd8e3;
@@ -6934,6 +6944,7 @@ class SettingsPage(BasePage):
             return form
 
         tax_form = add_settings_form("Skat og indkomst")
+        self.tax_form = tax_form
         goal_form = add_settings_form("Mål og lønperiode")
         holiday_form = add_settings_form("Feriepenge")
 
@@ -6968,22 +6979,57 @@ class SettingsPage(BasePage):
         self.period_anchor_field = make_text_input(placeholder="dd-mm-åååå")
         self.holiday_rate_field = make_text_input(placeholder="12,5")
         self.employment_start_field = make_text_input(placeholder="dd-mm-åååå")
+        self.use_first_work_entry_button = QPushButton("Benyt første vagt")
+        self.use_first_work_entry_button.setObjectName("InlineButton")
+        self.use_first_work_entry_button.setCursor(Qt.PointingHandCursor)
+        self.use_first_work_entry_button.setVisible(False)
+        self.use_first_work_entry_button.clicked.connect(self._use_first_work_entry_date)
+        self.employment_start_row = QWidget()
+        employment_start_layout = QHBoxLayout(self.employment_start_row)
+        employment_start_layout.setContentsMargins(0, 0, 0, 0)
+        employment_start_layout.setSpacing(8)
+        employment_start_layout.addWidget(self.employment_start_field, 1)
+        employment_start_layout.addWidget(self.use_first_work_entry_button, 0, Qt.AlignVCenter)
+        self.employment_start_field.textChanged.connect(self._update_use_first_work_entry_button)
 
+        self._add_settings_section(
+            tax_form,
+            "Grundtal",
+            "De få tal Lønix bruger mest. Skat, AM og fradrag må gerne være 0, hvis det passer til dit skattekort.",
+        )
+        self._add_info_row(
+            tax_form,
+            "Timeløn",
+            self.default_rate_field,
+            "Timeløn",
+            "Timeløn er det du får før skat for én betalt arbejdstime. Den bruges som forslag, når du opretter nye vagter.",
+            required=True,
+        )
         self._add_info_row(
             tax_form,
             "Skat %",
             self.tax_field,
             "Skat %",
-            "A-skat er den almindelige skat, der trækkes af din løn efter AM-bidrag og fradrag. Skriv din trækprocent fra skattekortet, fx 39.",
-            required=True,
+            "A-skat er den almindelige skat, der trækkes af din løn efter AM-bidrag og fradrag. Skriv din trækprocent fra skattekortet, fx 39. Skriv 0 hvis du ikke betaler A-skat.",
+        )
+        self._add_info_row(
+            tax_form,
+            "AM-bidrag %",
+            self.am_field,
+            "AM-bidrag %",
+            "AM-bidrag er arbejdsmarkedsbidrag. Det trækkes normalt før A-skat. For de fleste er det 8. Skriv 0 hvis du er fritaget.",
+        )
+        self._add_settings_section(
+            tax_form,
+            "Fradrag",
+            "Fradrag sænker kun A-skatten. Det sænker ikke AM-bidraget.",
         )
         self._add_info_row(
             tax_form,
             "Fradrag",
             self.fradrag_field,
             "Fradrag",
-            "Fradrag er det beløb du kan tjene, før der trækkes A-skat. Det sænker ikke AM-bidraget. Skriv beløbet for den enhed du vælger nedenunder.",
-            required=True,
+            "Fradrag er det beløb du kan tjene, før der trækkes A-skat. Skriv beløbet fra skattekortet, eller 0 hvis du ikke har et fradrag.",
         )
         self._add_info_row(
             tax_form,
@@ -6991,29 +7037,11 @@ class SettingsPage(BasePage):
             self.fradrag_unit_combo,
             "Fradrag enhed",
             "Her vælger du, hvad fradragsbeløbet dækker. Hvis dit skattekort viser fradrag pr. måned, skal du vælge Måned.",
-            required=True,
         )
-        self._add_info_row(
+        self._add_settings_section(
             tax_form,
-            "AM-bidrag %",
-            self.am_field,
-            "AM-bidrag %",
-            "AM-bidrag er arbejdsmarkedsbidrag. Det trækkes normalt før A-skat. For de fleste er det 8.",
-            required=True,
-        )
-        self._add_info_row(
-            tax_form,
-            "Fødselsår",
-            self.birth_year_field,
-            "Fødselsår",
-            "Dit fødselsår bruges kun til AM-reglen for unge. Skriv fx 2008, eller lad feltet være tomt.",
-        )
-        self._add_info_row(
-            tax_form,
-            "AM-aldersregel",
-            self.am_age_rule_checkbox,
-            "AM-aldersregel",
-            "Slå den til, hvis Lønix skal tage højde for, at unge under 18 fra 2026 ikke altid betaler AM-bidrag.",
+            "Pension og ATP",
+            "Valgfrit. Brug kun felterne hvis pension eller ATP står på din lønseddel.",
         )
         self._add_info_row(
             tax_form,
@@ -7021,7 +7049,6 @@ class SettingsPage(BasePage):
             self.pension_field,
             "Eget pensionsbidrag %",
             "Eget pensionsbidrag er den del af lønnen, du selv betaler til pension. Den trækkes fra før AM-bidrag. Skriv 0 hvis du ikke betaler pension.",
-            required=True,
         )
         self._add_info_row(
             tax_form,
@@ -7035,14 +7062,14 @@ class SettingsPage(BasePage):
             "ATP aktiv",
             self.atp_enabled_checkbox,
             "ATP aktiv",
-            "ATP er en lovpligtig pensionsordning for mange lønmodtagere. Slå til hvis ATP skal med i lønberegningen.",
+            "ATP er en lille lovpligtig pensionsordning for mange lønmodtagere. Slå den kun til, hvis ATP står på din lønseddel.",
         )
         self._add_info_row(
             tax_form,
             "ATP medarbejder",
             self.atp_employee_field,
             "ATP medarbejder",
-            "Det ATP-beløb du selv betaler i én lønperiode. Det trækkes fra før AM-bidrag. Skriv 0 hvis du ikke bruger ATP.",
+            "Det ATP-beløb du selv betaler i én lønperiode. Det trækkes fra før AM-bidrag.",
         )
         self._add_info_row(
             tax_form,
@@ -7051,21 +7078,36 @@ class SettingsPage(BasePage):
             "ATP arbejdsgiver",
             "Det ATP-beløb arbejdsgiver betaler for én lønperiode. Det trækkes ikke fra din nettoløn.",
         )
+        self._add_settings_section(
+            tax_form,
+            "Aldersregel",
+            "Kun relevant hvis du er under 18, eller registrerer løn for en ung medarbejder.",
+        )
+        self._add_info_row(
+            tax_form,
+            "AM-aldersregel",
+            self.am_age_rule_checkbox,
+            "AM-aldersregel",
+            "Slå den til, hvis Lønix skal tage højde for, at unge under 18 fra 2026 ikke altid betaler AM-bidrag.",
+        )
+        self._add_info_row(
+            tax_form,
+            "Fødselsår",
+            self.birth_year_field,
+            "Fødselsår",
+            "Dit fødselsår bruges kun til AM-reglen for unge. Skriv fx 2008, eller lad feltet være tomt.",
+        )
+        self._add_settings_section(
+            tax_form,
+            "Anden indkomst",
+            "Valgfrit. Beløb her lægges til efter lønskat.",
+        )
         self._add_info_row(
             tax_form,
             "Anden indkomst netto pr. måned",
             self.other_income_field,
             "Anden indkomst netto",
-            "Anden indkomst netto er penge du får udbetalt efter skat ved siden af lønnen, fx SU. Beløbet lægges til efter lønskat.",
-            required=True,
-        )
-        self._add_info_row(
-            tax_form,
-            "Timeløn",
-            self.default_rate_field,
-            "Timeløn",
-            "Timeløn er det du får før skat for én betalt arbejdstime. Den bruges som forslag, når du opretter nye vagter.",
-            required=True,
+            "Anden indkomst netto er penge du får udbetalt efter skat ved siden af lønnen, fx SU. Beløbet lægges til efter lønskat. Skriv 0 hvis du ikke har anden indkomst.",
         )
 
         self._add_info_row(
@@ -7074,7 +7116,6 @@ class SettingsPage(BasePage):
             self.disposable_goal_field,
             "Ønsket rådighedsbeløb",
             "Rådighedsbeløb er de penge du har tilbage efter løn, anden indkomst og budgetudgifter. Skriv dit mål pr. måned, eller 0 hvis du ikke vil bruge målet.",
-            required=True,
         )
         self._add_info_row(
             goal_form,
@@ -7114,10 +7155,11 @@ class SettingsPage(BasePage):
             self.period_anchor_field,
             "Første periode starter",
             "Startdato for en kendt lønperiode, hvis du har valgt Uger. Lønix tæller de næste perioder ud fra den dato.",
-            required=True,
         )
         self.pay_period_form = goal_form
         self.period_type_combo.currentIndexChanged.connect(self._update_pay_period_fields)
+        self.atp_enabled_checkbox.toggled.connect(self._update_optional_tax_fields)
+        self.am_age_rule_checkbox.toggled.connect(self._update_optional_tax_fields)
 
         self._add_info_row(
             holiday_form,
@@ -7130,7 +7172,7 @@ class SettingsPage(BasePage):
         self._add_info_row(
             holiday_form,
             "Ansættelsesstart",
-            self.employment_start_field,
+            self.employment_start_row,
             "Ansættelsesstart",
             "Datoen du startede i jobbet. Den bruges til feriepenge og feriedage. Feltet kan være tomt.",
         )
@@ -7157,11 +7199,26 @@ class SettingsPage(BasePage):
         note.setObjectName("PageSubtitle")
         note.setWordWrap(True)
         self.root.addWidget(note)
-        required_note = QLabel("* betyder, at feltet skal udfyldes. Du kan stadig skrive 0, hvis feltet ikke gælder for dig.")
+        required_note = QLabel("* betyder, at feltet er nødvendigt for beregningen og ikke kan stå tomt eller være 0.")
         required_note.setObjectName("PageSubtitle")
         required_note.setWordWrap(True)
         self.root.addWidget(required_note)
         self.root.addStretch()
+
+    def _add_settings_section(self, form, title, hint=""):
+        section_widget = QWidget()
+        section_layout = QVBoxLayout(section_widget)
+        section_layout.setContentsMargins(0, 8, 0, 0)
+        section_layout.setSpacing(2)
+        title_label = QLabel(title)
+        title_label.setObjectName("SettingsSectionLabel")
+        section_layout.addWidget(title_label)
+        if hint:
+            hint_label = QLabel(hint)
+            hint_label.setObjectName("SettingsSectionHint")
+            hint_label.setWordWrap(True)
+            section_layout.addWidget(hint_label)
+        form.addRow(section_widget)
 
     def _add_info_row(self, form, label, field, title, help_text, required=False):
         label_widget = QWidget()
@@ -7232,11 +7289,42 @@ class SettingsPage(BasePage):
         self.end_day_field.setText(str(int(settings.get("løn slut", 14))))
         self.period_weeks_field.setText(str(int(settings.get(ft.PAY_PERIOD_WEEKS_KEY, ft.DEFAULT_PAY_PERIOD_WEEKS))))
         self.period_anchor_field.setText(str(settings.get(ft.PAY_PERIOD_ANCHOR_KEY, ft.DEFAULT_PAY_PERIOD_ANCHOR)))
+        self._update_optional_tax_fields()
         self._update_pay_period_fields()
         holiday_settings = holiday_pay_settings(settings)
         set_field_number(self.holiday_rate_field, holiday_settings["rate"])
         employment_start = holiday_settings["employment_start"] or first_work_entry_date(self.data)
         self.employment_start_field.setText(format_date(employment_start) if employment_start else "")
+        self._update_use_first_work_entry_button()
+
+    def _update_optional_tax_fields(self, *_args):
+        set_form_row_visible(self.tax_form, self.atp_employee_field, self.atp_enabled_checkbox.isChecked())
+        set_form_row_visible(self.tax_form, self.atp_employer_field, self.atp_enabled_checkbox.isChecked())
+        set_form_row_visible(self.tax_form, self.birth_year_field, self.am_age_rule_checkbox.isChecked())
+
+    def _field_employment_start(self):
+        text = self.employment_start_field.text().strip()
+        if not text:
+            return None
+        try:
+            return parse_date_text(text)
+        except ValueError:
+            return None
+
+    def _update_use_first_work_entry_button(self, *_args):
+        first_entry_date = first_work_entry_date(self.data)
+        if first_entry_date is None:
+            self.use_first_work_entry_button.setVisible(False)
+            return
+        self.use_first_work_entry_button.setToolTip(f"Sæt ansættelsesstart til {format_date(first_entry_date)}")
+        self.use_first_work_entry_button.setVisible(self._field_employment_start() != first_entry_date)
+
+    def _use_first_work_entry_date(self):
+        first_entry_date = first_work_entry_date(self.data)
+        if first_entry_date is None:
+            return
+        self.employment_start_field.setText(format_date(first_entry_date))
+        self._update_use_first_work_entry_button()
 
     def _update_pay_period_fields(self, *_args):
         is_week_period = self.period_type_combo.currentData() == ft.PAY_PERIOD_TYPE_WEEKS
@@ -7272,7 +7360,11 @@ class SettingsPage(BasePage):
                 raise ValueError("Fødselsår skal være et gyldigt årstal.")
             holiday_rate = parse_positive_number(self.holiday_rate_field, "Feriegodtgørelse")
             employment_start_text = self.employment_start_field.text().strip()
-            employment_start = parse_date_text(employment_start_text) if employment_start_text else None
+            employment_start = (
+                parse_date_text(employment_start_text)
+                if employment_start_text
+                else first_work_entry_date(self.data)
+            )
             new_settings = dict(self.settings) if isinstance(self.settings, dict) else {}
             existing_pay_period = ft.normalize_settings(new_settings)
             period_type = self.period_type_combo.currentData() or ft.PAY_PERIOD_TYPE_MONTH
@@ -7347,6 +7439,9 @@ class IntroductionDialog(QDialog):
         self.window = window
         self.force = force
         self.step_index = 0
+        self._last_setup_changed = False
+        self._setup_precision_hint_shown = False
+        self._initial_setup_input_state = None
         self.setModal(True)
         self.setWindowTitle("Introduktion")
         self.setWindowIcon(app_icon())
@@ -7447,8 +7542,8 @@ class IntroductionDialog(QDialog):
                 "title": "Dine grundoplysninger",
                 "text": (
                     "Udfyld de vigtigste tal. De gemmes i Indstillinger og bruges i resten af programmet.\n\n"
-                    "Fradrag, anden indkomst og rådighedsmål er månedstal. Budget sættes bagefter på Budget-siden "
-                    "og er også pr. måned. Lad et felt stå tomt, hvis du vil bruge standardværdien i feltets placeholder."
+                    "Her viser Lønix kun de vigtigste felter: timeløn, skat, fradrag, rådighedsmål, lønperiode "
+                    "og ansættelsesstart. Mere detaljerede felter kan tilføjes senere i Indstillinger."
                 ),
             },
             {
@@ -7521,6 +7616,7 @@ class IntroductionDialog(QDialog):
         root.addLayout(button_row)
 
         self._fill_existing_values() if self.force else None
+        self._initial_setup_input_state = self._setup_input_state()
         self._show_step()
         debug_widget_inventory("IntroductionDialog.__init__ end", limit=12)
 
@@ -7584,10 +7680,17 @@ class IntroductionDialog(QDialog):
         grid.setVerticalSpacing(8)
         root.addLayout(grid)
 
-        self.setup_other_income = make_text_input(placeholder="0 kr")
-        self.setup_tax = make_text_input(placeholder="40%")
-        self.setup_pension = make_text_input(placeholder="0%")
+        self.setup_tax = make_text_input(placeholder="39%")
         self.setup_fradrag = make_text_input(placeholder="0 kr")
+        self.setup_fradrag_unit = ModernComboBox()
+        for label, value in [
+            ("Måned", ft.AMOUNT_UNIT_MONTH),
+            ("14 dage", ft.AMOUNT_UNIT_TWO_WEEKS),
+            ("Uge", ft.AMOUNT_UNIT_WEEK),
+            ("Dag", ft.AMOUNT_UNIT_DAY),
+            ("Periode", ft.AMOUNT_UNIT_PERIOD),
+        ]:
+            self.setup_fradrag_unit.addItem(label, value)
         self.setup_goal = make_text_input(placeholder="0 kr")
         self.setup_period_type = ModernComboBox()
         self.setup_period_type.addItem("Måned", ft.PAY_PERIOD_TYPE_MONTH)
@@ -7597,19 +7700,20 @@ class IntroductionDialog(QDialog):
         self.setup_period_weeks = make_text_input(placeholder="2")
         self.setup_period_anchor = make_text_input(placeholder=ft.DEFAULT_PAY_PERIOD_ANCHOR)
         self.setup_rate = make_text_input(placeholder="150 kr")
+        self.setup_employment_start = make_text_input(placeholder="dd-mm-åååå")
 
         fields = [
-            ("Skatteprocent", self.setup_tax),
-            ("Eget pensionsbidrag", self.setup_pension),
             ("Timeløn", self.setup_rate),
-            ("Fradrag pr. måned", self.setup_fradrag),
-            ("Anden indkomst netto pr. måned", self.setup_other_income),
+            ("Skat %", self.setup_tax),
+            ("Fradrag", self.setup_fradrag),
+            ("Fradrag enhed", self.setup_fradrag_unit),
             ("Ønsket rådighedsbeløb pr. måned", self.setup_goal),
             ("Lønperiode type", self.setup_period_type),
             ("Lønperiode startdag", self.setup_start, "month_start"),
             ("Lønperiode slutdag", self.setup_end, "month_end"),
             ("Antal uger", self.setup_period_weeks, "weeks"),
             ("Første periode starter", self.setup_period_anchor, "anchor"),
+            ("Ansættelsesstart", self.setup_employment_start),
         ]
         self.setup_period_cells = {}
 
@@ -7662,10 +7766,10 @@ class IntroductionDialog(QDialog):
 
     def _fill_existing_values(self):
         settings = ft.normalize_settings(self.window.settings)
-        set_field_number(self.setup_other_income, ft.get_other_income(settings))
-        set_field_number(self.setup_tax, float(settings.get("skat", 0.4)) * 100)
-        set_field_number(self.setup_pension, ft.get_pension_contribution_rate(settings) * 100)
+        set_field_number(self.setup_tax, float(settings.get("skat", 0.39)) * 100)
         set_field_number(self.setup_fradrag, float(settings.get("fradrag", 0)))
+        fradrag_unit_index = self.setup_fradrag_unit.findData(settings.get(ft.TAX_ALLOWANCE_UNIT_KEY, ft.AMOUNT_UNIT_MONTH))
+        self.setup_fradrag_unit.setCurrentIndex(max(0, fradrag_unit_index))
         set_field_number(self.setup_goal, ft.get_disposable_income_goal(settings))
         period_type_index = self.setup_period_type.findData(settings.get(ft.PAY_PERIOD_TYPE_KEY, ft.PAY_PERIOD_TYPE_MONTH))
         if period_type_index < 0:
@@ -7678,6 +7782,9 @@ class IntroductionDialog(QDialog):
         self.setup_period_weeks.setText(str(int(settings.get(ft.PAY_PERIOD_WEEKS_KEY, ft.DEFAULT_PAY_PERIOD_WEEKS))))
         self.setup_period_anchor.setText(str(settings.get(ft.PAY_PERIOD_ANCHOR_KEY, ft.DEFAULT_PAY_PERIOD_ANCHOR)))
         set_field_number(self.setup_rate, ft.get_default_hourly_rate(settings))
+        holiday_settings = holiday_pay_settings(settings)
+        employment_start = holiday_settings["employment_start"] or first_work_entry_date(getattr(self.window, "data", []))
+        self.setup_employment_start.setText(format_date(employment_start) if employment_start else "")
         self._update_setup_pay_period_fields()
 
     def _current_step(self):
@@ -7970,7 +8077,7 @@ class IntroductionDialog(QDialog):
 
     def _visual_setup(self):
         self._visual_title("Udfyld kun de tal, du kender nu")
-        self.visual_layout.addWidget(self._mini_row("Skat", "40%"))
+        self.visual_layout.addWidget(self._mini_row("Skat", "39%"))
         self.visual_layout.addWidget(self._mini_row("Pension", "0%"))
         self.visual_layout.addWidget(self._mini_row("Timeløn", "150 kr."))
         self.visual_layout.addWidget(self._mini_row("Månedstal", "Fradrag og mål"))
@@ -7994,29 +8101,63 @@ class IntroductionDialog(QDialog):
             return default
         return parse_int_field(field, label, 1, 31)
 
+    def _setup_input_state(self):
+        return {
+            "tax": self.setup_tax.text().strip(),
+            "fradrag": self.setup_fradrag.text().strip(),
+            "fradrag_unit": self.setup_fradrag_unit.currentData(),
+            "goal": self.setup_goal.text().strip(),
+            "period_type": self.setup_period_type.currentData(),
+            "start": self.setup_start.text().strip(),
+            "end": self.setup_end.text().strip(),
+            "weeks": self.setup_period_weeks.text().strip(),
+            "anchor": self.setup_period_anchor.text().strip(),
+            "rate": self.setup_rate.text().strip(),
+            "employment_start": self.setup_employment_start.text().strip(),
+        }
+
     def _save_setup_step(self):
         debug_window_log("IntroductionDialog._save_setup_step")
         try:
-            tax_value = self._field_number(self.setup_tax, 40, "Skatteprocent", allow_zero=True)
-            pension_value = self._field_number(self.setup_pension, 0, "Eget pensionsbidrag", allow_zero=True)
-            am_value = float(self.window.settings.get("am bidrag", 0.08))
             new_settings = dict(self.window.settings) if isinstance(self.window.settings, dict) else {}
             existing_settings = ft.normalize_settings(new_settings)
+            tax_value = self._field_number(
+                self.setup_tax,
+                float(existing_settings.get("skat", 0.39)) * 100,
+                "Skatteprocent",
+                allow_zero=True,
+            )
             period_type = self.setup_period_type.currentData() or ft.PAY_PERIOD_TYPE_MONTH
+            employment_start_text = self.setup_employment_start.text().strip()
+            existing_holiday_settings = holiday_pay_settings(existing_settings)
+            employment_start = (
+                parse_date_text(employment_start_text)
+                if employment_start_text
+                else existing_holiday_settings.get("employment_start") or first_work_entry_date(getattr(self.window, "data", []))
+            )
             updated_settings = {
                 "skat": tax_value / 100 if tax_value > 1 else tax_value,
-                ft.PENSION_CONTRIBUTION_KEY: pension_value / 100 if pension_value > 1 else pension_value,
-                "fradrag": self._field_number(self.setup_fradrag, 0, "Fradrag", allow_zero=True),
-                "am bidrag": am_value,
-                "anden indkomst netto": self._field_number(self.setup_other_income, 0, "Anden indkomst", allow_zero=True),
+                "fradrag": self._field_number(
+                    self.setup_fradrag,
+                    float(existing_settings.get("fradrag", 0) or 0),
+                    "Fradrag",
+                    allow_zero=True,
+                ),
+                ft.TAX_ALLOWANCE_UNIT_KEY: self.setup_fradrag_unit.currentData() or ft.AMOUNT_UNIT_MONTH,
                 "ønsket rådighedsbeløb": self._field_number(
                     self.setup_goal,
-                    0,
+                    float(existing_settings.get("ønsket rådighedsbeløb", 0) or 0),
                     "Ønsket rådighedsbeløb",
                     allow_zero=True,
                 ),
-                "standard timeløn": self._field_number(self.setup_rate, 150, "Timeløn", allow_zero=False),
+                "standard timeløn": self._field_number(
+                    self.setup_rate,
+                    ft.get_default_hourly_rate(existing_settings),
+                    "Timeløn",
+                    allow_zero=False,
+                ),
                 ft.PAY_PERIOD_TYPE_KEY: period_type,
+                HOLIDAY_PAY_EMPLOYMENT_START_KEY: date_to_key(employment_start) if employment_start else "",
             }
             if period_type == ft.PAY_PERIOD_TYPE_WEEKS:
                 anchor_text = self.setup_period_anchor.text().strip()
@@ -8027,7 +8168,7 @@ class IntroductionDialog(QDialog):
                         ft.PAY_PERIOD_WEEKS_KEY: (
                             parse_int_field(self.setup_period_weeks, "Antal uger", 1, 52)
                             if self.setup_period_weeks.text().strip()
-                            else ft.DEFAULT_PAY_PERIOD_WEEKS
+                            else int(existing_settings.get(ft.PAY_PERIOD_WEEKS_KEY, ft.DEFAULT_PAY_PERIOD_WEEKS))
                         ),
                         ft.PAY_PERIOD_ANCHOR_KEY: (
                             date_to_key(parse_date_text(anchor_text))
@@ -8039,13 +8180,22 @@ class IntroductionDialog(QDialog):
             else:
                 updated_settings.update(
                     {
-                        "løn start": self._field_int(self.setup_start, 15, "Lønperiode start"),
-                        "løn slut": self._field_int(self.setup_end, 14, "Lønperiode slut"),
+                        "løn start": self._field_int(
+                            self.setup_start,
+                            int(existing_settings.get("løn start", 15)),
+                            "Lønperiode start",
+                        ),
+                        "løn slut": self._field_int(
+                            self.setup_end,
+                            int(existing_settings.get("løn slut", 14)),
+                            "Lønperiode slut",
+                        ),
                         ft.PAY_PERIOD_WEEKS_KEY: int(existing_settings.get(ft.PAY_PERIOD_WEEKS_KEY, ft.DEFAULT_PAY_PERIOD_WEEKS)),
                         ft.PAY_PERIOD_ANCHOR_KEY: existing_settings.get(ft.PAY_PERIOD_ANCHOR_KEY, ft.DEFAULT_PAY_PERIOD_ANCHOR),
                     }
                 )
             new_settings.update(updated_settings)
+            self._last_setup_changed = self._setup_input_state() != (self._initial_setup_input_state or {})
         except ValueError as error:
             QMessageBox.warning(self, "Ugyldige oplysninger", str(error))
             return False
@@ -8070,6 +8220,15 @@ class IntroductionDialog(QDialog):
             return
         if step["key"] == "setup" and not self._save_setup_step():
             return
+        if step["key"] == "setup" and self._last_setup_changed and not self._setup_precision_hint_shown:
+            QMessageBox.information(
+                self,
+                "Flere oplysninger kan tilføjes senere",
+                "Dine grundoplysninger er gemt.\n\n"
+                "Du kan tilføje flere oplysninger i Indstillinger, fx pension, ATP, AM-regler og anden indkomst. "
+                "Det kan gøre beregningerne mere præcise.",
+            )
+            self._setup_precision_hint_shown = True
         self.step_index += 1
         self._show_step()
 
