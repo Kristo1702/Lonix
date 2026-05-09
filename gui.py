@@ -101,24 +101,69 @@ BASE_SIDEBAR_WIDTH = 224
 MAX_SIDEBAR_WIDTH = 320
 SIDEBAR_WINDOW_RATIO = 0.18
 DASHBOARD_WIDGET_ORDER_KEY = "overblik widget rækkefølge"
+
 DASHBOARD_DEFAULT_WIDGET_ORDER = (
+    "setup_guide",
     "goal",
     "progress",
     "process",
-    "holiday_pay",
     "estimates",
+    "holiday_pay",
+    "pension",
     "stats",
-    "budget",
 )
 
-DASHBOARD_AVAILABLE_WIDGET_ORDER = DASHBOARD_DEFAULT_WIDGET_ORDER + (
-    "pension",
+DASHBOARD_EXTRA_WIDGET_ORDER = (
+    "budget",
     "breakdown",
     "recent",
     "salary_calculator",
 )
+
+DASHBOARD_AVAILABLE_WIDGET_ORDER = DASHBOARD_DEFAULT_WIDGET_ORDER + DASHBOARD_EXTRA_WIDGET_ORDER
+
+DASHBOARD_LEGACY_DEFAULT_WIDGET_ORDERS = (
+    (
+        "goal",
+        "progress",
+        "process",
+        "holiday_pay",
+        "estimates",
+        "stats",
+        "budget",
+    ),
+    (
+        "goal",
+        "progress",
+        "process",
+        "estimates",
+        "holiday_pay",
+        "stats",
+        "budget",
+    ),
+    (
+        "setup_guide",
+        "goal",
+        "progress",
+        "process",
+        "holiday_pay",
+        "estimates",
+        "stats",
+        "budget",
+    ),
+    (
+        "goal",
+        "progress",
+        "process",
+        "holiday_pay",
+        "estimates",
+        "stats",
+    ),
+)
 DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY = "overblik budget widget tilføjet"
 DASHBOARD_HOLIDAY_PAY_WIDGET_MIGRATION_KEY = "overblik feriepenge widget tilføjet"
+DASHBOARD_SETUP_GUIDE_MANUAL_KEY = "overblik setup guide manuelt tilføjet"
+DASHBOARD_SETUP_GUIDE_DISMISSED_KEY = "overblik setup guide skjult"
 DASHBOARD_WIDGET_TITLES = {
     "goal": "Rådighedsmål",
     "progress": "Tidslinje",
@@ -126,6 +171,7 @@ DASHBOARD_WIDGET_TITLES = {
     "estimates": "Estimater",
     "stats": "Statistik",
     "holiday_pay": "Feriepenge",
+    "setup_guide": "Kom godt i gang",
     "pension": "Pension",
     "budget": "Budget",
     "breakdown": "Skatteopdeling",
@@ -599,12 +645,17 @@ def has_required_settings(settings):
 
 
 def dashboard_widget_order(settings):
-    if not isinstance(settings, dict) or DASHBOARD_WIDGET_ORDER_KEY not in settings:
-        return list(DASHBOARD_DEFAULT_WIDGET_ORDER)
+    default_order = list(DASHBOARD_DEFAULT_WIDGET_ORDER)
 
-    raw_order = settings.get(DASHBOARD_WIDGET_ORDER_KEY, [])
-    if not isinstance(raw_order, list):
-        return list(DASHBOARD_DEFAULT_WIDGET_ORDER)
+    if not isinstance(settings, dict):
+        return default_order
+
+    raw_order = settings.get(DASHBOARD_WIDGET_ORDER_KEY)
+
+    # Hvis der ikke findes en gemt rækkefølge, eller den er ødelagt/tom,
+    # skal Overblik bruge den rigtige default.
+    if not isinstance(raw_order, list) or not raw_order:
+        return default_order
 
     seen = set()
     order = []
@@ -613,12 +664,15 @@ def dashboard_widget_order(settings):
             continue
         seen.add(key)
         order.append(key)
-    if not settings.get(DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY, False) and "budget" not in order:
-        insert_index = order.index("stats") + 1 if "stats" in order else len(order)
-        order.insert(insert_index, "budget")
-    if not settings.get(DASHBOARD_HOLIDAY_PAY_WIDGET_MIGRATION_KEY, False) and "holiday_pay" not in order:
-        insert_index = order.index("process") + 1 if "process" in order else len(order)
-        order.insert(insert_index, "holiday_pay")
+
+    # Hvis alle gemte keys var ugyldige, må siden ikke blive tom.
+    if not order:
+        return default_order
+
+    # Reparer gamle forkerte standard-rækkefølger fra tidligere versioner.
+    if tuple(order) in DASHBOARD_LEGACY_DEFAULT_WIDGET_ORDERS:
+        return default_order
+
     return order
 
 
@@ -2328,6 +2382,99 @@ def pension_calculation(data, settings, today=None):
     return base
 
 
+def setup_guide_status(data, settings):
+    settings = ft.normalize_settings(settings if isinstance(settings, dict) else {})
+    has_settings = has_required_settings(settings)
+
+    has_work_entries = any(
+        not ft.is_day_off(next(iter(entry.values())))
+        for entry in data or []
+        if isinstance(entry, dict) and entry
+    )
+
+    budget_categories = ft.get_budget_categories(settings) if isinstance(settings, dict) else []
+    holiday_settings = holiday_pay_settings(settings)
+
+    tax_ok = (
+        has_settings
+        and ft.get_default_hourly_rate(settings) > 0
+        and "skat" in settings
+        and "am bidrag" in settings
+        and "fradrag" in settings
+        and ft.get_default_hourly_rate(settings) > 0
+    )
+
+    period_type = settings.get(ft.PAY_PERIOD_TYPE_KEY, ft.PAY_PERIOD_TYPE_MONTH)
+    if period_type == ft.PAY_PERIOD_TYPE_WEEKS:
+        pay_period_ok = bool(settings.get(ft.PAY_PERIOD_WEEKS_KEY)) and bool(settings.get(ft.PAY_PERIOD_ANCHOR_KEY))
+    else:
+        pay_period_ok = bool(settings.get("løn start")) and bool(settings.get("løn slut"))
+
+    pension_ok = (
+        ft.get_pension_contribution_rate(settings) > 0
+        or ft.get_employer_pension_contribution_rate(settings) > 0
+        or bool(settings.get(ft.ATP_ENABLED_KEY, False))
+    )
+
+    holiday_ok = (
+        holiday_settings.get("rate", 0) > 0
+        and bool(holiday_settings.get("employment_start") or first_work_entry_date(data))
+    )
+
+    items = [
+        {
+            "key": "shifts",
+            "title": "Vagter",
+            "description": "Tilføj mindst én vagt, så Lønix kan beregne løn, timer og statistik.",
+            "button": "Tilføj vagter",
+            "ok": has_work_entries,
+        },
+        {
+            "key": "budget",
+            "title": "Budget",
+            "description": "Tilføj dine faste månedlige udgifter, så rådighedsbeløbet bliver korrekt.",
+            "button": "Indstil budget",
+            "ok": bool(budget_categories),
+        },
+        {
+            "key": "tax",
+            "title": "Skat og grundtal",
+            "description": "Timeløn, skat, AM-bidrag og fradrag styrer dine nettoberegninger.",
+            "button": "Indstil skat",
+            "ok": tax_ok,
+        },
+        {
+            "key": "pay_period",
+            "title": "Lønperiode",
+            "description": "Vælg hvordan din lønperiode starter og slutter.",
+            "button": "Indstil lønperiode",
+            "ok": has_settings and pay_period_ok,
+        },
+        {
+            "key": "pension",
+            "title": "Pension og ATP",
+            "description": "Tilføj eget pensionsbidrag, arbejdsgiverpension eller ATP hvis det står på din lønseddel.",
+            "button": "Indstil pension",
+            "ok": pension_ok,
+        },
+        {
+            "key": "holiday_pay",
+            "title": "Feriepenge",
+            "description": "Sæt feriegodtgørelse og ansættelsesstart for at få feriepenge og feriedage med.",
+            "button": "Indstil feriepenge",
+            "ok": holiday_ok,
+        },
+    ]
+
+    completed_count = sum(1 for item in items if item["ok"])
+    return {
+        "items": items,
+        "completed_count": completed_count,
+        "total_count": len(items),
+        "complete": completed_count == len(items),
+    }
+
+
 def build_periods(data, settings):
     if not data or not has_required_settings(settings):
         return [], []
@@ -2933,8 +3080,12 @@ class DashboardWidgetFrame(QFrame):
         self.drag_finish_callback = drag_finish_callback
         self.remove_callback = remove_callback
         self.edit_mode = False
+        self.show_remove_button_outside_edit_mode = False
         self.setObjectName("DashboardSection")
+        self.is_setup_guide = key == "setup_guide"
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        if key == "setup_guide":
+            self.setMinimumHeight(0)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 16)
@@ -2962,6 +3113,27 @@ class DashboardWidgetFrame(QFrame):
         self.content_layout.setSpacing(12)
         root.addLayout(self.content_layout)
 
+        if self.is_setup_guide:
+            self.setStyleSheet(
+                """
+                QFrame#DashboardSection {
+                    background: qlineargradient(
+                        x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #1d4ed8,
+                        stop:0.52 #1e40af,
+                        stop:1 #172554
+                    );
+                    border: 1px solid #93c5fd;
+                    border-radius: 12px;
+                }
+                QLabel {
+                    background: transparent;
+                    border: 0;
+                }
+                """
+            )
+            title_label.setStyleSheet("color: #ffffff; font-size: 13pt; font-weight: 950;")
+
         self.set_reorder_mode(False)
 
     def addWidget(self, widget, stretch=0):
@@ -2973,9 +3145,61 @@ class DashboardWidgetFrame(QFrame):
     def set_reorder_mode(self, enabled):
         self.edit_mode = enabled
         self.drag_handle.setVisible(enabled)
-        self.remove_button.setVisible(enabled)
+        self._sync_remove_button_visibility()
+
+
+    def set_remove_button_outside_edit_mode(self, enabled):
+        self.show_remove_button_outside_edit_mode = bool(enabled)
+        self._sync_remove_button_visibility()
+
+
+    def _sync_remove_button_visibility(self):
+        self.remove_button.setVisible(
+            self.edit_mode or self.show_remove_button_outside_edit_mode
+        )
 
     def set_drag_active(self, active):
+        if self.is_setup_guide:
+            if active:
+                self.setStyleSheet(
+                    """
+                    QFrame#DashboardSection {
+                        background: qlineargradient(
+                            x1:0, y1:0, x2:1, y2:1,
+                            stop:0 #2563eb,
+                            stop:0.52 #1d4ed8,
+                            stop:1 #172554
+                        );
+                        border: 2px solid #ffffff;
+                        border-radius: 12px;
+                    }
+                    QLabel {
+                        background: transparent;
+                        border: 0;
+                    }
+                    """
+                )
+            else:
+                self.setStyleSheet(
+                    """
+                    QFrame#DashboardSection {
+                        background: qlineargradient(
+                            x1:0, y1:0, x2:1, y2:1,
+                            stop:0 #1d4ed8,
+                            stop:0.52 #1e40af,
+                            stop:1 #172554
+                        );
+                        border: 1px solid #93c5fd;
+                        border-radius: 12px;
+                    }
+                    QLabel {
+                        background: transparent;
+                        border: 0;
+                    }
+                    """
+                )
+            return
+
         if active:
             self.setStyleSheet(
                 """
@@ -3168,6 +3392,12 @@ class DashboardWidgetPreview(QFrame):
                 )
             )
             self.preview_layout.addWidget(self._note("Optjent feriepenge og anmodningsperiode."))
+
+        elif self.key == "setup_guide":
+            self.preview_layout.addWidget(self._setup_preview_row("Vagter", "✓", "#16a34a"))
+            self.preview_layout.addWidget(self._setup_preview_row("Budget", "!", "#f97316"))
+            self.preview_layout.addWidget(self._setup_preview_row("Skat og pension", "!", "#f97316"))
+            self.preview_layout.addWidget(self._note("Guide til at få Lønix sat korrekt op."))
 
         elif self.key == "pension":
             self.preview_layout.addLayout(
@@ -3409,6 +3639,49 @@ class DashboardWidgetPreview(QFrame):
         label.setFixedWidth(22)
         label.setStyleSheet("color: #94a3b8; font-size: 15pt; font-weight: 900;")
         return label
+    
+    def _setup_preview_row(self, left, symbol, accent):
+        row = QFrame()
+        row.setFixedHeight(28)
+        row.setStyleSheet(
+            """
+            QFrame {
+                background: #fdf4ff;
+                border: 1px solid #f5d0fe;
+                border-radius: 7px;
+            }
+            QLabel {
+                background: transparent;
+                border: 0;
+            }
+            """
+        )
+
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(9, 4, 9, 4)
+        layout.setSpacing(8)
+
+        left_label = QLabel(left)
+        left_label.setStyleSheet("color: #581c87; font-size: 8.5pt; font-weight: 900;")
+        layout.addWidget(left_label, 1)
+
+        icon = QLabel(symbol)
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setFixedSize(20, 20)
+        icon.setStyleSheet(
+            f"""
+            QLabel {{
+                color: white;
+                background: {accent};
+                border-radius: 10px;
+                font-size: 9pt;
+                font-weight: 950;
+            }}
+            """
+        )
+        layout.addWidget(icon, 0, Qt.AlignVCenter)
+
+        return row
 
     def _note(self, text):
         label = QLabel(text)
@@ -4307,6 +4580,266 @@ class DashboardHolidayPayWidget(QWidget):
             self.details_callback(self.calculation)
 
 
+class SetupGuideStatusIcon(QWidget):
+    def __init__(self, ok=False):
+        super().__init__()
+        self.ok = bool(ok)
+        self.setFixedSize(30, 30)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def set_ok(self, ok):
+        self.ok = bool(ok)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(3, 3, -3, -3)
+
+        if self.ok:
+            fill = QColor("#dcfce7")
+            border = QColor("#22c55e")
+            symbol = "✓"
+            text_color = QColor("#15803d")
+        else:
+            fill = QColor("#fff7ed")
+            border = QColor("#fb923c")
+            symbol = "!"
+            text_color = QColor("#c2410c")
+
+        painter.setPen(QPen(border, 1.6))
+        painter.setBrush(fill)
+        painter.drawEllipse(rect)
+
+        font = QFont("Segoe UI", 11, QFont.Black)
+        painter.setFont(font)
+        painter.setPen(text_color)
+        painter.drawText(rect, Qt.AlignCenter, symbol)
+
+
+class SetupGuideRow(QFrame):
+    ROW_HEIGHT = 142
+
+    def __init__(self, title, description, button_text, callback):
+        super().__init__()
+        self.callback = callback
+        self.setObjectName("SetupGuideRow")
+        self.setMinimumHeight(self.ROW_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.setStyleSheet(
+            """
+            QFrame#SetupGuideRow {
+                background: rgba(255, 255, 255, 0.90);
+                border: 1px solid rgba(255, 255, 255, 0.95);
+                border-radius: 10px;
+            }
+            QLabel {
+                background: transparent;
+                border: 0;
+            }
+            QPushButton#SetupGuideActionButton {
+                background: #ffffff;
+                color: #1e3a8a;
+                border: 1px solid rgba(30, 58, 138, 0.24);
+                border-radius: 8px;
+                padding: 7px 12px;
+                font-weight: 900;
+                min-width: 138px;
+                min-height: 30px;
+            }
+            QPushButton#SetupGuideActionButton:hover {
+                background: #eff6ff;
+                border-color: #3b82f6;
+                color: #1d4ed8;
+            }
+            QPushButton#SetupGuideActionButton:pressed {
+                background: #dbeafe;
+            }
+            """
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(13, 10, 13, 10)
+        root.setSpacing(8)
+
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("color: #172554; font-size: 10.5pt; font-weight: 950;")
+        self.title_label.setWordWrap(True)
+        self.title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        self.description_label = QLabel(description)
+        self.description_label.setStyleSheet("color: #334155; font-size: 8.7pt; line-height: 125%;")
+        self.description_label.setWordWrap(True)
+        self.description_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.description_label.setMinimumHeight(44)
+        self.description_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        root.addWidget(self.title_label)
+        root.addWidget(self.description_label, 1)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(10)
+
+        bottom_row.addStretch()
+
+        self.button = QPushButton(button_text)
+        self.button.setObjectName("SetupGuideActionButton")
+        self.button.setCursor(Qt.PointingHandCursor)
+        self.button.clicked.connect(self._run_callback)
+        bottom_row.addWidget(self.button, 0, Qt.AlignVCenter)
+
+        self.icon = SetupGuideStatusIcon(False)
+        bottom_row.addWidget(self.icon, 0, Qt.AlignVCenter)
+
+        root.addLayout(bottom_row)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        return QSize(hint.width(), self.ROW_HEIGHT)
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(hint.width(), self.ROW_HEIGHT)
+
+    def _run_callback(self):
+        if self.callback is not None:
+            self.callback()
+
+    def set_ok(self, ok):
+        self.icon.set_ok(ok)
+
+
+class DashboardSetupGuideWidget(QWidget):
+    def __init__(self, action_callbacks):
+        super().__init__()
+        self.action_callbacks = action_callbacks
+        self.rows = {}
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        self.setStyleSheet(
+            """
+            QWidget#DashboardSetupGuideWidget {
+                background: transparent;
+            }
+            QLabel {
+                background: transparent;
+                border: 0;
+            }
+            """
+        )
+        self.setObjectName("DashboardSetupGuideWidget")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
+
+        hero = QFrame()
+        hero.setStyleSheet(
+            """
+            QFrame {
+                background: rgba(255, 255, 255, 0.14);
+                border: 1px solid rgba(255, 255, 255, 0.26);
+                border-radius: 12px;
+            }
+            QLabel {
+                background: transparent;
+                border: 0;
+            }
+            """
+        )
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(14, 12, 14, 12)
+        hero_layout.setSpacing(12)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(3)
+
+        self.title_label = QLabel("Få mest ud af Lønix")
+        self.title_label.setStyleSheet("color: #ffffff; font-size: 18pt; font-weight: 950;")
+        self.title_label.setWordWrap(True)
+
+        self.detail_label = QLabel()
+        self.detail_label.setStyleSheet("color: #fdf4ff; font-size: 9.5pt; font-weight: 650;")
+        self.detail_label.setWordWrap(True)
+
+        text_layout.addWidget(self.title_label)
+        text_layout.addWidget(self.detail_label)
+        hero_layout.addLayout(text_layout, 1)
+
+        self.progress_pill = QLabel()
+        self.progress_pill.setAlignment(Qt.AlignCenter)
+        self.progress_pill.setMinimumWidth(92)
+        self.progress_pill.setStyleSheet(
+            """
+            QLabel {
+                background: #ffffff;
+                color: #1e3a8a;
+                border-radius: 15px;
+                padding: 7px 12px;
+                font-weight: 950;
+            }
+            """
+        )
+        hero_layout.addWidget(self.progress_pill, 0, Qt.AlignVCenter)
+
+        root.addWidget(hero)
+
+        self.rows_layout = QGridLayout()
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setHorizontalSpacing(10)
+        self.rows_layout.setVerticalSpacing(12)
+        root.addLayout(self.rows_layout)
+        root.addStretch(0)
+
+    def update_status(self, status):
+        items = status.get("items", [])
+        completed_count = status.get("completed_count", 0)
+        total_count = status.get("total_count", len(items))
+
+        self.progress_pill.setText(f"{completed_count}/{total_count}")
+        if completed_count == total_count:
+            self.detail_label.setText("Alt er sat op. Widgeten kan fjernes, men du kan altid tilføje den igen senere.")
+        else:
+            missing = total_count - completed_count
+            self.detail_label.setText(
+                f"{missing} punkt{'er' if missing != 1 else ''} mangler. "
+                "Når de er udfyldt, får du mere præcise løn-, budget-, ferie- og pensionsberegninger."
+            )
+
+        for index, item in enumerate(items):
+            key = item["key"]
+            if key not in self.rows:
+                row = SetupGuideRow(
+                    item["title"],
+                    item["description"],
+                    item["button"],
+                    self.action_callbacks.get(key),
+                )
+                self.rows[key] = row
+                self.rows_layout.addWidget(row, index // 2, index % 2)
+
+            self.rows[key].set_ok(item.get("ok", False))
+
+        for column in range(2):
+            self.rows_layout.setColumnStretch(column, 1)
+            self.rows_layout.setColumnMinimumWidth(column, 0)
+
+        for row_index in range((len(items) + 1) // 2):
+            self.rows_layout.setRowMinimumHeight(row_index, SetupGuideRow.ROW_HEIGHT)
+            self.rows_layout.setRowStretch(row_index, 0)
+
+        self.rows_layout.invalidate()
+        self.updateGeometry()
+
+        parent = self.parentWidget()
+        while parent is not None:
+            parent.updateGeometry()
+            parent = parent.parentWidget()
+
+
 class DashboardPensionWidget(QWidget):
     def __init__(self, setup_callback):
         super().__init__()
@@ -4843,6 +5376,20 @@ class DashboardPage(CompactScrollPage):
         holiday_panel.addWidget(self.holiday_pay_widget)
         self.dashboard_widgets["holiday_pay"] = holiday_panel
 
+        setup_guide_panel = self._make_widget_frame("Kom godt i gang", "setup_guide")
+        self.setup_guide_widget = DashboardSetupGuideWidget(
+            {
+                "shifts": self._go_to_history_page,
+                "budget": self._go_to_budget_page,
+                "tax": self._go_to_settings_tax_field,
+                "pay_period": self._go_to_settings_pay_period_field,
+                "pension": self._go_to_settings_pension_field,
+                "holiday_pay": self._go_to_settings_holiday_pay_field,
+            }
+        )
+        setup_guide_panel.addWidget(self.setup_guide_widget)
+        self.dashboard_widgets["setup_guide"] = setup_guide_panel
+
         pension_panel = self._make_widget_frame("Pension", "pension")
         self.pension_widget = DashboardPensionWidget(
             self._go_to_settings_pension_field,
@@ -4888,6 +5435,55 @@ class DashboardPage(CompactScrollPage):
             parent=self.page_body,
         )
 
+    def _setup_guide_was_added_by_user(self):
+        return bool(
+            isinstance(self.settings, dict)
+            and self.settings.get(DASHBOARD_SETUP_GUIDE_MANUAL_KEY, False)
+        )
+
+
+    def _sync_special_widget_buttons(self):
+        setup_guide_panel = self.dashboard_widgets.get("setup_guide")
+        if setup_guide_panel is None:
+            return
+
+        show_auto_remove_button = (
+            "setup_guide" in self.widget_order
+            and not self._setup_guide_was_added_by_user()
+        )
+
+        setup_guide_panel.set_remove_button_outside_edit_mode(show_auto_remove_button)
+
+    def _setup_guide_status(self):
+        return setup_guide_status(self.data, self.settings)
+
+    def _sync_setup_guide_auto_visibility(self):
+        new_settings = dict(self.settings) if isinstance(self.settings, dict) else ft.load_settings()
+
+        raw_order = new_settings.get(DASHBOARD_WIDGET_ORDER_KEY)
+        repaired_order = dashboard_widget_order(new_settings)
+
+        should_repair_saved_order = (
+            not isinstance(raw_order, list)
+            or not raw_order
+            or tuple(
+                key
+                for key in raw_order
+                if key in DASHBOARD_AVAILABLE_WIDGET_ORDER
+            ) in DASHBOARD_LEGACY_DEFAULT_WIDGET_ORDERS
+        )
+
+        if not should_repair_saved_order:
+            return
+
+        new_settings[DASHBOARD_WIDGET_ORDER_KEY] = repaired_order
+
+        try:
+            ft.save_settings(new_settings, history_reason="Reparer overblik-widgets")
+            self.window.settings = ft.load_settings()
+        except (OSError, ValueError, TypeError):
+            pass
+
     def _apply_widget_order(self):
         self.widget_order = [
             key
@@ -4911,6 +5507,8 @@ class DashboardPage(CompactScrollPage):
             widget.setVisible(False)
         self.dashboard_layout.removeWidget(self.drop_indicator)
         self.drop_indicator.hide()
+
+        self._sync_special_widget_buttons()
 
         for index, key in enumerate(visible_order):
             if drop_index == index:
@@ -5028,6 +5626,7 @@ class DashboardPage(CompactScrollPage):
         QTimer.singleShot(0, restore)
 
     def _set_reorder_mode(self, enabled):
+        self._sync_special_widget_buttons()
         for widget in self.dashboard_widgets.values():
             widget.set_reorder_mode(enabled)
         self._update_add_widget_button()
@@ -5054,6 +5653,17 @@ class DashboardPage(CompactScrollPage):
             return
 
         self.widget_order.insert(0, key)
+
+        if key == "setup_guide":
+            try:
+                new_settings = dict(self.settings) if isinstance(self.settings, dict) else ft.load_settings()
+                new_settings[DASHBOARD_SETUP_GUIDE_MANUAL_KEY] = True
+                new_settings[DASHBOARD_SETUP_GUIDE_DISMISSED_KEY] = False
+                ft.save_settings(new_settings, history_reason="Tilføj setup-guide widget manuelt")
+                self.window.settings = ft.load_settings()
+            except (OSError, ValueError, TypeError):
+                pass
+
         self._save_widget_order()
         self._render_widget_order()
 
@@ -5088,6 +5698,27 @@ class DashboardPage(CompactScrollPage):
             if isinstance(page, SettingsPage):
                 self.window.go_to_page(index)
                 QTimer.singleShot(0, page.focus_disposable_goal)
+                return
+            
+    def _go_to_settings_tax_field(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, SettingsPage):
+                self.window.go_to_page(index)
+                QTimer.singleShot(0, page.focus_tax)
+                return
+
+    def _go_to_settings_pay_period_field(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, SettingsPage):
+                self.window.go_to_page(index)
+                QTimer.singleShot(0, page.focus_pay_period)
+                return
+
+    def _go_to_settings_pension_field(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, SettingsPage):
+                self.window.go_to_page(index)
+                QTimer.singleShot(0, page.focus_pension)
                 return
 
     def _go_to_settings_holiday_pay_field(self):
@@ -5281,6 +5912,17 @@ class DashboardPage(CompactScrollPage):
             return
 
         self.widget_order = [widget_key for widget_key in self.widget_order if widget_key != key]
+
+        if key == "setup_guide":
+            try:
+                new_settings = dict(self.settings) if isinstance(self.settings, dict) else ft.load_settings()
+                new_settings[DASHBOARD_SETUP_GUIDE_MANUAL_KEY] = False
+                new_settings[DASHBOARD_SETUP_GUIDE_DISMISSED_KEY] = True
+                ft.save_settings(new_settings, history_reason="Skjul setup-guide widget")
+                self.window.settings = ft.load_settings()
+            except (OSError, ValueError, TypeError):
+                pass
+
         self._save_widget_order()
         self._render_widget_order()
 
@@ -5288,6 +5930,8 @@ class DashboardPage(CompactScrollPage):
         try:
             new_settings = dict(self.settings) if isinstance(self.settings, dict) else ft.load_settings()
             new_settings[DASHBOARD_WIDGET_ORDER_KEY] = list(self.widget_order)
+            if "setup_guide" not in self.widget_order and not new_settings.get(DASHBOARD_SETUP_GUIDE_DISMISSED_KEY, False):
+                new_settings[DASHBOARD_SETUP_GUIDE_MANUAL_KEY] = False
             new_settings[DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY] = True
             new_settings[DASHBOARD_HOLIDAY_PAY_WIDGET_MIGRATION_KEY] = True
             ft.save_settings(new_settings, history_reason="Gem rækkefølge på overblik-widgets")
@@ -5310,7 +5954,9 @@ class DashboardPage(CompactScrollPage):
         self.add_widget_button.hide()
 
     def refresh(self):
+        self._sync_setup_guide_auto_visibility()
         self._apply_widget_order()
+        self.setup_guide_widget.update_status(self._setup_guide_status())
         budget_categories = ft.get_budget_categories(self.settings)
         self.budget_widget.update_budget(budget_categories)
         self.salary_calculator_widget.set_settings(self.settings)
@@ -5427,6 +6073,7 @@ class DashboardPage(CompactScrollPage):
         self.estimate_strip.set_visible_items(estimate_cards)
 
     def _show_missing_settings(self):
+        self.setup_guide_widget.update_status(self._setup_guide_status())
         self.budget_widget.update_budget(ft.get_budget_categories(self.settings))
         self.salary_calculator_widget.set_settings(self.settings)
         self.holiday_pay_widget.update_calculation(holiday_pay_calculation(self.data, self.settings))
@@ -8332,6 +8979,27 @@ class SettingsPage(BasePage):
         set_form_row_visible(self.pay_period_form, self.end_day_field, not is_week_period)
         set_form_row_visible(self.pay_period_form, self.period_weeks_field, is_week_period)
         set_form_row_visible(self.pay_period_form, self.period_anchor_field, is_week_period)
+
+    def focus_tax(self):
+        self.tax_field.setFocus()
+        self.tax_field.selectAll()
+
+        if hasattr(self, "scroll_area"):
+            self.scroll_area.ensureWidgetVisible(self.tax_field, 80, 80)
+
+    def focus_pay_period(self):
+        target = self.period_type_combo
+        target.setFocus()
+
+        if hasattr(self, "scroll_area"):
+            self.scroll_area.ensureWidgetVisible(target, 80, 80)
+
+    def focus_pension(self):
+        self.pension_field.setFocus()
+        self.pension_field.selectAll()
+
+        if hasattr(self, "scroll_area"):
+            self.scroll_area.ensureWidgetVisible(self.pension_field, 80, 80)
 
     def focus_disposable_goal(self):
         self.disposable_goal_field.setFocus()
