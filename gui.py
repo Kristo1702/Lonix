@@ -112,6 +112,7 @@ DASHBOARD_DEFAULT_WIDGET_ORDER = (
 )
 
 DASHBOARD_AVAILABLE_WIDGET_ORDER = DASHBOARD_DEFAULT_WIDGET_ORDER + (
+    "pension",
     "breakdown",
     "recent",
     "salary_calculator",
@@ -125,6 +126,7 @@ DASHBOARD_WIDGET_TITLES = {
     "estimates": "Estimater",
     "stats": "Statistik",
     "holiday_pay": "Feriepenge",
+    "pension": "Pension",
     "budget": "Budget",
     "breakdown": "Skatteopdeling",
     "recent": "Vagter i perioden",
@@ -2220,6 +2222,112 @@ def holiday_pay_calculation(data, settings, today=None):
     return base
 
 
+def pension_calculation(data, settings, today=None):
+    today = today or datetime.now().date()
+    settings = ft.normalize_settings(settings if isinstance(settings, dict) else {})
+
+    employee_rate = ft.get_pension_contribution_rate(settings)
+    employer_rate = ft.get_employer_pension_contribution_rate(settings)
+    configured = employee_rate > 0 or employer_rate > 0
+
+    base = {
+        "configured": configured,
+        "employee_rate": employee_rate,
+        "employer_rate": employer_rate,
+        "period_employee_pension": 0.0,
+        "period_employer_pension": 0.0,
+        "period_total_pension": 0.0,
+        "total_employee_pension": 0.0,
+        "total_employer_pension": 0.0,
+        "total_pension": 0.0,
+        "period_start": None,
+        "period_end": None,
+        "reason": "",
+    }
+
+    if not configured:
+        base["reason"] = "Pension er ikke indstillet endnu."
+        return base
+
+    rows = [
+        overview_row_with_current_settings(row, settings)
+        for row in entry_rows(data, settings)
+        if not row.get("is_day_off")
+    ]
+
+    if has_required_settings(settings):
+        period_start, period_end = ft.get_salary_period_for_date(today, settings=settings)
+        base["period_start"] = period_start
+        base["period_end"] = period_end
+
+        period_rows = [
+            row
+            for row in rows
+            if period_start <= row["dato"] <= period_end
+        ]
+
+        period_breakdown = ft.calculate_period_salary_breakdown(
+            [
+                {
+                    "brutto": row["brutto"],
+                    "timer": row["timer"],
+                    "paid_hours": row["timer"],
+                    "settings": row.get("settings", settings),
+                }
+                for row in period_rows
+            ],
+            period_start,
+            period_end,
+            settings,
+        )
+
+        base["period_employee_pension"] = period_breakdown.get("pension", 0.0)
+        base["period_employer_pension"] = period_breakdown.get("arbejdsgiver_pension", 0.0)
+        base["period_total_pension"] = (
+            base["period_employee_pension"] + base["period_employer_pension"]
+        )
+
+    period_groups = {}
+    for row in rows:
+        try:
+            row_settings = row.get("settings", settings)
+            row_period_start, row_period_end = ft.get_salary_period_for_date(
+                row["dato"],
+                settings=row_settings,
+            )
+        except (ValueError, TypeError):
+            continue
+
+        period_groups.setdefault((row_period_start, row_period_end), []).append(row)
+
+    total_employee = 0.0
+    total_employer = 0.0
+
+    for (period_start, period_end), period_rows in period_groups.items():
+        breakdown = ft.calculate_period_salary_breakdown(
+            [
+                {
+                    "brutto": row["brutto"],
+                    "timer": row["timer"],
+                    "paid_hours": row["timer"],
+                    "settings": row.get("settings", settings),
+                }
+                for row in period_rows
+            ],
+            period_start,
+            period_end,
+            settings,
+        )
+        total_employee += breakdown.get("pension", 0.0)
+        total_employer += breakdown.get("arbejdsgiver_pension", 0.0)
+
+    base["total_employee_pension"] = total_employee
+    base["total_employer_pension"] = total_employer
+    base["total_pension"] = total_employee + total_employer
+
+    return base
+
+
 def build_periods(data, settings):
     if not data or not has_required_settings(settings):
         return [], []
@@ -3060,6 +3168,18 @@ class DashboardWidgetPreview(QFrame):
                 )
             )
             self.preview_layout.addWidget(self._note("Optjent feriepenge og anmodningsperiode."))
+
+        elif self.key == "pension":
+            self.preview_layout.addLayout(
+                self._metric_row(
+                    [
+                        ("Denne periode", "450 kr.", "#1f8a70"),
+                        ("Medarbejder", "150 kr.", "#2563eb"),
+                        ("Arbejdsgiver", "300 kr.", "#0f766e"),
+                    ]
+                )
+            )
+            self.preview_layout.addWidget(self._note("Pension for lønperioden og pension i alt."))
 
         elif self.key == "budget":
             self.preview_layout.addLayout(
@@ -4079,9 +4199,9 @@ class DashboardHolidayPayWidget(QWidget):
         self.info_row.setSpacing(8)
         left.addLayout(self.info_row)
 
-        self.days_chip = self._chip("Feriedage", "-", "#2563eb")
+        self.days_chip = self._chip("Total feriedage", "-", "#2563eb")
         self.info_row.addWidget(self.days_chip, 0, Qt.AlignLeft)
-        self.forecast_days_chip = self._chip("Forventet feriedage om ½ år", "-", "#0f766e")
+        self.forecast_days_chip = self._chip("Total forventet feriedage om ½ år", "-", "#0f766e")
         self.info_row.addWidget(self.forecast_days_chip, 0, Qt.AlignLeft)
         self.info_row.addStretch()
 
@@ -4111,7 +4231,7 @@ class DashboardHolidayPayWidget(QWidget):
     def _chip(self, title, value, accent):
         chip = QFrame()
         chip.setObjectName("Card")
-        chip.setFixedSize(210, 88)
+        chip.setFixedSize(240, 88)
         chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         chip.setStyleSheet(
             f"""
@@ -4185,6 +4305,168 @@ class DashboardHolidayPayWidget(QWidget):
     def _open_details(self):
         if self.calculation and self.calculation.get("configured"):
             self.details_callback(self.calculation)
+
+
+class DashboardPensionWidget(QWidget):
+    def __init__(self, setup_callback):
+        super().__init__()
+        self.setup_callback = setup_callback
+        self.calculation = None
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
+
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(22)
+        root.addLayout(content)
+
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(8)
+        content.addLayout(left, 3)
+
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 2, 0, 0)
+        right.setSpacing(6)
+        content.addLayout(right, 2)
+
+        self.amount_label = QLabel("Optjent denne lønperiode: N/A")
+        self.amount_label.setStyleSheet("color: #111827; font-size: 17pt; font-weight: 900;")
+        self.amount_label.setWordWrap(True)
+        left.addWidget(self.amount_label)
+
+        self.info_row = QHBoxLayout()
+        self.info_row.setContentsMargins(0, 0, 0, 0)
+        self.info_row.setSpacing(8)
+        left.addLayout(self.info_row)
+
+        self.employee_chip = self._chip("Medarbejderpension", "-", "#2563eb")
+        self.info_row.addWidget(self.employee_chip, 0, Qt.AlignLeft)
+
+        self.employer_chip = self._chip("Arbejdsgiverpension", "-", "#0f766e")
+        self.info_row.addWidget(self.employer_chip, 0, Qt.AlignLeft)
+
+        self.info_row.addStretch()
+
+        self.total_amount_label = QLabel("Total pension: N/A")
+        self.total_amount_label.setStyleSheet("color: #475569; font-size: 10.5pt; font-weight: 800;")
+        self.total_amount_label.setWordWrap(True)
+        left.addWidget(self.total_amount_label)
+
+        self.detail_label = QLabel()
+        self.detail_label.setObjectName("PageSubtitle")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        right.addWidget(self.detail_label)
+        right.addStretch()
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(10)
+        left.addLayout(button_row)
+
+        self.setup_button = QPushButton("Indstil nu")
+        self.setup_button.setObjectName("InlineButton")
+        self.setup_button.clicked.connect(self.setup_callback)
+        button_row.addWidget(self.setup_button, 0, Qt.AlignLeft)
+        button_row.addStretch()
+
+    def _chip(self, title, value, accent):
+        chip = QFrame()
+        chip.setObjectName("Card")
+        chip.setFixedSize(210, 88)
+        chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        chip.setStyleSheet(
+            f"""
+            QFrame#Card {{
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 7px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: 0;
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(chip)
+        layout.setContentsMargins(10, 8, 10, 11)
+        layout.setSpacing(4)
+
+        accent_bar = QFrame()
+        accent_bar.setFixedHeight(3)
+        accent_bar.setStyleSheet(f"background: {accent}; border: 0; border-radius: 1px;")
+        layout.addWidget(accent_bar)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #64748b; font-size: 8.5pt; font-weight: 800;")
+        title_label.setWordWrap(True)
+
+        value_label = QLabel(value)
+        value_label.setStyleSheet("color: #0f172a; font-size: 12pt; font-weight: 900;")
+        value_label.setMinimumHeight(28)
+
+        chip.value_label = value_label
+
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+
+        return chip
+
+    def update_calculation(self, calculation):
+        self.calculation = calculation or {}
+        configured = bool(self.calculation.get("configured"))
+
+        self.employee_chip.setVisible(configured)
+        self.employer_chip.setVisible(configured)
+        self.total_amount_label.setVisible(configured)
+        self.setup_button.setVisible(not configured)
+
+        if not configured:
+            self.amount_label.setText("Pension: IKKE INDSTILLET")
+            self.detail_label.setText(
+                "Indstil medarbejderpension eller arbejdsgiverpension for at følge pension i Overblik."
+            )
+            return
+
+        period_employee = self.calculation.get("period_employee_pension", 0.0)
+        period_employer = self.calculation.get("period_employer_pension", 0.0)
+        period_total = self.calculation.get("period_total_pension", 0.0)
+
+        total_employee = self.calculation.get("total_employee_pension", 0.0)
+        total_employer = self.calculation.get("total_employer_pension", 0.0)
+        total_pension = self.calculation.get("total_pension", 0.0)
+
+        employee_rate = self.calculation.get("employee_rate", 0.0) * 100
+        employer_rate = self.calculation.get("employer_rate", 0.0) * 100
+
+        self.amount_label.setText(f"Optjent denne lønperiode: {format_money(period_total)}")
+
+        self.employee_chip.value_label.setText(format_money(period_employee))
+        self.employer_chip.value_label.setText(format_money(period_employer))
+
+        self.total_amount_label.setText(
+            f"Total pension: {format_money(total_pension)}\n"
+            f"Medarbejder: {format_money(total_employee)} · Arbejdsgiver: {format_money(total_employer)}"
+        )
+
+        period_start = self.calculation.get("period_start")
+        period_end = self.calculation.get("period_end")
+        period_text = (
+            f"Beregnet for {format_long_date(period_start)} til {format_long_date(period_end)}."
+            if period_start and period_end
+            else "Lønperioden kunne ikke fastslås."
+        )
+
+        self.detail_label.setText(
+            f"• Medarbejderpension: {format_number(employee_rate)}%.\n"
+            f"• Arbejdsgiverpension: {format_number(employer_rate)}%.\n\n"
+            f"• {period_text}"
+        )
 
 
 class HolidayPayDetailsDialog(QDialog):
@@ -4561,6 +4843,13 @@ class DashboardPage(CompactScrollPage):
         holiday_panel.addWidget(self.holiday_pay_widget)
         self.dashboard_widgets["holiday_pay"] = holiday_panel
 
+        pension_panel = self._make_widget_frame("Pension", "pension")
+        self.pension_widget = DashboardPensionWidget(
+            self._go_to_settings_pension_field,
+        )
+        pension_panel.addWidget(self.pension_widget)
+        self.dashboard_widgets["pension"] = pension_panel
+
         budget_panel = self._make_widget_frame("Budget", "budget")
         self.budget_widget = DashboardBudgetWidget(self._go_to_budget_page)
         budget_panel.addWidget(self.budget_widget)
@@ -4808,6 +5097,13 @@ class DashboardPage(CompactScrollPage):
                 QTimer.singleShot(0, page.focus_holiday_pay)
                 return
 
+    def _go_to_settings_pension_field(self):
+        for index, page in enumerate(getattr(self.window, "pages", [])):
+            if isinstance(page, SettingsPage):
+                self.window.go_to_page(index)
+                QTimer.singleShot(0, page.focus_pension)
+                return
+
     def _go_to_statistics_page(self):
         for index, page in enumerate(getattr(self.window, "pages", [])):
             if isinstance(page, StatisticsPage):
@@ -5041,6 +5337,7 @@ class DashboardPage(CompactScrollPage):
         self._arrange_cards(show_other_income)
         today = datetime.now().date()
         self.holiday_pay_widget.update_calculation(holiday_pay_calculation(self.data, self.settings, today))
+        self.pension_widget.update_calculation(pension_calculation(self.data, self.settings, today))
         total_days = max(1, (summary["periode_slut"] - summary["periode_start"]).days + 1)
         elapsed_days = min(max((today - summary["periode_start"]).days + 1, 0), total_days)
         remaining_days = max(total_days - elapsed_days, 0)
@@ -5133,6 +5430,7 @@ class DashboardPage(CompactScrollPage):
         self.budget_widget.update_budget(ft.get_budget_categories(self.settings))
         self.salary_calculator_widget.set_settings(self.settings)
         self.holiday_pay_widget.update_calculation(holiday_pay_calculation(self.data, self.settings))
+        self.pension_widget.update_calculation(pension_calculation(self.data, self.settings))
         self._arrange_cards(True)
         for card in [
             self.net_card,
@@ -8044,6 +8342,14 @@ class SettingsPage(BasePage):
 
     def focus_holiday_pay(self):
         target = self.employment_start_field
+        target.setFocus()
+        target.selectAll()
+
+        if hasattr(self, "scroll_area"):
+            self.scroll_area.ensureWidgetVisible(target, 80, 80)
+
+    def focus_pension(self):
+        target = self.pension_field
         target.setFocus()
         target.selectAll()
 
