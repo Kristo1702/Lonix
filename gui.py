@@ -4655,7 +4655,7 @@ class DashboardPage(CompactScrollPage):
             new_settings[DASHBOARD_WIDGET_ORDER_KEY] = list(self.widget_order)
             new_settings[DASHBOARD_BUDGET_WIDGET_MIGRATION_KEY] = True
             new_settings[DASHBOARD_HOLIDAY_PAY_WIDGET_MIGRATION_KEY] = True
-            ft.save_settings(new_settings)
+            ft.save_settings(new_settings, history_reason="Gem rækkefølge på overblik-widgets")
             self.window.settings = ft.load_settings()
         except (OSError, ValueError, TypeError) as error:
             QMessageBox.warning(self, "Rækkefølge kunne ikke gemmes", str(error))
@@ -7262,7 +7262,7 @@ class BudgetPage(BasePage):
         return new_settings
 
     def _save_budget(self):
-        ft.save_settings(self._settings_with_budget())
+        ft.save_settings(self._settings_with_budget(), history_reason="Gem budget")
         self.window.refresh_all()
 
     def _add_category(self):
@@ -7291,6 +7291,9 @@ class SettingsPage(BasePage):
             "Indstillinger",
             "Tilpas skat, månedstal, rådighedsmål og lønperiode. Faste udgifter styres på Budget-siden.",
         )
+
+        self.action_history_widget = ActionHistorySettingsWidget(window)
+        self.root.addWidget(self.action_history_widget)
 
         def add_settings_form(title):
             panel, layout = make_panel(title)
@@ -7787,7 +7790,7 @@ class SettingsPage(BasePage):
             QMessageBox.warning(self, "Ugyldige indstillinger", str(error))
             return
 
-        ft.save_settings(new_settings)
+        ft.save_settings(new_settings, history_reason="Gem indstillinger")
         QMessageBox.information(self, "Indstillinger gemt", "Indstillingerne er gemt.")
         self.window.refresh_all()
 
@@ -8560,7 +8563,7 @@ class IntroductionDialog(QDialog):
             QMessageBox.warning(self, "Ugyldige oplysninger", str(error))
             return False
 
-        ft.save_settings(new_settings)
+        ft.save_settings(new_settings, history_reason="Gem introduktionsopsætning")
         self.window.refresh_all_quietly()
         return True
 
@@ -8568,7 +8571,7 @@ class IntroductionDialog(QDialog):
         debug_window_log("IntroductionDialog._complete_introduction")
         new_settings = dict(self.window.settings) if isinstance(self.window.settings, dict) else {}
         new_settings[ft.INTRODUCTION_DONE_KEY] = True
-        ft.save_settings(new_settings)
+        ft.save_settings(new_settings, history_reason="Marker introduktion som gennemført")
         self.window.settings = ft.load_settings()
         self.window.go_to_page(0)
         self.accept()
@@ -8597,6 +8600,549 @@ class IntroductionDialog(QDialog):
             return
         self.step_index -= 1
         self._show_step()
+
+
+class ActionHistoryChevronButton(QPushButton):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.expanded = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setProperty("skipGenericButtonAnimation", True)
+        self.setMinimumHeight(44)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def set_expanded(self, expanded):
+        self.expanded = bool(expanded)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        hovered = self.underMouse()
+        pressed = self.isDown()
+
+        background = QColor("#f8fafc")
+        border = QColor("#d7e0ea")
+        text_color = QColor("#0f172a")
+        chevron_color = QColor("#334155")
+
+        if hovered:
+            background = QColor("#f1f8f5")
+            border = QColor("#b8d9d0")
+            text_color = QColor("#0f766e")
+            chevron_color = QColor("#0f766e")
+
+        if pressed:
+            background = QColor("#e5f3ef")
+            border = QColor("#8fc8b9")
+
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 9, 9)
+
+        font = QFont(self.font())
+        font.setFamily("Segoe UI")
+        font.setPointSize(10)
+        font.setWeight(QFont.DemiBold)
+        painter.setFont(font)
+        painter.setPen(text_color)
+
+        text_rect = QRectF(14, 0, self.width() - 48, self.height())
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.text())
+
+        center = QPointF(self.width() - 24, self.height() / 2)
+        size = 5.5
+
+        painter.setPen(QPen(chevron_color, 2.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+
+        if self.expanded:
+            painter.drawLine(
+                QPointF(center.x() - size, center.y() - 2),
+                QPointF(center.x(), center.y() + 4),
+            )
+            painter.drawLine(
+                QPointF(center.x(), center.y() + 4),
+                QPointF(center.x() + size, center.y() - 2),
+            )
+        else:
+            painter.drawLine(
+                QPointF(center.x() - size, center.y() + 2),
+                QPointF(center.x(), center.y() - 4),
+            )
+            painter.drawLine(
+                QPointF(center.x(), center.y() - 4),
+                QPointF(center.x() + size, center.y() + 2),
+            )
+
+
+class ActionHistoryActionButton(QPushButton):
+    def __init__(self, label, icon_name, parent=None):
+        super().__init__(parent)
+        self.label = label
+        self.icon_name = icon_name
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setProperty("skipGenericButtonAnimation", True)
+        self.setMinimumHeight(42)
+        self.setMinimumWidth(224)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        hovered = self.underMouse()
+        pressed = self.isDown()
+
+        background = QColor("#ffffff")
+        border = QColor("#cfd8e3")
+        text_color = QColor("#0f172a")
+        icon_color = QColor("#0f766e")
+
+        if hovered:
+            background = QColor("#f0fdfa")
+            border = QColor("#99d8c9")
+            text_color = QColor("#0f766e")
+
+        if pressed:
+            background = QColor("#d9f0ea")
+            border = QColor("#72b8a8")
+
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 8, 8)
+
+        icon_rect = QRectF(13, 0, 22, self.height())
+        self._draw_icon(painter, icon_rect, icon_color)
+
+        font = QFont(self.font())
+        font.setFamily("Segoe UI")
+        font.setPointSize(9)
+        font.setWeight(QFont.DemiBold)
+        painter.setFont(font)
+        painter.setPen(text_color)
+
+        text_rect = QRectF(42, 0, self.width() - 54, self.height())
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.label)
+
+    def _draw_icon(self, painter, rect, color):
+        painter.save()
+        painter.setPen(QPen(color, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+
+        cx = rect.center().x()
+        cy = rect.center().y()
+
+        if self.icon_name == "undo":
+            painter.drawArc(QRectF(cx - 8, cy - 8, 16, 16), 45 * 16, 245 * 16)
+            painter.drawLine(QPointF(cx - 8, cy - 1), QPointF(cx - 13, cy - 1))
+            painter.drawLine(QPointF(cx - 13, cy - 1), QPointF(cx - 10, cy - 5))
+            painter.drawLine(QPointF(cx - 13, cy - 1), QPointF(cx - 10, cy + 3))
+
+        elif self.icon_name == "history":
+            painter.drawEllipse(QRectF(cx - 8, cy - 8, 16, 16))
+            painter.drawLine(QPointF(cx, cy), QPointF(cx, cy - 5))
+            painter.drawLine(QPointF(cx, cy), QPointF(cx + 5, cy + 3))
+
+        painter.restore()
+
+
+class ActionHistorySettingsWidget(QFrame):
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.expanded = False
+
+        self.setObjectName("ActionHistorySettingsWidget")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        self.setStyleSheet(
+            """
+            QFrame#ActionHistorySettingsWidget {
+                background: #ffffff;
+                border: 1px solid #dde3ea;
+                border-radius: 10px;
+            }
+
+            QLabel#ActionHistoryTitle {
+                color: #0f172a;
+                font-size: 12.5pt;
+                font-weight: 900;
+                background: transparent;
+                border: 0;
+            }
+
+            QLabel#ActionHistoryHint {
+                color: #64748b;
+                background: transparent;
+                border: 0;
+                font-size: 10pt;
+            }
+
+            QPushButton#ActionHistoryInfoButton {
+                background: #ffffff;
+                color: #475569;
+                border: 1px solid #cfd8e3;
+                border-radius: 13px;
+                padding: 0;
+                font-size: 10pt;
+                font-weight: 900;
+                min-width: 26px;
+                max-width: 26px;
+                min-height: 26px;
+                max-height: 26px;
+            }
+
+            QPushButton#ActionHistoryInfoButton:hover {
+                background: #edf7f4;
+                color: #0f766e;
+                border-color: #1f8a70;
+            }
+            """
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        title_label = QLabel("Backups")
+        title_label.setObjectName("ActionHistoryTitle")
+        root.addWidget(title_label)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        root.addLayout(header_row)
+
+        self.info_button = QPushButton("i")
+        self.info_button.setObjectName("ActionHistoryInfoButton")
+        self.info_button.setCursor(Qt.PointingHandCursor)
+        self.info_button.setToolTip("Hvad er backups?")
+        self.info_button.clicked.connect(self._show_info)
+        header_row.addWidget(self.info_button, 0, Qt.AlignVCenter)
+
+        self.header_button = ActionHistoryChevronButton("Vis backup- og versionsværktøjer", self)
+        self.header_button.clicked.connect(self._toggle)
+        header_row.addWidget(self.header_button, 1)
+
+        self.content = QWidget()
+        self.content.setStyleSheet("background: transparent;")
+        self.content.setMaximumHeight(0)
+        self.content.setMinimumHeight(0)
+
+        content_layout = QVBoxLayout(self.content)
+        content_layout.setContentsMargins(0, 2, 0, 0)
+        content_layout.setSpacing(10)
+
+        hint = QLabel(
+            "Fortryd den seneste ændring, eller åbn versionshistorikken og indlæs en tidligere version."
+        )
+        hint.setObjectName("ActionHistoryHint")
+        hint.setWordWrap(True)
+        content_layout.addWidget(hint)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(10)
+        content_layout.addLayout(button_row)
+
+        self.undo_button = ActionHistoryActionButton("Fortryd sidste ændring", "undo", self)
+        self.undo_button.clicked.connect(self.window._undo_last_change)
+
+        self.history_button = ActionHistoryActionButton("Versionshistorik", "history", self)
+        self.history_button.clicked.connect(self.window._open_version_history)
+
+        button_row.addWidget(self.undo_button)
+        button_row.addWidget(self.history_button)
+        button_row.addStretch()
+
+        root.addWidget(self.content)
+
+        self.expand_animation = QParallelAnimationGroup(self)
+
+        self.content_min_animation = QPropertyAnimation(self.content, b"minimumHeight", self)
+        self.content_max_animation = QPropertyAnimation(self.content, b"maximumHeight", self)
+
+        for animation in (self.content_min_animation, self.content_max_animation):
+            animation.setDuration(220)
+            animation.setEasingCurve(QEasingCurve.OutCubic)
+            self.expand_animation.addAnimation(animation)
+
+        self.expand_animation.finished.connect(self._finish_animation)
+
+        self._sync_state(animated=False)
+
+    def _toggle(self):
+        self.expanded = not self.expanded
+        self._sync_state(animated=True)
+
+    def _sync_state(self, animated=True):
+        self.header_button.set_expanded(self.expanded)
+
+        target_height = self.content.sizeHint().height() if self.expanded else 0
+
+        if not animated:
+            self.content.setMinimumHeight(target_height)
+            self.content.setMaximumHeight(target_height)
+            return
+
+        if self.expanded:
+            self.content.setMaximumHeight(0)
+            self.content.setMinimumHeight(0)
+
+        self.expand_animation.stop()
+
+        for animation in (self.content_min_animation, self.content_max_animation):
+            animation.setStartValue(self.content.maximumHeight())
+            animation.setEndValue(target_height)
+
+        self.expand_animation.start()
+
+    def _finish_animation(self):
+        if self.expanded:
+            self.content.setMinimumHeight(0)
+            self.content.setMaximumHeight(16777215)
+        else:
+            self.content.setMinimumHeight(0)
+            self.content.setMaximumHeight(0)
+
+    def _show_info(self):
+        QMessageBox.information(
+            self,
+            "Backups",
+            "Backups gemmer de seneste ændringer i Lønix.\n\n"
+            "Du kan fortryde den seneste ændring eller åbne versionshistorikken og indlæse en tidligere version.",
+        )
+
+
+class VersionHistoryDialog(QDialog):
+    MAX_ROWS = 20
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.window = parent
+        self.events = []
+
+        self.setModal(True)
+        self.setWindowTitle("Versionshistorik")
+        self.setWindowIcon(app_icon())
+        self.setMinimumSize(860, 560)
+        self.resize(940, 620)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(14)
+
+        header_panel = QFrame()
+        header_panel.setObjectName("Card")
+        header_panel.setStyleSheet(
+            """
+            QFrame#Card {
+                background: #ffffff;
+                border: 1px solid #dde3ea;
+                border-radius: 10px;
+            }
+            QLabel {
+                background: transparent;
+                border: 0;
+            }
+            """
+        )
+        header_layout = QVBoxLayout(header_panel)
+        header_layout.setContentsMargins(18, 14, 18, 14)
+        header_layout.setSpacing(4)
+
+        title = QLabel("Versionshistorik")
+        title.setStyleSheet("color: #111827; font-size: 18pt; font-weight: 900;")
+        subtitle = QLabel(
+            "Her vises de 20 seneste gemte ændringer. Du kan indlæse en bestemt version, hvis du vil gå tilbage til den tilstand."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+
+        header_layout.addWidget(title)
+        header_layout.addWidget(subtitle)
+        root.addWidget(header_panel)
+
+        table_panel = QFrame()
+        table_panel.setObjectName("Card")
+        table_panel.setStyleSheet(
+            """
+            QFrame#Card {
+                background: #ffffff;
+                border: 1px solid #dde3ea;
+                border-radius: 10px;
+            }
+            QTableWidget {
+                background: #ffffff;
+                alternate-background-color: #f8fafc;
+                border: 0;
+                border-radius: 8px;
+                gridline-color: #edf2f7;
+                selection-background-color: #e5f3ef;
+                selection-color: #111827;
+            }
+            QHeaderView::section {
+                background: #f4f7f9;
+                color: #475569;
+                border: 0;
+                border-bottom: 1px solid #dde3ea;
+                padding: 9px;
+                font-weight: 850;
+            }
+            """
+        )
+        table_layout = QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(12, 12, 12, 12)
+        table_layout.setSpacing(10)
+        root.addWidget(table_panel, 1)
+
+        self.table = QTableWidget()
+        setup_table(self.table, ["Tidspunkt", "Handling", "Område", "Beskrivelse", ""])
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(46)
+        table_layout.addWidget(self.table, 1)
+
+        button_row = QHBoxLayout()
+        root.addLayout(button_row)
+
+        refresh_button = QPushButton("Genindlæs")
+        refresh_button.setObjectName("SecondaryButton")
+        refresh_button.clicked.connect(self._fill_table)
+
+        close_button = QPushButton("Luk")
+        close_button.clicked.connect(self.accept)
+
+        button_row.addWidget(refresh_button)
+        button_row.addStretch()
+        button_row.addWidget(close_button)
+
+        self._fill_table()
+
+    def _fill_table(self):
+        if hasattr(ft, "prune_history_events"):
+            ft.prune_history_events()
+
+        if not hasattr(ft, "get_history_events"):
+            self.table.setRowCount(0)
+            return
+
+        self.events = ft.get_history_events(limit=self.MAX_ROWS)
+        self.table.setRowCount(len(self.events))
+
+        for row_index, event in enumerate(self.events):
+            operation = event.get("operation", "")
+            target = event.get("target", "")
+
+            operation_label = {
+                "save": "Gemt",
+                "undo": "Fortrudt",
+                "restore": "Indlæst",
+            }.get(operation, operation)
+
+            target_label = {
+                "settings": "Indstillinger",
+                "data": "Løndata",
+            }.get(target, target)
+
+            timestamp_item = table_item(event.get("timestamp", ""))
+            operation_item = table_item(operation_label)
+            target_item = table_item(target_label)
+
+            summary = (
+                ft.summarize_history_event(event)
+                if hasattr(ft, "summarize_history_event")
+                else str(event.get("reason", ""))
+            )
+            summary_item = table_item(summary)
+
+            if operation == "undo":
+                operation_item.setForeground(QBrush(QColor("#d97706")))
+            elif operation == "restore":
+                operation_item.setForeground(QBrush(QColor("#2563eb")))
+            else:
+                operation_item.setForeground(QBrush(QColor("#1f8a70")))
+
+            font = operation_item.font()
+            font.setBold(True)
+            operation_item.setFont(font)
+
+            self.table.setItem(row_index, 0, timestamp_item)
+            self.table.setItem(row_index, 1, operation_item)
+            self.table.setItem(row_index, 2, target_item)
+            self.table.setItem(row_index, 3, summary_item)
+            self._set_restore_button(row_index)
+
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+
+        self.table.setColumnWidth(0, 165)
+        self.table.setColumnWidth(1, 95)
+        self.table.setColumnWidth(2, 105)
+        self.table.resizeRowsToContents()
+
+    def _set_restore_button(self, row_index):
+        button = QPushButton("Indlæs")
+        button.setObjectName("InlineButton")
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip("Indlæs denne version")
+        button.clicked.connect(lambda checked=False, index=row_index: self._restore_version(index))
+
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.addWidget(button)
+
+        self.table.setCellWidget(row_index, 4, wrapper)
+
+    def _restore_version(self, index):
+        if index < 0 or index >= len(self.events):
+            return
+
+        event = self.events[index]
+        summary = (
+            ft.summarize_history_event(event)
+            if hasattr(ft, "summarize_history_event")
+            else "denne version"
+        )
+
+        answer = QMessageBox.question(
+            self,
+            "Indlæs version",
+            f"Vil du indlæse denne version?\n\n{summary}\n\n"
+            "Den nuværende tilstand bliver gemt i historikken, så ændringen kan fortrydes igen.",
+        )
+
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            ft.restore_history_event_version(event)
+        except ValueError as error:
+            QMessageBox.warning(self, "Version kunne ikke indlæses", str(error))
+            return
+        except Exception as error:
+            QMessageBox.warning(self, "Version kunne ikke indlæses", str(error))
+            return
+
+        QMessageBox.information(self, "Version indlæst", "Versionen er indlæst.")
+        if hasattr(self.window, "refresh_all"):
+            self.window.refresh_all()
+        self._fill_table()
 
 
 class MainWindow(QMainWindow):
@@ -8672,6 +9218,7 @@ class MainWindow(QMainWindow):
         self._add_page(sidebar_layout, "Lønberegner", CalculatorPage(self))
 
         sidebar_layout.addStretch()
+
         self._add_footer_page(sidebar_layout, "Indstillinger", SettingsPage(self))
 
         self.introduction_overlay = QWidget(root)
@@ -8754,6 +9301,52 @@ class MainWindow(QMainWindow):
         self.pages.append(page)
         self.stack.addWidget(page)
 
+    def _undo_last_change(self):
+        if not hasattr(ft, "undo_last_change"):
+            QMessageBox.warning(
+                self,
+                "Undo mangler",
+                "Undo-funktionen findes ikke i functions.py.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Fortryd sidste ændring",
+            "Vil du fortryde den seneste gemte ændring?\n\n"
+            "Historikken bliver ikke slettet.",
+        )
+
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            undone_event = ft.undo_last_change()
+        except ValueError as error:
+            QMessageBox.warning(self, "Kan ikke fortryde", str(error))
+            return
+        except Exception as error:
+            QMessageBox.warning(self, "Undo fejlede", str(error))
+            return
+
+        summary = (
+            ft.summarize_history_event(undone_event)
+            if hasattr(ft, "summarize_history_event")
+            else "Seneste ændring blev fortrudt."
+        )
+
+        QMessageBox.information(
+            self,
+            "Ændring fortrudt",
+            summary,
+        )
+
+        self.refresh_all()
+
+    def _open_version_history(self):
+        dialog = VersionHistoryDialog(self)
+        dialog.exec_()
+
     def refresh_all(self):
         debug_window_log("MainWindow.refresh_all start")
         self.data = ft.load_data()
@@ -8793,7 +9386,7 @@ class MainWindow(QMainWindow):
             settings = dict(ft.load_settings())
             settings[WINDOW_WIDTH_SETTINGS_KEY] = self.width()
             settings[WINDOW_HEIGHT_SETTINGS_KEY] = self.height()
-            ft.save_settings(settings)
+            ft.save_settings(settings, history_reason="Gem vinduesstørrelse")
         except (OSError, ValueError, TypeError):
             pass
         super().closeEvent(event)

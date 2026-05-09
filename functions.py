@@ -1901,3 +1901,379 @@ def calculate_period_salary_breakdown(items, period_start, period_end, fallback_
 
 def calculate_netto_salary_from_brutto(brutto):
     return calculate_salary_breakdown_from_brutto(brutto)["netto"]
+
+
+
+
+# ============================================================
+# Lønix versionshistorik + undo
+# Additiv implementation: ændrer ikke lønlogik eller datamodel.
+# ============================================================
+
+from copy import deepcopy as _history_deepcopy
+
+HISTORY_FILE_PATH = os.path.join("data", "history.jsonl")
+HISTORY_MAX_EVENTS = 20
+
+
+_LONIX_ORIGINAL_SAVE_SETTINGS = save_settings
+_LONIX_ORIGINAL_SAVE_DATA = save_data
+_LONIX_ORIGINAL_SAVE_ALL_DATA = globals().get("save_all_data")
+
+
+def _history_json_default(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
+def _ensure_history_storage():
+    if not os.path.exists("data"):
+        os.mkdir("data")
+
+
+def append_history_event(operation, target, before=None, after=None, reason=""):
+    """
+    Logger én ændring som én JSON-linje.
+    Undo sletter ikke historikken, men tilføjer selv et nyt undo-event.
+    """
+    _ensure_history_storage()
+
+    event = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "operation": str(operation),
+        "target": str(target),
+        "before": _history_deepcopy(before),
+        "after": _history_deepcopy(after),
+        "reason": str(reason or ""),
+    }
+
+    with open(HISTORY_FILE_PATH, "a", encoding="utf-8") as file:
+        file.write(json.dumps(event, ensure_ascii=False, default=_history_json_default) + "\n")
+
+    prune_history_events()
+
+    return event
+
+
+def get_history_events(limit=None):
+    """
+    Returnerer historik med nyeste først.
+    """
+    if not os.path.exists(HISTORY_FILE_PATH):
+        return []
+
+    events = []
+
+    with open(HISTORY_FILE_PATH, "r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    events.reverse()
+
+    if limit is not None:
+        return events[: int(limit)]
+
+    return events
+
+
+def prune_history_events(max_events=HISTORY_MAX_EVENTS):
+    """
+    Beholder kun de nyeste max_events historik-events.
+    Sletter ældre events fysisk fra data/history.jsonl.
+    """
+    if not os.path.exists(HISTORY_FILE_PATH):
+        return []
+
+    events = []
+
+    with open(HISTORY_FILE_PATH, "r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    if len(events) <= max_events:
+        return events
+
+    events = events[-max_events:]
+
+    with open(HISTORY_FILE_PATH, "w", encoding="utf-8") as file:
+        for event in events:
+            file.write(json.dumps(event, ensure_ascii=False, default=_history_json_default) + "\n")
+
+    return events
+
+
+def summarize_history_event(event):
+    operation = event.get("operation", "ændring")
+    target = event.get("target", "")
+    reason = event.get("reason", "")
+
+    target_label = {
+        "settings": "Indstillinger",
+        "data": "Løndata",
+    }.get(target, target)
+
+    operation_label = {
+        "save": "Gemt",
+        "undo": "Fortrudt",
+        "restore": "Indlæst version",
+    }.get(operation, operation)
+
+    if reason:
+        return f"{operation_label} · {target_label} · {reason}"
+
+    return f"{operation_label} · {target_label}"
+
+
+def _write_settings_direct(settings):
+    """
+    Direkte write uden historik.
+    Bruges kun af undo, så vi undgår rekursiv logging.
+    """
+    _ensure_history_storage()
+
+    with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
+        json.dump(settings, file, ensure_ascii=False, indent=4)
+
+
+def _write_data_direct(data):
+    """
+    Direkte write uden historik.
+    Bruges kun af undo, så vi undgår rekursiv logging.
+    """
+    _ensure_history_storage()
+
+    with open("data/løn.txt", "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=4)
+
+
+def undo_last_change():
+    """
+    Gendanner seneste data/settings-ændring.
+
+    Vigtigt:
+    - Undo sletter ikke historikken.
+    - Undo tilføjer et nyt event med operation='undo'.
+    - Undo springer tidligere undo-events over, så man ikke bare undo'er et undo-event.
+    """
+    events = get_history_events()
+
+    for event in events:
+        if event.get("operation") == "undo":
+            continue
+
+        target = event.get("target")
+        before = event.get("before")
+
+        if target == "settings":
+            current = load_settings()
+            restored = before if isinstance(before, dict) else {}
+
+            _write_settings_direct(restored)
+
+            append_history_event(
+                "undo",
+                "settings",
+                before=current,
+                after=restored,
+                reason=f"Fortrød: {event.get('reason') or 'indstillinger'}",
+            )
+
+            return event
+
+        if target == "data":
+            current = load_data()
+            restored = before if isinstance(before, list) else []
+
+            _write_data_direct(restored)
+
+            append_history_event(
+                "undo",
+                "data",
+                before=current,
+                after=restored,
+                reason=f"Fortrød: {event.get('reason') or 'løndata'}",
+            )
+
+            return event
+
+    raise ValueError("Der findes ingen ændring, der kan fortrydes.")
+
+
+def restore_history_event_version(event):
+    """
+    Indlæser den version, som et historik-event endte med.
+
+    For et save-event betyder det event["after"].
+    For et undo-event betyder det også event["after"].
+
+    Der gendannes kun det område eventet handler om:
+    - target == "data" gendanner data/løn.txt
+    - target == "settings" gendanner data/oplysninger.txt
+    """
+    if not isinstance(event, dict):
+        raise ValueError("Ugyldigt historik-event.")
+
+    target = event.get("target")
+    version = event.get("after")
+
+    if target == "settings":
+        if not isinstance(version, dict):
+            raise ValueError("Denne indstillingsversion kan ikke indlæses.")
+
+        current = load_settings()
+        _write_settings_direct(version)
+
+        append_history_event(
+            "restore",
+            "settings",
+            before=current,
+            after=version,
+            reason="Indlæst version fra historik",
+        )
+
+        return event
+
+    if target == "data":
+        if not isinstance(version, list):
+            raise ValueError("Denne dataversion kan ikke indlæses.")
+
+        current = load_data()
+        _write_data_direct(version)
+
+        append_history_event(
+            "restore",
+            "data",
+            before=current,
+            after=version,
+            reason="Indlæst version fra historik",
+        )
+
+        return event
+
+    raise ValueError("Denne historiktype kan ikke indlæses.")
+
+
+def save_settings(new_settings, history_reason="Gem indstillinger"):
+    """
+    Wrapper omkring eksisterende save_settings.
+    Logger før/efter hvis indstillingerne faktisk ændrer sig.
+    """
+    try:
+        before = load_settings()
+    except Exception:
+        before = None
+
+    _LONIX_ORIGINAL_SAVE_SETTINGS(new_settings)
+
+    try:
+        after = load_settings()
+        if before != after:
+            append_history_event(
+                "save",
+                "settings",
+                before=before,
+                after=after,
+                reason=history_reason,
+            )
+    except Exception:
+        pass
+
+
+def save_data(new_data):
+    """
+    Wrapper omkring eksisterende save_data.
+    Logger hele løndata-filen før/efter.
+    """
+    try:
+        before = load_data()
+    except Exception:
+        before = None
+
+    _LONIX_ORIGINAL_SAVE_DATA(new_data)
+
+    try:
+        after = load_data()
+        if before != after:
+            append_history_event(
+                "save",
+                "data",
+                before=before,
+                after=after,
+                reason="Gem registrering",
+            )
+    except Exception:
+        pass
+
+
+if _LONIX_ORIGINAL_SAVE_ALL_DATA is not None:
+    def save_all_data(payload, history_reason="Gem løndata"):
+        """
+        Wrapper omkring eksisterende save_all_data, hvis den findes i repoet.
+        Logger hele løndata-filen før/efter.
+        """
+        try:
+            before = load_data()
+        except Exception:
+            before = None
+
+        _LONIX_ORIGINAL_SAVE_ALL_DATA(payload)
+
+        try:
+            after = load_data()
+            if before != after:
+                append_history_event(
+                    "save",
+                    "data",
+                    before=before,
+                    after=after,
+                    reason=history_reason,
+                )
+        except Exception:
+            pass
+
+else:
+    def save_all_data(payload, history_reason="Gem løndata"):
+        """
+        Fallback hvis repoet ikke allerede har save_all_data.
+        Matcher den struktur gui.py bruger: liste af {dato: info}.
+        """
+        try:
+            before = load_data()
+        except Exception:
+            before = None
+
+        if not os.path.exists("data"):
+            os.mkdir("data")
+
+        clean_payload = payload if isinstance(payload, list) else []
+
+        with open("data/løn.txt", "w", encoding="utf-8") as file:
+            json.dump(clean_payload, file, ensure_ascii=False, indent=4)
+
+        try:
+            after = load_data()
+            if before != after:
+                append_history_event(
+                    "save",
+                    "data",
+                    before=before,
+                    after=after,
+                    reason=history_reason,
+                )
+        except Exception:
+            pass
