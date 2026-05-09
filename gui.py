@@ -680,6 +680,339 @@ def format_long_date(value):
     return f"{value.day:02d} {month_name} {value.year}"
 
 
+def format_history_timestamp(value):
+    if not value:
+        return ""
+
+    text = str(value).strip()
+
+    parsed = None
+    for pattern in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S.%f",
+    ):
+        try:
+            parsed = datetime.strptime(text.replace("Z", ""), pattern)
+            break
+        except ValueError:
+            continue
+
+    if parsed is None:
+        return text.replace("T", "  -  ")
+
+    month_name = SHIFT_TABLE_MONTH_NAMES.get(parsed.month, str(parsed.month))
+    return f"{parsed.day:02d} {month_name} {parsed.year}  -  {parsed.strftime('%H:%M:%S')}"
+
+
+HISTORY_SETTING_LABELS = {
+    "skat": "Skat",
+    "fradrag": "Fradrag",
+    "fradrag enhed": "Fradrag enhed",
+    "am bidrag": "AM-bidrag",
+    "fødselsår": "Fødselsår",
+    "am aldersregel aktiv": "AM-aldersregel",
+    "eget pensionsbidrag": "Eget pensionsbidrag",
+    "arbejdsgiver pensionsbidrag": "Arbejdsgiverpension",
+    "atp aktiveret": "ATP aktiv",
+    "atp medarbejderbeløb": "ATP medarbejder",
+    "atp arbejdsgiverbeløb": "ATP arbejdsgiver",
+    "pause betalt": "Betalt pause",
+    "anden indkomst netto": "Anden indkomst netto",
+    "standard timeløn": "Standard timeløn",
+    "budget kategorier": "Budgetposter",
+    "udgifter": "Udgifter",
+    "ønsket rådighedsbeløb": "Rådighedsmål",
+    "løn start": "Lønperiode start",
+    "løn slut": "Lønperiode slut",
+    "lønperiode type": "Lønperiode type",
+    "lønperiode uger": "Lønperiode uger",
+    "lønperiode ankerdato": "Lønperiode ankerdato",
+    "feriegodtgørelse": "Feriegodtgørelse",
+    "ansættelsesstart": "Ansættelsesstart",
+    "overblik widget rækkefølge": "Overblik widgets",
+    "overblik budget widget tilføjet": "Budget-widget migration",
+    "overblik feriepenge widget tilføjet": "Feriepenge-widget migration",
+    "vindue bredde": "Vinduesbredde",
+    "vindue højde": "Vindueshøjde",
+    "introduktion gennemført": "Introduktion gennemført",
+}
+
+
+def _history_area_label(target):
+    return {
+        "settings": "Indstillinger",
+        "data": "Løndata",
+    }.get(str(target or ""), str(target or "Ukendt område"))
+
+
+def _history_operation_label(operation):
+    return {
+        "save": "Gemt",
+        "undo": "Fortrudt",
+        "restore": "Indlæst",
+    }.get(str(operation or ""), str(operation or "Ændring"))
+
+
+def _history_event_payload(event, *keys):
+    if not isinstance(event, dict):
+        return None
+
+    for key in keys:
+        if key in event:
+            return event.get(key)
+
+    version = event.get("version")
+    if isinstance(version, dict):
+        for key in keys:
+            if key in version:
+                return version.get(key)
+
+    payload = event.get("payload")
+    if isinstance(payload, dict):
+        for key in keys:
+            if key in payload:
+                return payload.get(key)
+
+    return None
+
+
+def _history_before_after(event):
+    before = _history_event_payload(
+        event,
+        "before",
+        "previous",
+        "old",
+        "old_value",
+        "state_before",
+        "previous_value",
+        "from",
+    )
+    after = _history_event_payload(
+        event,
+        "after",
+        "current",
+        "new",
+        "new_value",
+        "state_after",
+        "current_value",
+        "to",
+    )
+
+    # Nogle historik-events gemmer selve versionen som "data" / "settings".
+    # Hvis der ikke findes før/efter, bruger vi None og falder tilbage til reason.
+    return before, after
+
+
+def _format_history_value(value):
+    if isinstance(value, bool):
+        return "Ja" if value else "Nej"
+
+    if value is None:
+        return "Tom"
+
+    if isinstance(value, float):
+        if 0 <= value <= 1:
+            return f"{format_number(value * 100)}%"
+        return format_number(value)
+
+    if isinstance(value, int):
+        return str(value)
+
+    if isinstance(value, list):
+        if not value:
+            return "Ingen"
+        if all(isinstance(item, dict) and "navn" in item for item in value):
+            return ", ".join(
+                f"{item.get('navn', 'Post')} ({format_money(item.get('beløb', 0))})"
+                for item in value
+            )
+        return f"{len(value)} elementer"
+
+    if isinstance(value, dict):
+        return f"{len(value)} felter"
+
+    return str(value)
+
+
+def _settings_change_lines(before, after, limit=8):
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return []
+
+    ignored_keys = {
+        WINDOW_WIDTH_SETTINGS_KEY,
+        WINDOW_HEIGHT_SETTINGS_KEY,
+    }
+
+    changed = []
+    for key in sorted(set(before.keys()) | set(after.keys())):
+        if key in ignored_keys:
+            continue
+
+        old_value = before.get(key)
+        new_value = after.get(key)
+
+        if old_value == new_value:
+            continue
+
+        label = HISTORY_SETTING_LABELS.get(key, key)
+        changed.append(
+            f"{label}: {_format_history_value(old_value)} → {_format_history_value(new_value)}"
+        )
+
+    if len(changed) > limit:
+        remaining = len(changed) - limit
+        changed = changed[:limit] + [f"... og {remaining} flere ændringer"]
+
+    return changed
+
+
+def _entry_id_from_history_entry(entry, fallback_index=0):
+    try:
+        date_key, info = next(iter(entry.items()))
+    except (AttributeError, StopIteration):
+        return f"unknown-{fallback_index}"
+
+    if isinstance(info, dict):
+        return str(info.get(ft.ENTRY_ID_KEY) or f"legacy-{date_key}-{fallback_index}")
+
+    return f"legacy-{date_key}-{fallback_index}"
+
+
+def _entry_text_from_history_entry(entry):
+    try:
+        date_key, info = next(iter(entry.items()))
+    except (AttributeError, StopIteration):
+        return "Ukendt registrering"
+
+    if not isinstance(info, dict):
+        return str(date_key)
+
+    if info.get(ft.ENTRY_TYPE_KEY) == ft.DAY_OFF_ENTRY_TYPE:
+        return f"{date_key}: Fridag"
+
+    timer = info.get("timer", 0)
+    timeløn = info.get("timeløn", 0)
+    pause = info.get("pause", 0)
+    start = info.get("start")
+    slut = info.get("slut")
+
+    time_text = f"{start} - {slut}" if start and slut else f"{format_number(timer)} t."
+    pause_text = f", pause {format_number(float(pause or 0) * 60)} min." if pause else ""
+
+    return f"{date_key}: {time_text}, {format_money(timeløn)} / t.{pause_text}"
+
+
+def _data_change_lines(before, after, limit=8):
+    if not isinstance(before, list) or not isinstance(after, list):
+        return []
+
+    before_by_id = {
+        _entry_id_from_history_entry(entry, index): entry
+        for index, entry in enumerate(before)
+    }
+    after_by_id = {
+        _entry_id_from_history_entry(entry, index): entry
+        for index, entry in enumerate(after)
+    }
+
+    before_ids = set(before_by_id)
+    after_ids = set(after_by_id)
+
+    added_ids = sorted(after_ids - before_ids)
+    removed_ids = sorted(before_ids - after_ids)
+    shared_ids = sorted(before_ids & after_ids)
+
+    lines = []
+
+    for entry_id in added_ids:
+        lines.append(f"Tilføjet: {_entry_text_from_history_entry(after_by_id[entry_id])}")
+
+    for entry_id in removed_ids:
+        lines.append(f"Slettet: {_entry_text_from_history_entry(before_by_id[entry_id])}")
+
+    for entry_id in shared_ids:
+        if before_by_id[entry_id] != after_by_id[entry_id]:
+            lines.append(
+                "Ændret: "
+                f"{_entry_text_from_history_entry(before_by_id[entry_id])} "
+                "→ "
+                f"{_entry_text_from_history_entry(after_by_id[entry_id])}"
+            )
+
+    if not lines and len(before) != len(after):
+        lines.append(f"Antal registreringer: {len(before)} → {len(after)}")
+
+    if len(lines) > limit:
+        remaining = len(lines) - limit
+        lines = lines[:limit] + [f"... og {remaining} flere ændringer"]
+
+    return lines
+
+
+def detailed_history_event_summary(event, multiline=False):
+    if not isinstance(event, dict):
+        return "Ukendt ændring"
+
+    operation = str(event.get("operation", ""))
+    target = str(event.get("target", ""))
+    reason = str(event.get("reason", "") or "").strip()
+
+    operation_label = _history_operation_label(operation)
+    area_label = _history_area_label(target)
+
+    before, after = _history_before_after(event)
+
+    if target == "settings":
+        lines = _settings_change_lines(before, after)
+    elif target == "data":
+        lines = _data_change_lines(before, after)
+    else:
+        lines = []
+
+    if not lines:
+        fallback = (
+            ft.summarize_history_event(event)
+            if hasattr(ft, "summarize_history_event")
+            else reason
+        )
+        fallback = str(fallback or reason or "Ingen detaljer fundet.").strip()
+
+        if operation == "undo":
+            return f"Fortrød seneste ændring i {area_label}: {fallback}"
+        if operation == "restore":
+            return f"Indlæste en tidligere version af {area_label}: {fallback}"
+        return f"{operation_label} i {area_label}: {fallback}"
+
+    if multiline:
+        header = f"{operation_label} i {area_label}"
+        if reason:
+            header += f"\nÅrsag: {reason}"
+        return header + "\n\n" + "\n".join(f"• {line}" for line in lines)
+
+    compact = "; ".join(lines)
+    if operation == "undo":
+        return f"Fortrød i {area_label}: {compact}"
+    if operation == "restore":
+        return f"Indlæste version af {area_label}: {compact}"
+    return f"{operation_label} i {area_label}: {compact}"
+
+
+def latest_undoable_history_event():
+    if not hasattr(ft, "get_history_events"):
+        return None
+
+    events = ft.get_history_events(limit=25)
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("operation") in {"save", "restore"}:
+            return event
+
+    return events[0] if events else None
+
+
 def format_shift_table_date(value):
     if value is None:
         return "N/A"
@@ -1898,6 +2231,12 @@ def table_item(value, align=Qt.AlignLeft | Qt.AlignVCenter):
     item = QTableWidgetItem(str(value))
     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
     item.setTextAlignment(align)
+    return item
+
+
+def locked_table_item(value, align=Qt.AlignLeft | Qt.AlignVCenter):
+    item = table_item(value, align)
+    item.setFlags(item.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsEditable)
     return item
 
 
@@ -8733,17 +9072,20 @@ class ActionHistoryActionButton(QPushButton):
 
     def _draw_icon(self, painter, rect, color):
         painter.save()
-        painter.setPen(QPen(color, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setPen(QPen(color, 2.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.setBrush(Qt.NoBrush)
 
         cx = rect.center().x()
         cy = rect.center().y()
 
         if self.icon_name == "undo":
-            painter.drawArc(QRectF(cx - 8, cy - 8, 16, 16), 45 * 16, 245 * 16)
-            painter.drawLine(QPointF(cx - 8, cy - 1), QPointF(cx - 13, cy - 1))
-            painter.drawLine(QPointF(cx - 13, cy - 1), QPointF(cx - 10, cy - 5))
-            painter.drawLine(QPointF(cx - 13, cy - 1), QPointF(cx - 10, cy + 3))
+            # Pænere, mere tydeligt "undo"-ikon:
+            # venstrepil + blød retur-bue
+            painter.drawLine(QPointF(cx - 8, cy - 1), QPointF(cx - 14, cy - 1))
+            painter.drawLine(QPointF(cx - 14, cy - 1), QPointF(cx - 10, cy - 6))
+            painter.drawLine(QPointF(cx - 14, cy - 1), QPointF(cx - 10, cy + 4))
+
+            painter.drawPath(self._undo_path(cx, cy))
 
         elif self.icon_name == "history":
             painter.drawEllipse(QRectF(cx - 8, cy - 8, 16, 16))
@@ -8752,12 +9094,22 @@ class ActionHistoryActionButton(QPushButton):
 
         painter.restore()
 
+    def _undo_path(self, cx, cy):
+        from PyQt5.QtGui import QPainterPath
+
+        path = QPainterPath()
+        path.moveTo(cx - 8, cy - 1)
+        path.cubicTo(cx - 4, cy - 10, cx + 10, cy - 8, cx + 10, cy + 2)
+        path.cubicTo(cx + 10, cy + 8, cx + 4, cy + 10, cx - 1, cy + 8)
+        return path
+
 
 class ActionHistorySettingsWidget(QFrame):
     def __init__(self, window):
         super().__init__()
         self.window = window
         self.expanded = False
+        self._animated_content_height = 0
 
         self.setObjectName("ActionHistorySettingsWidget")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -8833,8 +9185,8 @@ class ActionHistorySettingsWidget(QFrame):
 
         self.content = QWidget()
         self.content.setStyleSheet("background: transparent;")
-        self.content.setMaximumHeight(0)
-        self.content.setMinimumHeight(0)
+        self.content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.content.setFixedHeight(0)
 
         content_layout = QVBoxLayout(self.content)
         content_layout.setContentsMargins(0, 2, 0, 0)
@@ -8864,53 +9216,89 @@ class ActionHistorySettingsWidget(QFrame):
 
         root.addWidget(self.content)
 
-        self.expand_animation = QParallelAnimationGroup(self)
-
-        self.content_min_animation = QPropertyAnimation(self.content, b"minimumHeight", self)
-        self.content_max_animation = QPropertyAnimation(self.content, b"maximumHeight", self)
-
-        for animation in (self.content_min_animation, self.content_max_animation):
-            animation.setDuration(220)
-            animation.setEasingCurve(QEasingCurve.OutCubic)
-            self.expand_animation.addAnimation(animation)
-
+        self.expand_animation = QPropertyAnimation(self, b"animatedContentHeight", self)
+        self.expand_animation.setDuration(240)
+        self.expand_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.expand_animation.valueChanged.connect(lambda *_: self._request_layout_update())
         self.expand_animation.finished.connect(self._finish_animation)
 
-        self._sync_state(animated=False)
+        self._set_animated_content_height(0)
+        self.header_button.set_expanded(False)
+
+    @pyqtProperty(int)
+    def animatedContentHeight(self):
+        return self._animated_content_height
+
+    @animatedContentHeight.setter
+    def animatedContentHeight(self, value):
+        self._set_animated_content_height(value)
+
+    def _set_animated_content_height(self, value):
+        self._animated_content_height = max(0, int(value))
+        self.content.setFixedHeight(self._animated_content_height)
+        self.content.setVisible(self._animated_content_height > 0 or self.expanded)
+        self.updateGeometry()
+
+    def _content_target_height(self):
+        layout = self.content.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        return max(1, self.content.sizeHint().height())
 
     def _toggle(self):
         self.expanded = not self.expanded
-        self._sync_state(animated=True)
-
-    def _sync_state(self, animated=True):
         self.header_button.set_expanded(self.expanded)
-
-        target_height = self.content.sizeHint().height() if self.expanded else 0
-
-        if not animated:
-            self.content.setMinimumHeight(target_height)
-            self.content.setMaximumHeight(target_height)
-            return
-
-        if self.expanded:
-            self.content.setMaximumHeight(0)
-            self.content.setMinimumHeight(0)
 
         self.expand_animation.stop()
 
-        for animation in (self.content_min_animation, self.content_max_animation):
-            animation.setStartValue(self.content.maximumHeight())
-            animation.setEndValue(target_height)
+        start_height = self.content.height()
+        end_height = self._content_target_height() if self.expanded else 0
 
+        if self.expanded:
+            self.content.setVisible(True)
+
+        self.expand_animation.setStartValue(start_height)
+        self.expand_animation.setEndValue(end_height)
         self.expand_animation.start()
 
     def _finish_animation(self):
-        if self.expanded:
-            self.content.setMinimumHeight(0)
-            self.content.setMaximumHeight(16777215)
+        if not self.expanded:
+            self.content.setVisible(False)
+            self._set_animated_content_height(0)
         else:
-            self.content.setMinimumHeight(0)
-            self.content.setMaximumHeight(0)
+            self._set_animated_content_height(self._content_target_height())
+
+        self._request_layout_update()
+
+    def _request_layout_update(self):
+        self.updateGeometry()
+
+        parent = self.parentWidget()
+        while parent is not None:
+            parent.updateGeometry()
+
+            if hasattr(parent, "root"):
+                try:
+                    parent.root.invalidate()
+                    parent.root.activate()
+                except Exception:
+                    pass
+
+            if hasattr(parent, "scroll_area") and hasattr(parent, "page_body"):
+                try:
+                    parent.page_body.updateGeometry()
+                    parent.scroll_area.viewport().update()
+                except Exception:
+                    pass
+
+            if hasattr(parent, "_sync_compact_body_size"):
+                try:
+                    parent._sync_compact_body_size()
+                except Exception:
+                    pass
+
+            parent = parent.parentWidget()
 
     def _show_info(self):
         QMessageBox.information(
@@ -9006,8 +9394,23 @@ class VersionHistoryDialog(QDialog):
         self.table = QTableWidget()
         setup_table(self.table, ["Tidspunkt", "Handling", "Område", "Beskrivelse", ""])
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setDefaultSectionSize(46)
+        self.table.setStyleSheet(
+            self.table.styleSheet()
+            + """
+            QTableWidget::item {
+                outline: 0;
+            }
+            QTableWidget::item:selected {
+                background: transparent;
+                color: #111827;
+            }
+            """
+        )
         table_layout.addWidget(self.table, 1)
 
         button_row = QHBoxLayout()
@@ -9052,16 +9455,12 @@ class VersionHistoryDialog(QDialog):
                 "data": "Løndata",
             }.get(target, target)
 
-            timestamp_item = table_item(event.get("timestamp", ""))
-            operation_item = table_item(operation_label)
-            target_item = table_item(target_label)
+            timestamp_item = locked_table_item(format_history_timestamp(event.get("timestamp", "")))
+            operation_item = locked_table_item(operation_label)
+            target_item = locked_table_item(target_label)
 
-            summary = (
-                ft.summarize_history_event(event)
-                if hasattr(ft, "summarize_history_event")
-                else str(event.get("reason", ""))
-            )
-            summary_item = table_item(summary)
+            summary = detailed_history_event_summary(event, multiline=False)
+            summary_item = locked_table_item(summary)
 
             if operation == "undo":
                 operation_item.setForeground(QBrush(QColor("#d97706")))
@@ -9093,6 +9492,9 @@ class VersionHistoryDialog(QDialog):
         self.table.setColumnWidth(2, 105)
         self.table.resizeRowsToContents()
 
+        self.table.clearSelection()
+        self.table.setCurrentCell(-1, -1)
+
     def _set_restore_button(self, row_index):
         button = QPushButton("Indlæs")
         button.setObjectName("InlineButton")
@@ -9114,11 +9516,7 @@ class VersionHistoryDialog(QDialog):
             return
 
         event = self.events[index]
-        summary = (
-            ft.summarize_history_event(event)
-            if hasattr(ft, "summarize_history_event")
-            else "denne version"
-        )
+        summary = detailed_history_event_summary(event, multiline=True)
 
         answer = QMessageBox.question(
             self,
@@ -9310,11 +9708,19 @@ class MainWindow(QMainWindow):
             )
             return
 
+        latest_event = latest_undoable_history_event()
+        latest_description = (
+            detailed_history_event_summary(latest_event, multiline=True)
+            if latest_event is not None
+            else "Der blev ikke fundet detaljer om den seneste ændring."
+        )
+
         answer = QMessageBox.question(
             self,
             "Fortryd sidste ændring",
-            "Vil du fortryde den seneste gemte ændring?\n\n"
-            "Historikken bliver ikke slettet.",
+            "Du er ved at fortryde denne ændring:\n\n"
+            f"{latest_description}\n\n"
+            "Vil du fortsætte?",
         )
 
         if answer != QMessageBox.Yes:
@@ -9329,16 +9735,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Undo fejlede", str(error))
             return
 
-        summary = (
-            ft.summarize_history_event(undone_event)
-            if hasattr(ft, "summarize_history_event")
-            else "Seneste ændring blev fortrudt."
+        undone_description = detailed_history_event_summary(
+            latest_event or undone_event,
+            multiline=True,
         )
 
         QMessageBox.information(
             self,
             "Ændring fortrudt",
-            summary,
+            "Ændringen er fortrudt:\n\n"
+            f"{undone_description}",
         )
 
         self.refresh_all()
