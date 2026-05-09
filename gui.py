@@ -1627,6 +1627,32 @@ def current_period_summary(data, settings, today=None):
     }
 
 
+def last_complete_period_info(data, settings, today=None):
+    today = today or datetime.now().date()
+    if not has_required_settings(settings):
+        return None
+
+    current_settings = ft.normalize_settings(settings)
+    current_start, _ = ft.get_salary_period_for_date(today, settings=current_settings)
+    periods, _ = build_periods(data, current_settings)
+    past_periods = [period for period in periods if period["periode_slut"] < current_start]
+    if not past_periods:
+        return None
+
+    period = max(past_periods, key=lambda item: item["periode_slut"])
+    other_income = period.get("anden_indkomst", 0)
+    budget_expenses = period.get("budget_expenses", 0)
+    total_income = period["netto"] + other_income
+    return {
+        "periode_start": period["periode_start"],
+        "periode_slut": period["periode_slut"],
+        "netto": period["netto"],
+        "other_income": other_income,
+        "budget_expenses": budget_expenses,
+        "available": total_income - budget_expenses,
+    }
+
+
 def next_month(year, month):
     if month == 12:
         return year + 1, 1
@@ -4841,52 +4867,7 @@ class DashboardPage(CompactScrollPage):
         self._sync_compact_body_size()
 
     def _last_complete_period_info(self):
-        if not has_required_settings(self.settings):
-            return None
-
-        current_settings = ft.normalize_settings(self.settings)
-        today = datetime.now().date()
-        current_start, _ = ft.get_salary_period_for_date(today, settings=current_settings)
-        periods = {}
-        for raw_row in entry_rows(self.data, current_settings):
-            row = overview_row_with_current_settings(raw_row, current_settings)
-            period_start, period_end = ft.get_salary_period_for_date(row["dato"], settings=current_settings)
-            if period_end >= current_start:
-                continue
-            period = periods.setdefault(
-                (period_start, period_end),
-                {
-                    "periode_start": period_start,
-                    "periode_slut": period_end,
-                    "items": [],
-                },
-            )
-            period["items"].append(
-                {
-                    "brutto": row["brutto"],
-                    "timer": row["timer"],
-                    "paid_hours": row["timer"],
-                    "settings": current_settings,
-                }
-            )
-
-        if not periods:
-            return None
-
-        period = max(periods.values(), key=lambda item: item["periode_slut"])
-        breakdown = ft.calculate_period_salary_breakdown(
-            period["items"],
-            period["periode_start"],
-            period["periode_slut"],
-            current_settings,
-        )
-        other_income = ft.get_other_income(current_settings, period["periode_start"], period["periode_slut"])
-        budget_expenses = ft.calculate_budget_expenses(current_settings, period["periode_start"], period["periode_slut"])
-        total_income = breakdown["netto"] + other_income
-        return {
-            "netto": breakdown["netto"],
-            "available": total_income - budget_expenses,
-        }
+        return last_complete_period_info(self.data, self.settings)
 
     def _update_stats(self, summary):
         rows = summary.get("work_rows", summary["rows"])
@@ -5478,6 +5459,8 @@ class CalculatorPage(BasePage):
 class PayrollSlipDialog(QDialog):
     def __init__(self, parent, period, settings):
         super().__init__(parent)
+        self.parent_page = parent
+        self.window = getattr(parent, "window", parent)
         self.period = period
         self.settings = settings
         self.setModal(True)
@@ -5503,11 +5486,16 @@ class PayrollSlipDialog(QDialog):
 
         self._build_header(root)
         self._build_metrics(root)
+        self._build_budget(root)
         self._build_shifts(root)
         self._build_breakdown(root)
 
         button_row = QHBoxLayout()
         button_row.addStretch()
+        edit_settings_button = QPushButton("Rediger indstillinger")
+        edit_settings_button.setObjectName("SecondaryButton")
+        edit_settings_button.clicked.connect(self._edit_period_settings)
+        button_row.addWidget(edit_settings_button)
         close_button = QPushButton("Luk")
         close_button.clicked.connect(self.accept)
         button_row.addWidget(close_button)
@@ -5564,6 +5552,53 @@ class PayrollSlipDialog(QDialog):
         layout.addLayout(total_box)
         root.addWidget(panel)
 
+    def _period_settings(self):
+        items = self.period.get("calculation_items", [])
+        if items:
+            return ft.select_effective_settings_for_period(items, self.settings)
+        shifts = self.period.get("shifts", [])
+        for shift in reversed(shifts):
+            if isinstance(shift.get("settings"), dict):
+                return ft.normalize_settings(shift.get("settings"))
+        return ft.normalize_settings(self.settings)
+
+    def _period_other_income(self):
+        return self.period.get(
+            "anden_indkomst",
+            ft.get_other_income(self.settings, self.period["periode_start"], self.period["periode_slut"]),
+        )
+
+    def _period_budget_expenses(self):
+        return self.period.get(
+            "budget_expenses",
+            ft.calculate_budget_expenses(self.settings, self.period["periode_start"], self.period["periode_slut"]),
+        )
+
+    def _holiday_pay_values(self):
+        period_settings = self._period_settings()
+        config = holiday_pay_settings(period_settings)
+        rate = config["rate"]
+        period_holiday_eligible = sum(
+            max(0.0, float(shift.get("brutto", 0) or 0))
+            for shift in self.period.get("shifts", [])
+            if not shift.get("is_day_off")
+        )
+        earned_in_period = ft.calculate_holiday_pay_amount(period_holiday_eligible, rate)
+
+        ferie_start, ferie_end, _ = current_holiday_year(self.period["periode_slut"])
+        employment_start = config["employment_start"] or first_work_entry_date(getattr(self.window, "data", []))
+        calculation_start = max(ferie_start, employment_start) if employment_start else ferie_start
+        calculation_end = min(self.period["periode_slut"], ferie_end)
+        if calculation_end < calculation_start:
+            return earned_in_period, 0.0
+
+        total_eligible = sum(
+            max(0.0, float(row.get("brutto", 0) or 0))
+            for row in entry_rows(getattr(self.window, "data", []), self.settings)
+            if not row.get("is_day_off") and calculation_start <= row["dato"] <= calculation_end
+        )
+        return earned_in_period, ft.calculate_holiday_pay_amount(total_eligible, rate)
+
     def _build_metrics(self, root):
         shift_count = int(self.period.get("vagter", 0))
         if not shift_count:
@@ -5572,11 +5607,17 @@ class PayrollSlipDialog(QDialog):
         pause = self.period.get("pause", 0)
         duration = self.period.get("varighed", self.period["timer"] + pause)
         avg_rate = self.period["brutto"] / self.period["timer"] if self.period["timer"] else None
+        other_income = self._period_other_income()
+        budget_expenses = self._period_budget_expenses()
+        disposable_amount = self.period["netto"] + other_income - budget_expenses
+        earned_holiday_pay, total_holiday_pay = self._holiday_pay_values()
 
         grid = QGridLayout()
         grid.setSpacing(10)
         metrics = [
             ("Udbetalt (Netto)", format_money(self.period["netto"]), "#1f8a70"),
+            ("Rådighedsbeløb", format_money(disposable_amount), "#1f8a70", f"Efter udgifter: {format_money(budget_expenses)}"),
+            ("Feriepenge", format_money(earned_holiday_pay), "#d97706", f"Total feriepenge: {format_money(total_holiday_pay)}"),
             ("Betalte timer", f"{format_number(self.period['timer'])} t.", "#7c3aed"),
             ("Antal vagter", str(shift_count), "#475569"),
             ("Fridage", str(day_off_count), DAY_OFF_ACCENT),
@@ -5585,9 +5626,62 @@ class PayrollSlipDialog(QDialog):
             ("Timer før pause", f"{format_number(duration)} t.", "#2563eb"),
             ("Pause", f"{format_pause_minutes(pause)} min.", "#d97706"),
         ]
-        for index, (title, value, accent) in enumerate(metrics):
-            grid.addWidget(MetricCard(title, value, accent=accent), index // 3, index % 3)
+        for index, metric in enumerate(metrics):
+            title, value, accent = metric[:3]
+            subtitle = metric[3] if len(metric) > 3 else ""
+            grid.addWidget(MetricCard(title, value, subtitle=subtitle, accent=accent), index // 3, index % 3)
         root.addLayout(grid)
+
+    def _edit_period_settings(self):
+        dialog = PeriodSettingsDialog(self, self.window, self.period)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self.window.refresh_all()
+        self.accept()
+
+    def _build_budget(self, root):
+        period_settings = self._period_settings()
+        categories = ft.get_budget_categories(period_settings)
+
+        panel, layout = make_panel("Budgetposter")
+        root.addWidget(panel)
+        if not categories:
+            empty_label = QLabel("Ingen budgetposter gemt på denne lønperiode.")
+            empty_label.setObjectName("PageSubtitle")
+            empty_label.setWordWrap(True)
+            layout.addWidget(empty_label)
+            return
+
+        table = QTableWidget()
+        setup_table(table, ["Post", "Pr. måned", "Denne periode"])
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        rows = []
+        period_total = 0.0
+        for category in categories:
+            amount = max(0.0, float(category.get("beløb", 0) or 0))
+            period_amount = ft.periodize_amount(
+                amount,
+                category.get("enhed", ft.AMOUNT_UNIT_MONTH),
+                self.period["periode_start"],
+                self.period["periode_slut"],
+                period_settings,
+            )
+            period_total += period_amount
+            rows.append((str(category.get("navn", "Budgetpost")), amount, period_amount))
+        rows.append(("I alt", sum(row[1] for row in rows), period_total))
+
+        table.setRowCount(len(rows))
+        for row_index, (name, monthly_amount, period_amount) in enumerate(rows):
+            item_name = table_item(name)
+            if row_index == len(rows) - 1:
+                font = item_name.font()
+                font.setBold(True)
+                item_name.setFont(font)
+            table.setItem(row_index, 0, item_name)
+            table.setItem(row_index, 1, table_item(format_money(monthly_amount), Qt.AlignRight | Qt.AlignVCenter))
+            table.setItem(row_index, 2, table_item(format_money(period_amount), Qt.AlignRight | Qt.AlignVCenter))
+        fit_table_height(table, len(rows), max_rows=8, min_rows=min(3, len(rows)), bottom_padding=0)
+        layout.addWidget(table)
 
     def _build_breakdown(self, root):
         panel, layout = make_panel("Beregning")
@@ -5657,6 +5751,293 @@ class PayrollSlipDialog(QDialog):
                 table.setItem(row_index, 4, table_item(format_money(shift.get("netto")), Qt.AlignRight | Qt.AlignVCenter))
         fit_table_height(table, len(shifts), max_rows=8, min_rows=min(3, len(shifts)), bottom_padding=0)
         layout.addWidget(table)
+
+
+class PeriodBudgetDialog(QDialog):
+    def __init__(self, parent, categories):
+        super().__init__(parent)
+        self.setWindowTitle("Rediger budgetposter")
+        self.setWindowIcon(app_icon())
+        self.setModal(True)
+        self.setMinimumSize(620, 520)
+        self.resize(700, 560)
+        self.categories = [dict(category) for category in categories]
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(14)
+
+        self.total_label = QLabel()
+        self.total_label.setWordWrap(True)
+        self.total_label.setStyleSheet("color: #111827; font-size: 20pt; font-weight: 900; padding: 2px 0 6px 0;")
+        root.addWidget(self.total_label)
+
+        panel, layout = make_panel("Budgetposter")
+        root.addWidget(panel, 1)
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        intro = QLabel("Posterne gemmes på alle registreringer i denne lønperiode som månedlige beløb.")
+        intro.setObjectName("PageSubtitle")
+        intro.setWordWrap(True)
+        header.addWidget(intro, 1)
+        add_button = QPushButton("Tilføj ny post")
+        add_button.clicked.connect(self._add_category)
+        header.addWidget(add_button)
+        layout.addLayout(header)
+
+        self.table = QTableWidget()
+        setup_table(self.table, ["Post", "Beløb", ""])
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.setMinimumHeight(230)
+        layout.addWidget(self.table)
+
+        button_row = QHBoxLayout()
+        root.addLayout(button_row)
+        save_button = QPushButton("Gem budgetposter")
+        save_button.clicked.connect(self.accept)
+        button_row.addWidget(save_button)
+        cancel_button = QPushButton("Annuller")
+        cancel_button.setObjectName("SecondaryButton")
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(cancel_button)
+        button_row.addStretch()
+
+        self._fill_table()
+        self._update_total_label()
+
+    def _budget_total(self):
+        return sum(max(0.0, float(item.get("beløb", 0) or 0)) for item in self.categories)
+
+    def _update_total_label(self):
+        self.total_label.setText(f"Samlede udgifter pr. måned: {format_money(self._budget_total())}")
+
+    def _fill_table(self):
+        self.table.setRowCount(len(self.categories))
+        for row_index, item in enumerate(self.categories):
+            self.table.setItem(row_index, 0, table_item(item.get("navn", "Budgetpost")))
+            self.table.setItem(
+                row_index,
+                1,
+                table_item(format_money(item.get("beløb", 0)), Qt.AlignRight | Qt.AlignVCenter),
+            )
+            edit_button = QPushButton("Rediger")
+            edit_button.setObjectName("InlineButton")
+            edit_button.clicked.connect(lambda checked=False, index=row_index: self._edit_category(index))
+            self.table.setCellWidget(row_index, 2, edit_button)
+        self.table.resizeRowsToContents()
+        self.table.setMinimumHeight(min(460, 96 + (len(self.categories) * 36)))
+
+    def _add_category(self):
+        dialog = BudgetEntryDialog(self, "Tilføj ny post")
+        if dialog.exec_() == QDialog.Accepted and dialog.entry:
+            self.categories.append(dialog.entry)
+            self._fill_table()
+            self._update_total_label()
+
+    def _edit_category(self, index):
+        if index < 0 or index >= len(self.categories):
+            return
+        dialog = BudgetEntryDialog(self, "Rediger post", self.categories[index], allow_delete=True)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        if dialog.deleted:
+            del self.categories[index]
+        elif dialog.entry:
+            self.categories[index] = dialog.entry
+        self._fill_table()
+        self._update_total_label()
+
+
+class PeriodSettingsDialog(QDialog):
+    def __init__(self, parent, window, period):
+        super().__init__(parent)
+        self.window = window
+        self.period = period
+        self.setModal(True)
+        self.setWindowTitle("Rediger lønseddel-indstillinger")
+        self.setWindowIcon(app_icon())
+        self.setMinimumSize(720, 680)
+        self.resize(780, 740)
+        self.budget_categories = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(14)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        root.addWidget(scroll, 1)
+
+        body = QWidget()
+        scroll.setWidget(body)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(14)
+
+        panel, layout = make_panel("Indstillinger for perioden")
+        body_layout.addWidget(panel)
+        form = QFormLayout()
+        form.setVerticalSpacing(18)
+        form.setHorizontalSpacing(24)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addLayout(form)
+
+        self.tax_field = make_text_input()
+        self.fradrag_field = make_text_input()
+        self.fradrag_unit_combo = ModernComboBox()
+        for label, value in [
+            ("Måned", ft.AMOUNT_UNIT_MONTH),
+            ("14 dage", ft.AMOUNT_UNIT_TWO_WEEKS),
+            ("Uge", ft.AMOUNT_UNIT_WEEK),
+            ("Dag", ft.AMOUNT_UNIT_DAY),
+            ("Periode", ft.AMOUNT_UNIT_PERIOD),
+        ]:
+            self.fradrag_unit_combo.addItem(label, value)
+        self.am_field = make_text_input()
+        self.pension_field = make_text_input()
+        self.employer_pension_field = make_text_input()
+        self.atp_enabled_checkbox = QCheckBox("ATP aktiv")
+        self.atp_employee_field = make_text_input()
+        self.atp_employer_field = make_text_input()
+        self.other_income_field = make_text_input()
+        self.budget_total_label = QLabel()
+        self.budget_total_label.setObjectName("PageSubtitle")
+        self.budget_total_label.setWordWrap(True)
+        self.edit_budget_button = QPushButton("Rediger budgetposter")
+        self.edit_budget_button.setObjectName("InlineButton")
+        self.edit_budget_button.clicked.connect(self._edit_budget_categories)
+        self.budget_row = QWidget()
+        budget_row_layout = QHBoxLayout(self.budget_row)
+        budget_row_layout.setContentsMargins(0, 0, 0, 0)
+        budget_row_layout.setSpacing(10)
+        budget_row_layout.addWidget(self.budget_total_label, 1)
+        budget_row_layout.addWidget(self.edit_budget_button, 0, Qt.AlignVCenter)
+        self.goal_field = make_text_input()
+
+        form.addRow("Skat %", self.tax_field)
+        form.addRow("Fradrag", self.fradrag_field)
+        form.addRow("Fradrag enhed", self.fradrag_unit_combo)
+        form.addRow("AM-bidrag %", self.am_field)
+        form.addRow("Eget pensionsbidrag %", self.pension_field)
+        form.addRow("Arbejdsgiver pension %", self.employer_pension_field)
+        form.addRow("ATP", self.atp_enabled_checkbox)
+        form.addRow("ATP medarbejder pr. periode", self.atp_employee_field)
+        form.addRow("ATP arbejdsgiver pr. periode", self.atp_employer_field)
+        form.addRow("Anden indkomst netto pr. måned", self.other_income_field)
+        form.addRow("Budget pr. måned", self.budget_row)
+        form.addRow("Rådighedsmål pr. måned", self.goal_field)
+
+        body_layout.addStretch()
+
+        note = QLabel(
+            "Når du gemmer, får alle registreringer i denne lønperiode de samme gemte indstillinger. "
+            "Timer, datoer, pauser og timeløn ændres ikke."
+        )
+        note.setObjectName("PageSubtitle")
+        note.setWordWrap(True)
+        root.addWidget(note)
+
+        button_row = QHBoxLayout()
+        root.addLayout(button_row)
+        save_button = QPushButton("Gem på lønperiode")
+        save_button.clicked.connect(self._save)
+        button_row.addWidget(save_button)
+        cancel_button = QPushButton("Annuller")
+        cancel_button.setObjectName("SecondaryButton")
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(cancel_button)
+        button_row.addStretch()
+
+        self._fill_values()
+
+    def _base_settings(self):
+        items = self.period.get("calculation_items", [])
+        if items:
+            return ft.select_effective_settings_for_period(items, self.window.settings)
+        shifts = self.period.get("shifts", [])
+        for shift in reversed(shifts):
+            if isinstance(shift.get("settings"), dict):
+                return ft.normalize_settings(shift.get("settings"))
+        return ft.normalize_settings(self.window.settings)
+
+    def _fill_values(self):
+        settings = self._base_settings()
+        set_field_number(self.tax_field, float(settings.get("skat", 0)) * 100)
+        set_field_number(self.fradrag_field, float(settings.get("fradrag", 0)))
+        fradrag_unit_index = self.fradrag_unit_combo.findData(settings.get(ft.TAX_ALLOWANCE_UNIT_KEY, ft.AMOUNT_UNIT_MONTH))
+        self.fradrag_unit_combo.setCurrentIndex(max(0, fradrag_unit_index))
+        set_field_number(self.am_field, float(settings.get("am bidrag", 0)) * 100)
+        set_field_number(self.pension_field, ft.get_pension_contribution_rate(settings) * 100)
+        set_field_number(self.employer_pension_field, ft.get_employer_pension_contribution_rate(settings) * 100)
+        self.atp_enabled_checkbox.setChecked(bool(settings.get(ft.ATP_ENABLED_KEY, False)))
+        set_field_number(self.atp_employee_field, float(settings.get(ft.ATP_EMPLOYEE_AMOUNT_KEY, 0)))
+        set_field_number(self.atp_employer_field, float(settings.get(ft.ATP_EMPLOYER_AMOUNT_KEY, 0)))
+        set_field_number(self.other_income_field, ft.get_other_income(settings))
+        self.budget_categories = [dict(category) for category in ft.get_budget_categories(settings)]
+        self._update_budget_summary()
+        set_field_number(self.goal_field, ft.get_disposable_income_goal(settings))
+
+    def _budget_total(self):
+        return sum(max(0.0, float(item.get("beløb", 0) or 0)) for item in self.budget_categories)
+
+    def _update_budget_summary(self):
+        count = len(self.budget_categories)
+        post_text = "post" if count == 1 else "poster"
+        self.budget_total_label.setText(f"{format_money(self._budget_total())} pr. måned · {count} {post_text}")
+
+    def _edit_budget_categories(self):
+        dialog = PeriodBudgetDialog(self, self.budget_categories)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self.budget_categories = [dict(category) for category in dialog.categories]
+        self._update_budget_summary()
+
+    def _settings_from_fields(self):
+        tax = parse_positive_number(self.tax_field, "Skat", allow_zero=True)
+        am = parse_positive_number(self.am_field, "AM-bidrag", allow_zero=True)
+        pension = parse_positive_number(self.pension_field, "Eget pensionsbidrag", allow_zero=True)
+        employer_pension = parse_positive_number(self.employer_pension_field, "Arbejdsgiver pension", allow_zero=True)
+
+        base_settings = self._base_settings()
+        settings = ft.settings_snapshot(base_settings)
+        settings["skat"] = tax / 100 if tax > 1 else tax
+        settings["fradrag"] = parse_positive_number(self.fradrag_field, "Fradrag", allow_zero=True)
+        settings[ft.TAX_ALLOWANCE_UNIT_KEY] = self.fradrag_unit_combo.currentData() or ft.AMOUNT_UNIT_MONTH
+        settings["am bidrag"] = am / 100 if am > 1 else am
+        settings[ft.PENSION_CONTRIBUTION_KEY] = pension / 100 if pension > 1 else pension
+        settings[ft.EMPLOYER_PENSION_CONTRIBUTION_KEY] = employer_pension / 100 if employer_pension > 1 else employer_pension
+        settings[ft.ATP_ENABLED_KEY] = self.atp_enabled_checkbox.isChecked()
+        settings[ft.ATP_CALCULATION_KEY] = ft.ATP_CALCULATION_MANUAL
+        settings[ft.ATP_EMPLOYEE_AMOUNT_KEY] = parse_positive_number(self.atp_employee_field, "ATP medarbejder", allow_zero=True)
+        settings[ft.ATP_EMPLOYER_AMOUNT_KEY] = parse_positive_number(self.atp_employer_field, "ATP arbejdsgiver", allow_zero=True)
+        settings[ft.OTHER_INCOME_KEY] = parse_positive_number(self.other_income_field, "Anden indkomst", allow_zero=True)
+        settings["budget kategorier"] = [dict(category) for category in self.budget_categories]
+        settings["udgifter"] = self._budget_total()
+        settings["ønsket rådighedsbeløb"] = parse_positive_number(self.goal_field, "Rådighedsmål", allow_zero=True)
+        return ft.settings_snapshot(settings)
+
+    def _save(self):
+        try:
+            new_settings = self._settings_from_fields()
+            target_ids = {str(shift.get("id")) for shift in self.period.get("shifts", []) if shift.get("id")}
+            if not target_ids:
+                raise ValueError("Der blev ikke fundet nogen registreringer i lønperioden.")
+
+            rows = []
+            for row in entry_rows(ft.load_data(), self.window.settings):
+                updated = dict(row)
+                if str(updated.get("id")) in target_ids:
+                    updated["settings"] = new_settings
+                rows.append(updated)
+            save_entry_rows(rows)
+            self.accept()
+        except ValueError as error:
+            QMessageBox.warning(self, "Ugyldige indstillinger", str(error))
 
 
 class PaymentsPage(BasePage):
