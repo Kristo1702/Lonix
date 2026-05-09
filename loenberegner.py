@@ -4,8 +4,6 @@ import functions as ft
 
 init()
 
-AM_BIDRAG = 0.08
-
 
 def _format_number(value, decimals=2):
     if decimals <= 0:
@@ -130,7 +128,7 @@ def _print_result(path, breakdown, tax_rate, pension_rate=0, extra_lines=None):
         print(Fore.BLUE + f"  Pension ({_format_number(pension_rate * 100)}%): -{_format_money(breakdown['pension'])}")
     if breakdown.get("atp_medarbejder", 0) > 0:
         print(Fore.BLUE + f"  ATP medarbejder: -{_format_money(breakdown['atp_medarbejder'])}")
-    print(Fore.BLUE + f"  AM-bidrag ({_format_number(breakdown.get('am_sats', AM_BIDRAG) * 100)}%): -{_format_money(breakdown['am_bidrag'])}")
+    print(Fore.BLUE + f"  AM-bidrag ({_format_number(breakdown.get('am_sats', 0) * 100)}%): -{_format_money(breakdown['am_bidrag'])}")
     print(Fore.BLUE + f"  Efter AM-bidrag: {_format_money(breakdown['efter_am'])}")
     print(Fore.BLUE + f"  Fradrag: {_format_money(breakdown['fradrag'])}")
     print(Fore.BLUE + f"  Skattegrundlag: {_format_money(breakdown['skattegrundlag'])}")
@@ -177,19 +175,25 @@ def _calculate_from_hours():
     )
 
 
+def _calculate_breakdown(brutto, fradrag, tax_rate, pension_rate, hours=0, base_settings=None):
+    settings = ft.normalize_settings(base_settings if isinstance(base_settings, dict) else ft.load_settings())
+    settings["skat"] = tax_rate
+    settings["fradrag"] = fradrag
+    settings[ft.PENSION_CONTRIBUTION_KEY] = pension_rate
+    return ft.calculate_salary_breakdown_from_settings(
+        brutto,
+        fradrag,
+        settings,
+        hours=hours,
+    )
+
+
 def _calculate_with_brutto(path, brutto, extra_lines=None, hours=0):
     fradrag = _read_non_negative_number(path, "Fradrag i kr")
     tax_rate = _read_tax_rate(path)
     pension = _read_non_negative_number(path, "Eget pensionsbidrag % (fx 5 eller 0)")
     pension_rate = pension / 100 if pension > 1 else pension
-    breakdown = ft.calculate_salary_breakdown(
-        brutto,
-        tax_rate,
-        fradrag,
-        AM_BIDRAG,
-        settings={ft.PENSION_CONTRIBUTION_KEY: pension_rate},
-        hours=hours,
-    )
+    breakdown = _calculate_breakdown(brutto, fradrag, tax_rate, pension_rate, hours=hours)
     _print_result(path, breakdown, tax_rate, pension_rate, extra_lines)
 
 

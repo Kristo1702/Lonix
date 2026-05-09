@@ -1,5 +1,3 @@
-import json
-import re
 from datetime import datetime, timedelta
 
 import functions as ft
@@ -8,33 +6,26 @@ from colorama import init, Fore, Style
 init()
 
 
-TIME_PATTERN = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
-
-
 def _parse_number(value):
     return float(value.replace(",", "."))
 
 
 def _parse_clock_minutes(value):
-    match = TIME_PATTERN.fullmatch(value.strip())
-    if not match:
-        return None
-
-    hours = int(match.group(1))
-    minutes = int(match.group(2))
-    return (hours * 60) + minutes
+    return ft.try_parse_clock_minutes(value)
 
 
 def _calculate_hours_from_times(start_str, end_str):
-    start_minutes = _parse_clock_minutes(start_str)
-    end_minutes = _parse_clock_minutes(end_str)
-    if start_minutes is None or end_minutes is None:
+    try:
+        return ft.calculate_hours_from_times(start_str, end_str)
+    except ValueError:
         return None
 
-    if end_minutes < start_minutes:
-        end_minutes += 24 * 60
 
-    return (end_minutes - start_minutes) / 60
+def _format_cli_number(value):
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
 
 def shift_entry_header(hours, rate, pause=0):
         if hours is None:
@@ -59,17 +50,55 @@ def shift_entry_header(hours, rate, pause=0):
         print("    ┃" + Fore.WHITE + f" Pause:   {pause} min" + Fore.LIGHTBLACK_EX + " " * max(0, longest_str - len(str(pause)) - 14) + "┃")
         print("    ┗" + "━"*longest_str + "┛" + Style.RESET_ALL)
 
-def save_shift(hours, rate, pause=0):
+def _format_overwrite_entry(index, dato, løn_info):
+    duration = ft.get_shift_duration_hours(løn_info)
+    pause_hours = ft.get_shift_pause_hours(løn_info)
+    rate = løn_info.get("timeløn", 0)
+    time_text = ""
+    if løn_info.get("start") and løn_info.get("slut"):
+        time_text = f", {løn_info.get('start')}-{løn_info.get('slut')}"
+    return (
+        f"({index}) {dato}: {_format_cli_number(duration)} timer, "
+        f"{_format_cli_number(rate)} kr/t, pause {_format_cli_number(pause_hours * 60)} min{time_text}"
+    )
+
+
+def _choose_entry_to_overwrite(dato, entries):
+    if len(entries) == 1:
+        return entries[0]
+
+    print(Fore.YELLOW + f"\nDer findes {len(entries)} vagter på {dato}. Vælg hvilken vagt der skal overskrives:\n")
+    for index, entry in enumerate(entries, start=1):
+        _, løn_info = next(iter(entry.items()))
+        print(Fore.WHITE + _format_overwrite_entry(index, dato, løn_info))
+    print(Fore.RED + "\n(0) Annuller" + Style.RESET_ALL)
+
+    valid_choices = {str(index) for index in range(1, len(entries) + 1)}
+    while True:
+        choice = input(Fore.WHITE + "\nVælg vagt: " + Style.RESET_ALL).strip()
+        if choice == "0":
+            return None
+        if choice in valid_choices:
+            return entries[int(choice) - 1]
+        ft.error_message(
+            sti="Hovedmenu > Vagter > Tilføj vagt > Gem",
+            besked="Vælg en konkret vagt fra listen.",
+            ugyldigt_valg=False,
+            get_input=True,
+        )
+
+
+def save_shift(hours, rate, pause=0, start_time=None, end_time=None, entry_date=None):
     try:
-        nu = datetime.now()
+        if entry_date is None:
+            nu = datetime.now()
+            entry_date = nu.date()
+            if nu.time().hour < 4:
+                entry_date = entry_date - timedelta(days=1)
+        elif isinstance(entry_date, datetime):
+            entry_date = entry_date.date()
 
-        dato = nu.date()
-        tid = nu.time()
-
-        if tid.hour < 4:
-            dato = dato - timedelta(days=1)
-
-        dato = dato.strftime("%d-%m-%Y")
+        dato = entry_date.strftime("%d-%m-%Y")
         gemt_data = ft.load_data()
         eksisterende = [entry for entry in gemt_data if dato in entry]
         if any(ft.is_day_off(entry[dato]) for entry in eksisterende):
@@ -85,6 +114,12 @@ def save_shift(hours, rate, pause=0):
             "timer": hours,
             "timeløn": rate
         }
+        normalized_start = ft.normalize_clock_text(start_time)
+        normalized_end = ft.normalize_clock_text(end_time)
+        if normalized_start and normalized_end:
+            shift_info["start"] = normalized_start
+            shift_info["slut"] = normalized_end
+
         pause_hours = max(0, pause / 60)
         if pause_hours > 0:
             shift_info["pause"] = pause_hours
@@ -103,14 +138,15 @@ def save_shift(hours, rate, pause=0):
             ).strip().lower()
 
             if choice == "o":
-                cleaned_data = [entry for entry in gemt_data if dato not in entry]
-                cleaned_data.append({dato: ft.normalize_entry_info(shift_info)})
-                cleaned_data = sorted(
-                    cleaned_data,
-                    key=lambda entry: datetime.strptime(next(iter(entry)), "%d-%m-%Y"),
-                )
-                with open("data/løn.txt", "w", encoding="utf-8") as file:
-                    json.dump(cleaned_data, file, ensure_ascii=False, indent=4)
+                selected_entry = _choose_entry_to_overwrite(dato, eksisterende)
+                if selected_entry is None:
+                    return False, None
+
+                _, selected_info = next(iter(selected_entry.items()))
+                shift_info[ft.ENTRY_ID_KEY] = ft.get_entry_id(selected_info) or ft.new_entry_id()
+                if isinstance(selected_info, dict) and selected_info.get(ft.ENTRY_CREATED_KEY):
+                    shift_info[ft.ENTRY_CREATED_KEY] = selected_info.get(ft.ENTRY_CREATED_KEY)
+                ft.save_data({dato: shift_info})
             elif choice == "t":
                 ft.save_data(data)
             else:
@@ -133,6 +169,8 @@ def main():
     hours = None
     rate = None
     pause = 0
+    start_time = None
+    end_time = None
     while True:
         ft.header("Hovedmenu > Vagter > Tilføj vagt")
         shift_entry_header(hours, rate, pause)
@@ -178,6 +216,8 @@ def main():
                         continue
 
                     hours = calculated_hours
+                    start_time = ft.normalize_clock_text(hours_str)
+                    end_time = ft.normalize_clock_text(end_str)
                     break
 
                 try:
@@ -186,6 +226,8 @@ def main():
                         ft.error_message(sti="Hovedmenu > Vagter > Tilføj vagt > Timer", besked="Antal timer skal være over 0.", ugyldigt_valg=False, sov=False, get_input=True)
                         continue
                     hours = parsed_hours
+                    start_time = None
+                    end_time = None
                     break
                 except ValueError:
                         ft.error_message(sti="Hovedmenu > Vagter > Tilføj vagt > Timer", besked="Antal timer skal være et tal eller et klokkeslæt.", ugyldigt_valg=False, sov=False, get_input=True)
@@ -243,7 +285,7 @@ def main():
                     get_input=True
                 )
                 continue
-            success, dato = save_shift(hours, rate, pause)
+            success, dato = save_shift(hours, rate, pause, start_time=start_time, end_time=end_time)
             if success:
                 ft.header("Hovedmenu > Vagter > Tilføj vagt > Gem")
                 brutto = paid_hours * rate

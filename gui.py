@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 import time
@@ -39,6 +38,7 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListView,
@@ -757,67 +757,27 @@ def parse_optional_settings_date(value):
 
 
 def parse_clock_minutes(value):
-    try:
-        parsed = datetime.strptime(value.strip(), "%H:%M")
-    except ValueError as error:
-        raise ValueError("Tidspunkt skal skrives som HH:MM, fx 14:00.") from error
-    return parsed.hour * 60 + parsed.minute
+    return ft.parse_clock_minutes(value)
 
 
 def calculate_hours_from_times(start_text, end_text):
-    start_minutes = parse_clock_minutes(start_text)
-    end_minutes = parse_clock_minutes(end_text)
-    if end_minutes < start_minutes:
-        end_minutes += 24 * 60
-    hours = (end_minutes - start_minutes) / 60
-    if hours <= 0:
-        raise ValueError("Sluttidspunkt skal være efter starttidspunkt.")
-    return hours
+    return ft.calculate_hours_from_times(start_text, end_text)
 
 
 def normalize_clock_text(value):
-    if value is None:
-        return None
-    try:
-        minutes = parse_clock_minutes(str(value))
-    except ValueError:
-        return None
-    return f"{(minutes // 60) % 24:02d}:{minutes % 60:02d}"
+    return ft.normalize_clock_text(value)
 
 
 def shift_time_interval(row):
-    if row.get("is_day_off"):
-        return None
-
-    start = row.get("start")
-    slut = row.get("slut")
-    if not start or not slut:
-        return None
-
-    try:
-        start_minutes = parse_clock_minutes(str(start))
-        end_minutes = parse_clock_minutes(str(slut))
-    except ValueError:
-        return None
-
-    if end_minutes <= start_minutes:
-        end_minutes += 24 * 60
-    return start_minutes, end_minutes
+    return ft.shift_time_interval(row)
 
 
 def intervals_overlap(first, second):
-    if first is None or second is None:
-        return False
-    return first[0] < second[1] and second[0] < first[1]
+    return ft.intervals_overlap(first, second)
 
 
 def rows_on_date(rows, target_date, exclude_ids=None):
-    exclude_ids = {str(entry_id) for entry_id in (exclude_ids or set())}
-    return [
-        row
-        for row in rows
-        if row.get("dato") == target_date and str(row.get("id")) not in exclude_ids
-    ]
+    return ft.rows_on_date(rows, target_date, exclude_ids)
 
 
 def date_has_day_off(rows, target_date, exclude_ids=None):
@@ -825,16 +785,7 @@ def date_has_day_off(rows, target_date, exclude_ids=None):
 
 
 def find_time_overlap(row, rows, exclude_ids=None):
-    current_interval = shift_time_interval(row)
-    if current_interval is None:
-        return None
-
-    for other in rows_on_date(rows, row.get("dato"), exclude_ids):
-        if other.get("is_day_off"):
-            continue
-        if intervals_overlap(current_interval, shift_time_interval(other)):
-            return other
-    return None
+    return ft.find_time_overlap(row, rows, exclude_ids)
 
 
 def validate_shift_conflicts(rows):
@@ -1473,8 +1424,7 @@ def save_entry_rows(rows):
             }
         )
 
-    with open("data/løn.txt", "w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=4)
+    ft.save_all_data(payload)
 
 
 def upsert_entry(
@@ -1490,6 +1440,7 @@ def upsert_entry(
 ):
     rows = entry_rows(ft.load_data())
     new_id = str(original_id or ft.new_entry_id())
+    existing_row = next((row for row in rows if str(row.get("id")) == new_id), {})
     if replace_date:
         rows = [row for row in rows if row["dato"] != entry_date]
     else:
@@ -1509,6 +1460,8 @@ def upsert_entry(
         "brutto": paid_hours * float(rate),
         "settings": ft.settings_snapshot(entry_settings),
     }
+    if existing_row.get("registreret"):
+        new_row["registreret"] = existing_row.get("registreret")
 
     if start and slut:
         new_row["start"] = str(start)
@@ -1633,9 +1586,12 @@ def last_complete_period_info(data, settings, today=None):
         return None
 
     current_settings = ft.normalize_settings(settings)
-    current_start, _ = ft.get_salary_period_for_date(today, settings=current_settings)
     periods, _ = build_periods(data, current_settings)
-    past_periods = [period for period in periods if period["periode_slut"] < current_start]
+    past_periods = [
+        period
+        for period in periods
+        if ft.is_period_complete(period["periode_start"], period["periode_slut"], today)
+    ]
     if not past_periods:
         return None
 
@@ -5167,7 +5123,7 @@ class ShiftEntryDialog(QDialog):
     def _existing_date_choice(self, selected_date, existing_rows):
         date_rows = rows_on_date(existing_rows, selected_date)
         if not date_rows:
-            return "add"
+            return "add", None
 
         if any(row.get("is_day_off") for row in date_rows):
             QMessageBox.warning(
@@ -5175,14 +5131,14 @@ class ShiftEntryDialog(QDialog):
                 "Dato er fridag",
                 f"{format_date(selected_date)} er markeret som fridag. Fjern fridagen før du indberetter en vagt på datoen.",
             )
-            return None
+            return None, None
 
         message = QMessageBox(self)
         message.setWindowTitle("Dato findes allerede")
         message.setWindowIcon(app_icon())
         message.setText(
             f"{format_date(selected_date)} findes allerede i databasen.\n\n"
-            "Vil du overskrive dagens vagter eller tilføje en ny vagt?"
+            "Vil du overskrive en eksisterende vagt eller tilføje en ny vagt?"
         )
         overwrite_button = message.addButton("Overskriv vagt", QMessageBox.AcceptRole)
         add_button = message.addButton("Tilføj ny vagt", QMessageBox.ActionRole)
@@ -5191,12 +5147,35 @@ class ShiftEntryDialog(QDialog):
 
         clicked = message.clickedButton()
         if clicked == overwrite_button:
-            return "overwrite"
+            if len(date_rows) == 1:
+                return "overwrite", str(date_rows[0].get("id"))
+
+            options = []
+            option_rows = {}
+            for index, row in enumerate(date_rows, start=1):
+                label = (
+                    f"{index}. {format_work_time(row).replace(chr(10), ' · ')} · "
+                    f"{format_money(row.get('timeløn'))}"
+                )
+                options.append(label)
+                option_rows[label] = row
+
+            selected_label, accepted = QInputDialog.getItem(
+                self,
+                "Vælg vagt",
+                "Vagt der skal overskrives:",
+                options,
+                0,
+                False,
+            )
+            if not accepted:
+                return None, None
+            return "overwrite", str(option_rows[selected_label].get("id"))
         if clicked == add_button:
-            return "add"
+            return "add", None
         if clicked == cancel_button:
-            return None
-        return None
+            return None, None
+        return None, None
 
     def _save_entry(self):
         try:
@@ -5217,7 +5196,7 @@ class ShiftEntryDialog(QDialog):
 
         key = date_to_key(selected_date)
         existing_rows = entry_rows(ft.load_data(), self.settings)
-        choice = self._existing_date_choice(selected_date, existing_rows)
+        choice, overwrite_id = self._existing_date_choice(selected_date, existing_rows)
         if choice is None:
             return
 
@@ -5230,7 +5209,7 @@ class ShiftEntryDialog(QDialog):
                 slut=end_time,
                 pause=pause,
                 entry_settings=self.settings,
-                replace_date=choice == "overwrite",
+                original_id=overwrite_id if choice == "overwrite" else None,
             )
         except ValueError as error:
             QMessageBox.warning(self, "Vagt kan ikke gemmes", str(error))

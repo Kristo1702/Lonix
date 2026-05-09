@@ -1,6 +1,5 @@
 import functions as ft
 from colorama import init, Fore, Style
-from datetime import datetime
 init()
 
 MONTH_NAMES = {
@@ -80,6 +79,19 @@ def build_udbetaling_overview(settings, udbetaling):
     print(Fore.GREEN + f"  • Total udbetalt: {total_udbetalt:.0f} kr.")
     print(Fore.LIGHTBLACK_EX + "\n───────────────────────────────────────" + Style.RESET_ALL)
 
+
+def filter_completed_payments(udbetalinger, today=None):
+    return [
+        udbetaling
+        for udbetaling in (udbetalinger or [])
+        if ft.is_period_complete(
+            udbetaling.get("periode_start"),
+            udbetaling.get("periode_slut"),
+            today,
+        )
+    ]
+
+
 def main():
     ft.header("Hovedmenu > udbetalinger")
 
@@ -115,18 +127,7 @@ def main():
         )
         return
 
-    i_dag = datetime.now().date()
-    igangværende_start, igangværende_slut = ft.get_salary_period_for_date(
-        i_dag,
-        settings=settings
-    )
-    udbetalinger = [
-        udbetaling for udbetaling in udbetalinger
-        if not (
-            udbetaling.get("periode_start") == igangværende_start
-            and udbetaling.get("periode_slut") == igangværende_slut
-        )
-    ]
+    udbetalinger = filter_completed_payments(udbetalinger)
 
     if not udbetalinger:
         ft.error_message(

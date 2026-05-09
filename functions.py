@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 from calendar import monthrange
 from copy import deepcopy
@@ -38,6 +40,9 @@ DAY_OFF_ENTRY_TYPE = "fridag"
 ENTRY_ID_KEY = "id"
 ENTRY_SETTINGS_KEY = "indstillinger"
 ENTRY_CREATED_KEY = "registreret"
+DATA_DIR = "data"
+DATA_FILE = os.path.join(DATA_DIR, "løn.txt")
+SETTINGS_FILE = os.path.join(DATA_DIR, "oplysninger.txt")
 REQUIRED_SETTINGS_KEYS = ["skat", "fradrag", "am bidrag", OTHER_INCOME_KEY, "løn start", "løn slut"]
 DEFAULT_FIXED_EXPENSES = 0
 DEFAULT_HOURLY_RATE = 150
@@ -186,17 +191,134 @@ def error_message(
         input(Fore.LIGHTBLACK_EX + "\n\nTryk Enter for at gå tilbage..." + Style.RESET_ALL)
 
 
-def load_data():
-    if not os.path.exists("data"):
-        os.mkdir("data")
+def _default_settings():
+    return {
+        "skat": 0.39,
+        "fradrag": 0,
+        TAX_ALLOWANCE_UNIT_KEY: AMOUNT_UNIT_MONTH,
+        "am bidrag": 0.08,
+        BIRTH_YEAR_KEY: None,
+        AM_AGE_RULE_ENABLED_KEY: True,
+        PENSION_CONTRIBUTION_KEY: 0,
+        EMPLOYER_PENSION_CONTRIBUTION_KEY: 0,
+        ATP_ENABLED_KEY: False,
+        ATP_CALCULATION_KEY: ATP_CALCULATION_MANUAL,
+        ATP_EMPLOYEE_AMOUNT_KEY: 0,
+        ATP_EMPLOYER_AMOUNT_KEY: 0,
+        PAID_BREAK_KEY: False,
+        OTHER_INCOME_KEY: 0,
+        OTHER_INCOME_UNIT_KEY: AMOUNT_UNIT_MONTH,
+        DEFAULT_HOURLY_RATE_KEY: DEFAULT_HOURLY_RATE,
+        INTRODUCTION_DONE_KEY: False,
+        "udgifter": DEFAULT_FIXED_EXPENSES,
+        "budget kategorier": [],
+        "ønsket rådighedsbeløb": 0,
+        DISPOSABLE_GOAL_UNIT_KEY: AMOUNT_UNIT_MONTH,
+        "løn start": 15,
+        "løn slut": 14,
+        PAY_PERIOD_TYPE_KEY: PAY_PERIOD_TYPE_MONTH,
+        PAY_PERIOD_WEEKS_KEY: DEFAULT_PAY_PERIOD_WEEKS,
+        PAY_PERIOD_ANCHOR_KEY: DEFAULT_PAY_PERIOD_ANCHOR,
+    }
 
-    if not os.path.exists("data/løn.txt"):
-        with open("data/løn.txt", "w", encoding="utf-8") as file:
-            json.dump([], file, ensure_ascii=False, indent=4)
-        return []
 
-    with open("data/løn.txt", "r", encoding="utf-8") as file:
+def _ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _json_backup_path(path):
+    return f"{path}.bak"
+
+
+def _print_json_error(message):
+    print(Fore.RED + message + Style.RESET_ALL, file=sys.stderr)
+
+
+def _read_json_file(path):
+    with open(path, "r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def _copy_json_backup(path):
+    backup_path = _json_backup_path(path)
+    try:
+        shutil.copy2(path, backup_path)
+    except OSError as error:
+        _print_json_error(f"Kunne ikke skrive backup for {path}: {error}")
+
+
+def _atomic_write_json(path, payload):
+    _ensure_data_dir()
+
+    if os.path.exists(path):
+        try:
+            _read_json_file(path)
+            _copy_json_backup(path)
+        except (json.JSONDecodeError, OSError):
+            # Bevar seneste gyldige backup i stedet for at overskrive den
+            # med en allerede korrupt primærfil.
+            pass
+
+    directory = os.path.dirname(path) or "."
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=4)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, path)
+        _copy_json_backup(path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _load_json_with_backup(path, default, label):
+    _ensure_data_dir()
+    if not os.path.exists(path):
+        _atomic_write_json(path, default)
+        return deepcopy(default)
+
+    try:
+        return _read_json_file(path)
+    except json.JSONDecodeError as error:
+        _print_json_error(f"{label} kunne ikke læses, fordi JSON-filen er korrupt: {error}")
+    except OSError as error:
+        _print_json_error(f"{label} kunne ikke læses: {error}")
+
+    backup_path = _json_backup_path(path)
+    if os.path.exists(backup_path):
+        try:
+            backup_data = _read_json_file(backup_path)
+            _print_json_error(f"{label} er indlæst fra backup: {backup_path}")
+            return backup_data
+        except json.JSONDecodeError as error:
+            _print_json_error(f"Backupfilen for {label} er også korrupt: {error}")
+        except OSError as error:
+            _print_json_error(f"Backupfilen for {label} kunne ikke læses: {error}")
+
+    _print_json_error(f"{label} kunne ikke gendannes. Bruger sikker standardværdi.")
+    return deepcopy(default)
+
+
+def load_data():
+    data = _load_json_with_backup(DATA_FILE, [], "Vagtdata")
+    if not isinstance(data, list):
+        _print_json_error("Vagtdata har forkert format. Bruger tom liste.")
+        return []
+    return data
+
+
+def save_all_data(data):
+    _atomic_write_json(DATA_FILE, data if isinstance(data, list) else [])
 
 
 def save_data(new_data):
@@ -221,50 +343,14 @@ def save_data(new_data):
         ),
     )
 
-    with open("data/løn.txt", "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=4)
+    save_all_data(data)
 
 
 def load_settings():
-    if not os.path.exists("data"):
-        os.mkdir("data")
-
-    if not os.path.exists("data/oplysninger.txt"):
-        default_data = {
-            "skat": 0.39,
-            "fradrag": 0,
-            TAX_ALLOWANCE_UNIT_KEY: AMOUNT_UNIT_MONTH,
-            "am bidrag": 0.08,
-            BIRTH_YEAR_KEY: None,
-            AM_AGE_RULE_ENABLED_KEY: True,
-            PENSION_CONTRIBUTION_KEY: 0,
-            EMPLOYER_PENSION_CONTRIBUTION_KEY: 0,
-            ATP_ENABLED_KEY: False,
-            ATP_CALCULATION_KEY: ATP_CALCULATION_MANUAL,
-            ATP_EMPLOYEE_AMOUNT_KEY: 0,
-            ATP_EMPLOYER_AMOUNT_KEY: 0,
-            PAID_BREAK_KEY: False,
-            OTHER_INCOME_KEY: 0,
-            OTHER_INCOME_UNIT_KEY: AMOUNT_UNIT_MONTH,
-            DEFAULT_HOURLY_RATE_KEY: DEFAULT_HOURLY_RATE,
-            INTRODUCTION_DONE_KEY: False,
-            "udgifter": DEFAULT_FIXED_EXPENSES,
-            "budget kategorier": [],
-            "ønsket rådighedsbeløb": 0,
-            DISPOSABLE_GOAL_UNIT_KEY: AMOUNT_UNIT_MONTH,
-            "løn start": 15,
-            "løn slut": 14,
-            PAY_PERIOD_TYPE_KEY: PAY_PERIOD_TYPE_MONTH,
-            PAY_PERIOD_WEEKS_KEY: DEFAULT_PAY_PERIOD_WEEKS,
-            PAY_PERIOD_ANCHOR_KEY: DEFAULT_PAY_PERIOD_ANCHOR,
-        }
-        with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
-            json.dump(default_data, file, ensure_ascii=False, indent=4)
-        return default_data
-
-    with open("data/oplysninger.txt", "r", encoding="utf-8") as file:
-        settings = json.load(file)
-
+    settings = _load_json_with_backup(SETTINGS_FILE, _default_settings(), "Indstillinger")
+    if not isinstance(settings, dict):
+        _print_json_error("Indstillinger har forkert format. Bruger standardindstillinger.")
+        settings = _default_settings()
     return normalize_settings(settings)
 
 
@@ -276,15 +362,96 @@ def save_settings(new_settings):
     # Legacy compatibility only. New calculations use budget categories.
     new_settings["udgifter"] = calculate_budget_expenses(new_settings)
 
-    if not os.path.exists("data"):
-        os.mkdir("data")
-
-    with open("data/oplysninger.txt", "w", encoding="utf-8") as file:
-        json.dump(new_settings, file, ensure_ascii=False, indent=4)
+    _atomic_write_json(SETTINGS_FILE, new_settings)
 
 
 def new_entry_id():
     return uuid4().hex
+
+
+_CLOCK_TIME_PATTERN = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def try_parse_clock_minutes(value):
+    if value is None:
+        return None
+    match = _CLOCK_TIME_PATTERN.fullmatch(str(value).strip())
+    if not match:
+        return None
+    return (int(match.group(1)) * 60) + int(match.group(2))
+
+
+def parse_clock_minutes(value):
+    minutes = try_parse_clock_minutes(value)
+    if minutes is None:
+        raise ValueError("Tidspunkt skal skrives som HH:MM, fx 14:00.")
+    return minutes
+
+
+def normalize_clock_text(value):
+    minutes = try_parse_clock_minutes(value)
+    if minutes is None:
+        return None
+    return f"{(minutes // 60) % 24:02d}:{minutes % 60:02d}"
+
+
+def calculate_hours_from_times(start_text, end_text):
+    start_minutes = parse_clock_minutes(start_text)
+    end_minutes = parse_clock_minutes(end_text)
+    if end_minutes < start_minutes:
+        end_minutes += 24 * 60
+    hours = (end_minutes - start_minutes) / 60
+    if hours <= 0:
+        raise ValueError("Sluttidspunkt skal være efter starttidspunkt.")
+    return hours
+
+
+def shift_time_interval(row):
+    if not isinstance(row, dict) or row.get("is_day_off"):
+        return None
+
+    start = row.get("start")
+    slut = row.get("slut")
+    if not start or not slut:
+        return None
+
+    try:
+        start_minutes = parse_clock_minutes(start)
+        end_minutes = parse_clock_minutes(slut)
+    except ValueError:
+        return None
+
+    if end_minutes <= start_minutes:
+        end_minutes += 24 * 60
+    return start_minutes, end_minutes
+
+
+def intervals_overlap(first, second):
+    if first is None or second is None:
+        return False
+    return first[0] < second[1] and second[0] < first[1]
+
+
+def rows_on_date(rows, target_date, exclude_ids=None):
+    exclude_ids = {str(entry_id) for entry_id in (exclude_ids or set())}
+    return [
+        row
+        for row in rows
+        if row.get("dato") == target_date and str(row.get("id")) not in exclude_ids
+    ]
+
+
+def find_time_overlap(row, rows, exclude_ids=None):
+    current_interval = shift_time_interval(row)
+    if current_interval is None:
+        return None
+
+    for other in rows_on_date(rows, row.get("dato"), exclude_ids):
+        if other.get("is_day_off"):
+            continue
+        if intervals_overlap(current_interval, shift_time_interval(other)):
+            return other
+    return None
 
 
 def settings_snapshot(settings=None):
@@ -1076,6 +1243,22 @@ def get_salary_period_for_date(dato_obj, løn_start=None, løn_slut=None, settin
     )
 
 
+def is_period_complete(period_start, period_end, today=None):
+    if period_start is None or period_end is None:
+        return False
+    if isinstance(period_start, datetime):
+        period_start = period_start.date()
+    if isinstance(period_end, datetime):
+        period_end = period_end.date()
+    if today is None:
+        today = datetime.now().date()
+    elif isinstance(today, datetime):
+        today = today.date()
+    if not isinstance(period_start, date) or not isinstance(period_end, date):
+        return False
+    return period_end < today
+
+
 def get_pay_period_description(settings=None):
     settings = normalize_settings(settings if settings is not None else load_settings())
     if settings.get(PAY_PERIOD_TYPE_KEY) == PAY_PERIOD_TYPE_WEEKS:
@@ -1152,7 +1335,7 @@ def calculate_netto_salary():
     return total_brutto, netto, total_timer
 
 
-def calculate_all_netto_salaries():
+def calculate_all_netto_salaries(use_entry_settings=True):
     settings = load_settings()
     data = load_data()
     if not all(key in settings for key in REQUIRED_SETTINGS_KEYS):
@@ -1177,7 +1360,7 @@ def calculate_all_netto_salaries():
     for entry in data:
         dato_str, løn_info = next(iter(entry.items()))
         dato_obj = datetime.strptime(dato_str, "%d-%m-%Y").date()
-        entry_settings = get_entry_settings(løn_info, settings)
+        entry_settings = get_entry_settings(løn_info, settings) if use_entry_settings else settings
         periode_start, periode_slut = get_salary_period_for_date(dato_obj, settings=entry_settings)
 
         lønseddel_nøgle = (periode_start, periode_slut)
@@ -1336,7 +1519,7 @@ def calculate_salary_forecast(data=None, settings=None, today=None, use_entry_se
     afsluttede_perioder = [
         period
         for period in historical_periods.values()
-        if period["periode_slut"] < periode_start
+        if is_period_complete(period["periode_start"], period["periode_slut"], today)
     ]
 
     historical_daily_hours = None
@@ -1565,6 +1748,26 @@ def calculate_salary_breakdown(
         brutto,
         hours,
         base_settings,
+        period_start,
+        period_end,
+    )
+
+
+def calculate_salary_breakdown_from_settings(
+    brutto,
+    fradrag=None,
+    settings=None,
+    hours=0,
+    period_start=None,
+    period_end=None,
+):
+    effective_settings = normalize_settings(settings if isinstance(settings, dict) else load_settings())
+    if fradrag is not None:
+        effective_settings["fradrag"] = _coerce_float(fradrag, 0.0, 0.0)
+    return calculate_salary_breakdown_from_brutto(
+        brutto,
+        hours,
+        effective_settings,
         period_start,
         period_end,
     )

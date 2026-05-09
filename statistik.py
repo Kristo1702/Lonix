@@ -600,19 +600,14 @@ def _group_years(shifts):
     return sorted(years.values(), key=lambda year: year["år"])
 
 
-def _get_complete_periods(periods, settings):
+def _get_complete_periods(periods, settings, today=None):
     if not periods:
         return []
-
-    current_period_start, _ = ft.get_salary_period_for_date(
-        datetime.now().date(),
-        settings=settings,
-    )
 
     return [
         period
         for period in periods
-        if period["periode_slut"] < current_period_start
+        if ft.is_period_complete(period["periode_start"], period["periode_slut"], today)
     ]
 
 
