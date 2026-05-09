@@ -3740,6 +3740,22 @@ class DashboardAddWidgetDialog(QDialog):
         self.selected_key = key
         self.accept()
 
+def make_unset_status_pill(text="IKKE INDSTILLET"):
+    pill = QLabel(text)
+    pill.setAlignment(Qt.AlignCenter)
+    pill.setStyleSheet(
+        """
+        QLabel {
+            background: #64748b;
+            color: white;
+            border-radius: 13px;
+            padding: 6px 11px;
+            font-size: 8.5pt;
+            font-weight: 850;
+        }
+        """
+    )
+    return pill
 
 class GoalStatusCard(QWidget):
     def __init__(self):
@@ -3966,6 +3982,7 @@ class GoalHeaderWidget(QWidget):
 
         self.status_pill.setText(label)
         self.value_label.setText(value)
+        self.value_label.setVisible(bool(value))
         self.detail_label.setText(detail)
 
         metrics = [
@@ -4457,6 +4474,23 @@ class DashboardHolidayPayWidget(QWidget):
         right.setSpacing(6)
         content.addLayout(right, 2)
 
+        self.unset_row = QWidget()
+        self.unset_row_layout = QHBoxLayout(self.unset_row)
+        self.unset_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.unset_row_layout.setSpacing(10)
+
+        self.unset_pill = make_unset_status_pill("IKKE INDSTILLET")
+        self.unset_row_layout.addWidget(self.unset_pill, 0, Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.setup_button = QPushButton("Indstil nu")
+        self.setup_button.setObjectName("InlineButton")
+        self.setup_button.setCursor(Qt.PointingHandCursor)
+        self.setup_button.clicked.connect(self.setup_callback)
+        self.unset_row_layout.addWidget(self.setup_button, 0, Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.unset_row_layout.addStretch()
+        left.addWidget(self.unset_row)
+
         self.amount_label = QLabel("Optjent denne lønperiode: N/A")
         self.amount_label.setStyleSheet("color: #111827; font-size: 17pt; font-weight: 900;")
         self.amount_label.setWordWrap(True)
@@ -4494,12 +4528,6 @@ class DashboardHolidayPayWidget(QWidget):
         self.details_button.setObjectName("InlineButton")
         self.details_button.clicked.connect(self._open_details)
         button_row.addWidget(self.details_button, 0, Qt.AlignLeft)
-
-        self.setup_button = QPushButton("Indstil feriepenge beregneren")
-        self.setup_button.setObjectName("InlineButton")
-        self.setup_button.clicked.connect(self.setup_callback)
-        button_row.addWidget(self.setup_button, 0, Qt.AlignLeft)
-        button_row.addStretch()
 
     def _chip(self, title, value, accent):
         chip = QFrame()
@@ -4542,15 +4570,16 @@ class DashboardHolidayPayWidget(QWidget):
     def update_calculation(self, calculation):
         self.calculation = calculation
         configured = bool(calculation and calculation.get("configured"))
+
+        self.unset_row.setVisible(not configured)
+        self.amount_label.setVisible(configured)
         self.details_button.setVisible(configured)
         self.days_chip.setVisible(configured)
         self.forecast_days_chip.setVisible(configured)
         self.total_amount_label.setVisible(configured)
-        self.setup_button.setVisible(not configured)
 
         if not configured:
             reason = calculation.get("reason") if calculation else "Indstillinger mangler."
-            self.amount_label.setText("Feriepenge: Ikke indstillet")
             self.detail_label.setText(reason)
             return
 
@@ -4866,6 +4895,23 @@ class DashboardPensionWidget(QWidget):
         right.setSpacing(6)
         content.addLayout(right, 2)
 
+        self.unset_row = QWidget()
+        self.unset_row_layout = QHBoxLayout(self.unset_row)
+        self.unset_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.unset_row_layout.setSpacing(10)
+
+        self.unset_pill = make_unset_status_pill("IKKE INDSTILLET")
+        self.unset_row_layout.addWidget(self.unset_pill, 0, Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.setup_button = QPushButton("Indstil nu")
+        self.setup_button.setObjectName("InlineButton")
+        self.setup_button.setCursor(Qt.PointingHandCursor)
+        self.setup_button.clicked.connect(self.setup_callback)
+        self.unset_row_layout.addWidget(self.setup_button, 0, Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.unset_row_layout.addStretch()
+        left.addWidget(self.unset_row)
+
         self.amount_label = QLabel("Optjent denne lønperiode: N/A")
         self.amount_label.setStyleSheet("color: #111827; font-size: 17pt; font-weight: 900;")
         self.amount_label.setWordWrap(True)
@@ -4895,17 +4941,6 @@ class DashboardPensionWidget(QWidget):
         self.detail_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         right.addWidget(self.detail_label)
         right.addStretch()
-
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.setSpacing(10)
-        left.addLayout(button_row)
-
-        self.setup_button = QPushButton("Indstil nu")
-        self.setup_button.setObjectName("InlineButton")
-        self.setup_button.clicked.connect(self.setup_callback)
-        button_row.addWidget(self.setup_button, 0, Qt.AlignLeft)
-        button_row.addStretch()
 
     def _chip(self, title, value, accent):
         chip = QFrame()
@@ -4954,13 +4989,13 @@ class DashboardPensionWidget(QWidget):
         self.calculation = calculation or {}
         configured = bool(self.calculation.get("configured"))
 
+        self.unset_row.setVisible(not configured)
+        self.amount_label.setVisible(configured)
         self.employee_chip.setVisible(configured)
         self.employer_chip.setVisible(configured)
         self.total_amount_label.setVisible(configured)
-        self.setup_button.setVisible(not configured)
 
         if not configured:
-            self.amount_label.setText("Pension: IKKE INDSTILLET")
             self.detail_label.setText(
                 "Indstil medarbejderpension eller arbejdsgiverpension for at følge pension i Overblik."
             )
@@ -6142,7 +6177,7 @@ class DashboardPage(CompactScrollPage):
         if disposable_goal <= 0:
             self.goal_card.set_status(
                 "neutral",
-                "Ikke indstillet",
+                "",
                 "Angiv et ønsket rådighedsbeløb i Indstillinger for at følge målet.",
                 previous_period,
                 show_settings_button=True,
