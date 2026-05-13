@@ -103,7 +103,7 @@ SIDEBAR_WINDOW_RATIO = 0.18
 DASHBOARD_WIDGET_ORDER_KEY = "overblik widget rækkefølge"
 DASHBOARD_SCOPE_PERIOD = "period"
 DASHBOARD_SCOPE_TOTAL = "total"
-DASHBOARD_TOTAL_HIDDEN_WIDGETS = {"goal", "estimates", "budget"}
+DASHBOARD_TOTAL_HIDDEN_WIDGETS = {"goal", "progress", "estimates", "budget"}
 
 DASHBOARD_DEFAULT_WIDGET_ORDER = (
     "setup_guide",
@@ -181,6 +181,27 @@ DASHBOARD_WIDGET_TITLES = {
     "recent": "Vagter i perioden",
     "salary_calculator": "Lønberegner",
 }
+DASHBOARD_WIDGET_TITLES_BY_SCOPE = {
+    DASHBOARD_SCOPE_PERIOD: {
+        "process": "Løn",
+        "recent": "Vagter i perioden",
+        "progress": "Tidslinje",
+    },
+    DASHBOARD_SCOPE_TOTAL: {
+        "process": "Løn",
+        "recent": "Seneste vagter",
+        "progress": "Tidslinje",
+        "breakdown": "Skatteopdeling",
+        "stats": "Statistik",
+        "holiday_pay": "Feriepenge",
+        "pension": "Pension",
+    },
+}
+
+
+def dashboard_widget_title(key, scope=DASHBOARD_SCOPE_PERIOD):
+    scoped_titles = DASHBOARD_WIDGET_TITLES_BY_SCOPE.get(scope, {})
+    return scoped_titles.get(key, DASHBOARD_WIDGET_TITLES.get(key, str(key)))
 HOLIDAY_PAY_RATE_KEY = "feriegodtgørelse"
 HOLIDAY_PAY_EMPLOYMENT_START_KEY = "ansættelsesstart"
 DEFAULT_HOLIDAY_PAY_RATE = 12.5
@@ -2387,6 +2408,11 @@ def pension_calculation(data, settings, today=None):
         "total_employee_pension": 0.0,
         "total_employer_pension": 0.0,
         "total_pension": 0.0,
+        "forecast_total_employee_pension": 0.0,
+        "forecast_total_employer_pension": 0.0,
+        "forecast_total_pension": 0.0,
+        "forecast_future_pension": 0.0,
+        "forecast_end": None,
         "period_start": None,
         "period_end": None,
         "reason": "",
@@ -2477,6 +2503,40 @@ def pension_calculation(data, settings, today=None):
     base["total_employee_pension"] = total_employee
     base["total_employer_pension"] = total_employer
     base["total_pension"] = total_employee + total_employer
+
+    forecast_end = add_months(today, HOLIDAY_PAY_FORECAST_MONTHS)
+    base["forecast_end"] = forecast_end
+
+    past_work_rows = [
+        row
+        for row in historical_rows
+        if row["dato"] <= today
+    ]
+
+    if past_work_rows:
+        first_date = min(row["dato"] for row in past_work_rows)
+        observed_days = max(1, (today - first_date).days + 1)
+
+        daily_employee = total_employee / observed_days
+        daily_employer = total_employer / observed_days
+
+        future_days = max(0, (forecast_end - today).days)
+
+        future_employee = daily_employee * future_days
+        future_employer = daily_employer * future_days
+
+        base["forecast_total_employee_pension"] = total_employee + future_employee
+        base["forecast_total_employer_pension"] = total_employer + future_employer
+        base["forecast_total_pension"] = (
+            base["forecast_total_employee_pension"]
+            + base["forecast_total_employer_pension"]
+        )
+        base["forecast_future_pension"] = future_employee + future_employer
+    else:
+        base["forecast_total_employee_pension"] = total_employee
+        base["forecast_total_employer_pension"] = total_employer
+        base["forecast_total_pension"] = total_employee + total_employer
+        base["forecast_future_pension"] = 0.0
 
     return base
 
@@ -4744,8 +4804,8 @@ class DashboardHolidayPayWidget(QWidget):
         self.amount_label.setWordWrap(True)
         left.addWidget(self.amount_label)
 
-        self.total_amount_label = QLabel("Total optjent: N/A")
-        self.total_amount_label.setStyleSheet("color: #475569; font-size: 10.5pt; font-weight: 800;")
+        self.total_amount_label = QLabel("Forventet pension om ½ år: N/A")
+        self.total_amount_label.setStyleSheet("color: #64748b; font-size: 10pt; font-weight: 750;")
         self.total_amount_label.setWordWrap(True)
         left.addWidget(self.total_amount_label)
 
@@ -4807,10 +4867,14 @@ class DashboardHolidayPayWidget(QWidget):
         title_label = QLabel(title)
         title_label.setStyleSheet("color: #64748b; font-size: 8.5pt; font-weight: 800;")
         title_label.setWordWrap(True)
+
         value_label = QLabel(value)
         value_label.setStyleSheet("color: #0f172a; font-size: 12pt; font-weight: 900;")
         value_label.setMinimumHeight(28)
+
         chip.value_label = value_label
+        chip.title_label = title_label
+
         layout.addWidget(title_label)
         layout.addWidget(value_label)
         return chip
@@ -4818,13 +4882,14 @@ class DashboardHolidayPayWidget(QWidget):
     def update_calculation(self, calculation, scope=DASHBOARD_SCOPE_PERIOD):
         self.calculation = calculation
         configured = bool(calculation and calculation.get("configured"))
+        total_mode = scope == DASHBOARD_SCOPE_TOTAL
 
         self.unset_row.setVisible(not configured)
         self.amount_label.setVisible(configured)
-        self.details_button.setVisible(configured)
+        self.details_button.setVisible(configured and not total_mode)
         self.days_chip.setVisible(configured)
-        self.forecast_days_chip.setVisible(configured)
-        self.total_amount_label.setVisible(configured)
+        self.forecast_days_chip.setVisible(configured and total_mode)
+        self.total_amount_label.setVisible(configured and total_mode)
 
         if not configured:
             reason = calculation.get("reason") if calculation else "Indstillinger mangler."
@@ -4832,31 +4897,39 @@ class DashboardHolidayPayWidget(QWidget):
             return
 
         request_text = f"Ferie kan holdes frem til {format_long_date(calculation['request_end'])}.\n"
-        if scope == DASHBOARD_SCOPE_TOTAL:
-            self.amount_label.setText(f"Feriepenge i alt: {format_money(calculation.get('all_time_holiday_pay', 0))}")
-        else:
-            self.amount_label.setText(f"Optjent denne lønperiode: {format_money(calculation.get('period_holiday_pay', 0))}")
-        forecast_total = calculation.get("forecast_total_holiday_pay")
-        if scope == DASHBOARD_SCOPE_TOTAL:
-            self.total_amount_label.setText(
-                f"Ferieberettiget løn i alt: {format_money(calculation.get('all_time_eligible_salary', 0))}"
+
+        if total_mode:
+            self.amount_label.setText(
+                f"Total optjent: {format_money(calculation.get('all_time_holiday_pay', 0))}"
             )
-            self.details_button.hide()
-            self.forecast_days_chip.hide()
-        elif forecast_total is None:
-            self.total_amount_label.setText(f"Total optjent: {format_money(calculation['holiday_pay'])}")
-        else:
+
+            forecast_holiday_pay = calculation.get("forecast_total_holiday_pay")
             self.total_amount_label.setText(
-                f"Total optjent: {format_money(calculation['holiday_pay'])}\n"
-                f"Total forventet om ½ år: {format_money(forecast_total)} estimeret."
+                f"Forventet feriepenge om ½ år: {format_money(forecast_holiday_pay)}"
+                if forecast_holiday_pay is not None
+                else "Forventet feriepenge om ½ år: N/A"
             )
+
+            self.days_chip.title_label.setText("Feriedage")
+            self.forecast_days_chip.title_label.setText("Forventet feriedage om ½ år")
+            days_value = calculation.get("all_time_holiday_days", 0)
+        else:
+            self.amount_label.setText(
+                f"Optjent denne lønperiode: {format_money(calculation.get('period_holiday_pay', 0))}"
+            )
+            self.total_amount_label.setText("")
+            self.days_chip.title_label.setText("Feriedage")
+            self.forecast_days_chip.title_label.setText("Forventet feriedage om ½ år")
+            days_value = calculation["holiday_days"]
+
         self.detail_label.setText(
             f"• {request_text}\n"
             "• Udbetaling: tidligst 1 måned før første feriedag.\n\n"
             f"• Beregnet fra {format_long_date(calculation['calculation_start'])} til {format_long_date(calculation['calculation_end'])}."
         )
-        days_value = calculation.get("all_time_holiday_days", 0) if scope == DASHBOARD_SCOPE_TOTAL else calculation["holiday_days"]
+
         self.days_chip.value_label.setText(f"{format_number(days_value)} dage")
+
         forecast_days = calculation.get("forecast_holiday_days")
         self.forecast_days_chip.value_label.setText(
             f"{format_number(forecast_days)} dage" if forecast_days is not None else "N/A"
@@ -5175,6 +5248,11 @@ class DashboardPensionWidget(QWidget):
         self.amount_label.setWordWrap(True)
         left.addWidget(self.amount_label)
 
+        self.total_amount_label = QLabel("Forventet pension om ½ år: N/A")
+        self.total_amount_label.setStyleSheet("color: #64748b; font-size: 10pt; font-weight: 750;")
+        self.total_amount_label.setWordWrap(True)
+        left.addWidget(self.total_amount_label)
+
         self.info_row = QHBoxLayout()
         self.info_row.setContentsMargins(0, 0, 0, 0)
         self.info_row.setSpacing(8)
@@ -5187,11 +5265,6 @@ class DashboardPensionWidget(QWidget):
         self.info_row.addWidget(self.employer_chip, 0, Qt.AlignLeft)
 
         self.info_row.addStretch()
-
-        self.total_amount_label = QLabel("Total pension: N/A")
-        self.total_amount_label.setStyleSheet("color: #475569; font-size: 10.5pt; font-weight: 800;")
-        self.total_amount_label.setWordWrap(True)
-        left.addWidget(self.total_amount_label)
 
         self.detail_label = QLabel()
         self.detail_label.setObjectName("PageSubtitle")
@@ -5246,12 +5319,13 @@ class DashboardPensionWidget(QWidget):
     def update_calculation(self, calculation, scope=DASHBOARD_SCOPE_PERIOD):
         self.calculation = calculation or {}
         configured = bool(self.calculation.get("configured"))
+        total_mode = scope == DASHBOARD_SCOPE_TOTAL
 
         self.unset_row.setVisible(not configured)
         self.amount_label.setVisible(configured)
         self.employee_chip.setVisible(configured)
         self.employer_chip.setVisible(configured)
-        self.total_amount_label.setVisible(configured)
+        self.total_amount_label.setVisible(configured and total_mode)
 
         if not configured:
             self.detail_label.setText(
@@ -5270,19 +5344,20 @@ class DashboardPensionWidget(QWidget):
         employee_rate = self.calculation.get("employee_rate", 0.0) * 100
         employer_rate = self.calculation.get("employer_rate", 0.0) * 100
 
-        if scope == DASHBOARD_SCOPE_TOTAL:
-            self.amount_label.setText(f"Total pension: {format_money(total_pension)}")
+        if total_mode:
+            forecast_total_pension = self.calculation.get("forecast_total_pension", total_pension)
+
+            self.amount_label.setText(f"Total optjent: {format_money(total_pension)}")
             self.employee_chip.value_label.setText(format_money(total_employee))
             self.employer_chip.value_label.setText(format_money(total_employer))
-            self.total_amount_label.setText(f"Denne lønperiode: {format_money(period_total)}")
+            self.total_amount_label.setText(
+                f"Forventet pension om ½ år: {format_money(forecast_total_pension)}"
+            )
         else:
             self.amount_label.setText(f"Optjent denne lønperiode: {format_money(period_total)}")
             self.employee_chip.value_label.setText(format_money(period_employee))
             self.employer_chip.value_label.setText(format_money(period_employer))
-            self.total_amount_label.setText(
-                f"Total pension: {format_money(total_pension)}\n"
-                f"Medarbejder: {format_money(total_employee)} · Arbejdsgiver: {format_money(total_employer)}"
-            )
+            self.total_amount_label.setText("")
 
         period_start = self.calculation.get("period_start")
         period_end = self.calculation.get("period_end")
@@ -5764,18 +5839,22 @@ class DashboardPage(CompactScrollPage):
     def _sync_scope_titles(self):
         if hasattr(self, "scope_switch"):
             self.scope_switch.set_scope(self.dashboard_scope)
+
         total_mode = self.dashboard_scope == DASHBOARD_SCOPE_TOTAL
+
         if hasattr(self, "title_label"):
             self.title_label.setText("Overblik - Total" if total_mode else "Overblik - Nuværende lønperiode")
+
         title_pairs = {
-            "process": "Løn i alt" if total_mode else "Løn indtil videre",
-            "progress": "Tidslinje i alt" if total_mode else "Tidslinje",
-            "breakdown": "Skatteopdeling i alt" if total_mode else "Skatteopdeling",
-            "recent": "Seneste vagter" if total_mode else "Vagter i perioden",
-            "stats": "Statistik i alt" if total_mode else "Statistik",
-            "holiday_pay": "Feriepenge i alt" if total_mode else "Feriepenge",
-            "pension": "Pension i alt" if total_mode else "Pension",
+            "process": dashboard_widget_title("process", self.dashboard_scope),
+            "progress": dashboard_widget_title("progress", self.dashboard_scope),
+            "breakdown": dashboard_widget_title("breakdown", self.dashboard_scope),
+            "recent": dashboard_widget_title("recent", self.dashboard_scope),
+            "stats": dashboard_widget_title("stats", self.dashboard_scope),
+            "holiday_pay": dashboard_widget_title("holiday_pay", self.dashboard_scope),
+            "pension": dashboard_widget_title("pension", self.dashboard_scope),
         }
+
         for key, title in title_pairs.items():
             widget = self.dashboard_widgets.get(key)
             if widget is not None and hasattr(widget, "set_title"):
@@ -5982,7 +6061,7 @@ class DashboardPage(CompactScrollPage):
     def _hidden_widget_options(self):
         available_keys = self._available_widget_keys_for_scope()
         return [
-            (key, DASHBOARD_WIDGET_TITLES[key])
+            (key, dashboard_widget_title(key, self.dashboard_scope))
             for key in available_keys
             if key not in self.widget_order
         ]
@@ -6457,26 +6536,10 @@ class DashboardPage(CompactScrollPage):
             DASHBOARD_SCOPE_TOTAL,
         )
 
-        if summary["rows"] and summary["periode_start"] and summary["periode_slut"]:
-            total_days = max(1, (summary["periode_slut"] - summary["periode_start"]).days + 1)
-            self.period_progress.set_period(
-                summary["periode_start"],
-                summary["periode_slut"],
-                summary["periode_slut"],
-                summary["rows"],
-                1,
-                today_marker_label=None,
-            )
-            registration_text = f"{work_count} vagter"
-            if day_off_count:
-                registration_text += f" og {day_off_count} fridage"
-            self.progress_detail.setText(
-                f"{total_days} dage i alt. {registration_text} registreret. "
-                f"Netto løn samlet: {format_money(summary['netto'])}."
-            )
-        else:
-            self.period_progress.clear("Ingen registreringer endnu.")
-            self.progress_detail.setText("Ingen vagter registreret endnu.")
+        if hasattr(self, "period_progress"):
+            self.period_progress.clear("Tidslinje bruges kun i lønperiode-visningen.")
+        if hasattr(self, "progress_detail"):
+            self.progress_detail.setText("")
 
         self._update_stats(summary, total_mode=True)
         self._fill_breakdown(summary["breakdown"])
