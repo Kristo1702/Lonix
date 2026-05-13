@@ -101,6 +101,9 @@ BASE_SIDEBAR_WIDTH = 224
 MAX_SIDEBAR_WIDTH = 320
 SIDEBAR_WINDOW_RATIO = 0.18
 DASHBOARD_WIDGET_ORDER_KEY = "overblik widget rækkefølge"
+DASHBOARD_SCOPE_PERIOD = "period"
+DASHBOARD_SCOPE_TOTAL = "total"
+DASHBOARD_TOTAL_HIDDEN_WIDGETS = {"goal", "estimates", "budget"}
 
 DASHBOARD_DEFAULT_WIDGET_ORDER = (
     "setup_guide",
@@ -1985,6 +1988,64 @@ def current_period_summary(data, settings, today=None):
     }
 
 
+def _empty_breakdown():
+    return {
+        "brutto": 0.0,
+        "pension": 0.0,
+        "atp_medarbejder": 0.0,
+        "atp_arbejdsgiver": 0.0,
+        "arbejdsgiver_pension": 0.0,
+        "am_grundlag": 0.0,
+        "am_bidrag": 0.0,
+        "efter_am": 0.0,
+        "fradrag": 0.0,
+        "skattegrundlag": 0.0,
+        "skat": 0.0,
+        "netto": 0.0,
+    }
+
+
+def total_overview_summary(data, settings, today=None):
+    today = today or datetime.now().date()
+    if not has_required_settings(settings):
+        return None
+
+    periods, _ = build_periods(data, settings)
+    rows = sorted(
+        [shift for period in periods for shift in period.get("shifts", [])],
+        key=lambda row: (row["dato"], row.get("brutto", 0), row.get("timer", 0)),
+    )
+    work_rows = [row for row in rows if not row.get("is_day_off")]
+    day_off_rows = [row for row in rows if row.get("is_day_off")]
+    breakdown_keys = _empty_breakdown().keys()
+    breakdown = {
+        key: sum(float(period.get(key, 0) or 0) for period in periods)
+        for key in breakdown_keys
+    }
+    other_income = sum(float(period.get("anden_indkomst", 0) or 0) for period in periods)
+    budget_expenses = sum(float(period.get("budget_expenses", 0) or 0) for period in periods)
+
+    start = rows[0]["dato"] if rows else None
+    end = rows[-1]["dato"] if rows else None
+
+    return {
+        "periode_start": start,
+        "periode_slut": end,
+        "period_count": len(periods),
+        "timer": sum(float(row.get("timer", 0) or 0) for row in work_rows),
+        "brutto": breakdown["brutto"],
+        "netto": breakdown["netto"],
+        "breakdown": breakdown,
+        "other_income": other_income,
+        "budget_expenses": budget_expenses,
+        "disposable_goal": 0.0,
+        "rows": rows,
+        "work_rows": work_rows,
+        "day_off_rows": day_off_rows,
+        "today": today,
+    }
+
+
 def last_complete_period_info(data, settings, today=None):
     today = today or datetime.now().date()
     if not has_required_settings(settings):
@@ -2211,10 +2272,22 @@ def holiday_pay_calculation(data, settings, today=None):
     calculation_start = max(ferie_start, config["employment_start"])
     calculation_end = min(today, ferie_end)
     has_active_range = calculation_end >= calculation_start
+    raw_rows = entry_rows(data, settings)
     rows = [
         overview_row_with_current_settings(row, settings)
-        for row in entry_rows(data, settings)
+        for row in raw_rows
     ]
+    historical_rows = list(raw_rows)
+    all_time_end = max([today] + [row["dato"] for row in rows]) if rows else today
+    all_time_work_rows = [
+        row
+        for row in historical_rows
+        if not row.get("is_day_off") and config["employment_start"] <= row["dato"] <= all_time_end
+    ]
+    all_time_eligible_salary = sum(
+        ft.get_holiday_eligible_salary(row, row.get("settings", settings))
+        for row in all_time_work_rows
+    )
     work_rows = [
         row
         for row in rows
@@ -2278,6 +2351,10 @@ def holiday_pay_calculation(data, settings, today=None):
             "calculation_end": calculation_end if has_active_range else calculation_start,
             "eligible_salary": eligible_salary,
             "holiday_pay": holiday_pay,
+            "all_time_end": all_time_end,
+            "all_time_eligible_salary": all_time_eligible_salary,
+            "all_time_holiday_pay": ft.calculate_holiday_pay_amount(all_time_eligible_salary, config["rate"]),
+            "all_time_holiday_days": holiday_days_for_range(config["employment_start"], all_time_end),
             "period_start": period_start,
             "period_end": period_end,
             "period_eligible_salary": period_eligible_salary,
@@ -2319,9 +2396,15 @@ def pension_calculation(data, settings, today=None):
         base["reason"] = "Pension er ikke indstillet endnu."
         return base
 
+    raw_rows = entry_rows(data, settings)
     rows = [
         overview_row_with_current_settings(row, settings)
-        for row in entry_rows(data, settings)
+        for row in raw_rows
+        if not row.get("is_day_off")
+    ]
+    historical_rows = [
+        row
+        for row in raw_rows
         if not row.get("is_day_off")
     ]
 
@@ -2358,7 +2441,7 @@ def pension_calculation(data, settings, today=None):
         )
 
     period_groups = {}
-    for row in rows:
+    for row in historical_rows:
         try:
             row_settings = row.get("settings", settings)
             row_period_start, row_period_end = ft.get_salary_period_for_date(
@@ -2872,6 +2955,9 @@ class DashboardMetricItem(QWidget):
         self.value_label.setText(value)
         self.subtitle_label.setText(subtitle)
 
+    def set_title(self, title):
+        self.title_label.setText(title)
+
 
 class DashboardMetricStrip(QWidget):
     def __init__(self, title, columns=3, embedded=False):
@@ -2926,6 +3012,85 @@ class DashboardMetricStrip(QWidget):
             self.grid.addWidget(item, row, column)
             item.setVisible(True)
             self.grid.setColumnStretch(column, 1)
+
+
+class DashboardScopeSwitch(QFrame):
+    def __init__(self, changed_callback, parent=None):
+        super().__init__(parent)
+        self.changed_callback = changed_callback
+        self.scope = DASHBOARD_SCOPE_PERIOD
+        self.setObjectName("DashboardScopeSwitch")
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+        self.setStyleSheet(
+            """
+            QFrame#DashboardScopeSwitch {
+                background: #e7ecef;
+                border: 1px solid #cfd8e3;
+                border-radius: 12px;
+            }
+            QPushButton#DashboardScopeButton {
+                background: #f8fafc;
+                color: #42505f;
+                border: 1px solid #d7dee6;
+                border-radius: 9px;
+                padding: 10px 22px;
+                font-size: 10.5pt;
+                font-weight: 900;
+                min-width: 148px;
+                min-height: 42px;
+            }
+            QPushButton#DashboardScopeButton:hover {
+                background: #edf7f4;
+                border-color: #9bcfc2;
+                color: #0f766e;
+            }
+            QPushButton#DashboardScopeButton:checked {
+                background: #1f8a70;
+                border-color: #1f8a70;
+                color: #ffffff;
+            }
+            """
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(6)
+
+        self.period_button = self._button("Lønperiode")
+        self.total_button = self._button("Total")
+        layout.addWidget(self.period_button)
+        layout.addWidget(self.total_button)
+
+        self.period_button.clicked.connect(lambda checked=False: self.set_scope(DASHBOARD_SCOPE_PERIOD, emit=True))
+        self.total_button.clicked.connect(lambda checked=False: self.set_scope(DASHBOARD_SCOPE_TOTAL, emit=True))
+        self.set_scope(DASHBOARD_SCOPE_PERIOD)
+
+    def _button(self, text):
+        button = QPushButton(text)
+        button.setObjectName("DashboardScopeButton")
+        button.setCheckable(True)
+        button.setCursor(Qt.PointingHandCursor)
+        return button
+
+    def set_scope(self, scope, emit=False):
+        scope = DASHBOARD_SCOPE_TOTAL if scope == DASHBOARD_SCOPE_TOTAL else DASHBOARD_SCOPE_PERIOD
+        period_checked = scope == DASHBOARD_SCOPE_PERIOD
+        total_checked = scope == DASHBOARD_SCOPE_TOTAL
+        if (
+            self.scope == scope
+            and self.period_button.isChecked() == period_checked
+            and self.total_button.isChecked() == total_checked
+        ):
+            return
+        self.scope = scope
+        self.period_button.blockSignals(True)
+        self.total_button.blockSignals(True)
+        self.period_button.setChecked(period_checked)
+        self.total_button.setChecked(total_checked)
+        self.period_button.blockSignals(False)
+        self.total_button.blockSignals(False)
+        if emit and self.changed_callback is not None:
+            self.changed_callback(scope)
 
 
 class DashboardIconButton(QPushButton):
@@ -3160,10 +3325,10 @@ class DashboardWidgetFrame(QFrame):
         header.setSpacing(8)
         root.addLayout(header)
 
-        title_label = QLabel(title)
-        title_label.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
-        title_label.setWordWrap(True)
-        header.addWidget(title_label, 1)
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("color: #111827; font-size: 12.5pt; font-weight: 850;")
+        self.title_label.setWordWrap(True)
+        header.addWidget(self.title_label, 1)
 
         self.remove_button = DashboardIconButton("remove", "Fjern widget", parent=self, label_text="Fjern")
         self.remove_button.clicked.connect(lambda checked=False: self.remove_callback(self.key))
@@ -3196,7 +3361,7 @@ class DashboardWidgetFrame(QFrame):
                 }
                 """
             )
-            title_label.setStyleSheet("color: #ffffff; font-size: 13pt; font-weight: 950;")
+            self.title_label.setStyleSheet("color: #ffffff; font-size: 13pt; font-weight: 950;")
 
         self.set_reorder_mode(False)
 
@@ -3205,6 +3370,9 @@ class DashboardWidgetFrame(QFrame):
 
     def addLayout(self, layout, stretch=0):
         self.content_layout.addLayout(layout, stretch)
+
+    def set_title(self, title):
+        self.title_label.setText(title)
 
     def set_reorder_mode(self, enabled):
         self.edit_mode = enabled
@@ -3419,7 +3587,7 @@ class DashboardWidgetPreview(QFrame):
                     ]
                 )
             )
-            self.preview_layout.addWidget(self._note("Nuværende lønperiode indtil videre."))
+            self.preview_layout.addWidget(self._note("Løn, timer og rådighed for valgt visning."))
 
         elif self.key == "estimates":
             self.preview_layout.addLayout(
@@ -3443,7 +3611,7 @@ class DashboardWidgetPreview(QFrame):
                     ]
                 )
             )
-            self.preview_layout.addWidget(self._note("Nøgletal for den nuværende lønperiode."))
+            self.preview_layout.addWidget(self._note("Nøgletal for den valgte overbliksvisning."))
 
         elif self.key == "holiday_pay":
             self.preview_layout.addLayout(
@@ -3490,12 +3658,12 @@ class DashboardWidgetPreview(QFrame):
         elif self.key == "breakdown":
             self.preview_layout.addWidget(self._list_row("AM-bidrag", "-288 kr.", "#dc2626"))
             self.preview_layout.addWidget(self._list_row("Netto løn", "3.312 kr.", "#1f8a70"))
-            self.preview_layout.addWidget(self._note("Viser skatteopdeling for lønperioden."))
+            self.preview_layout.addWidget(self._note("Viser skatteopdeling for den valgte visning."))
 
         elif self.key == "recent":
             self.preview_layout.addWidget(self._list_row("05-05-2026", "6 t. · 900 kr.", "#2563eb"))
             self.preview_layout.addWidget(self._list_row("03-05-2026", "4 t. · 600 kr.", "#2563eb"))
-            self.preview_layout.addWidget(self._note("Seneste vagter i den aktuelle periode."))
+            self.preview_layout.addWidget(self._note("Vagter for perioden eller seneste vagter i totalvisning."))
 
         elif self.key == "salary_calculator":
             self.preview_layout.addLayout(
@@ -4105,18 +4273,20 @@ class PeriodProgressWidget(QWidget):
         self.today = None
         self.rows = []
         self.progress_ratio = 0
+        self.today_marker_label = "I dag"
         self.hovered_index = None
         self.marker_rects = []
         self.setMinimumHeight(184)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-    def set_period(self, period_start, period_end, today, rows, progress_ratio):
+    def set_period(self, period_start, period_end, today, rows, progress_ratio, today_marker_label="I dag"):
         self.period_start = period_start
         self.period_end = period_end
         self.today = today
         self.rows = sorted(rows, key=lambda row: row["dato"])
         self.progress_ratio = max(0, min(float(progress_ratio or 0), 1))
+        self.today_marker_label = today_marker_label
         self.hovered_index = None
         self.setToolTip("")
         self.update()
@@ -4127,6 +4297,7 @@ class PeriodProgressWidget(QWidget):
         self.today = None
         self.rows = []
         self.progress_ratio = 0
+        self.today_marker_label = "I dag"
         self.hovered_index = None
         self.marker_rects = []
         self.setToolTip(message)
@@ -4152,11 +4323,20 @@ class PeriodProgressWidget(QWidget):
             return []
 
         markers = []
+        total_days = max(1, (self.period_end - self.period_start).days + 1)
 
         current = self.period_start
         while current <= self.period_end:
-            # Vis altid periodens første dag som starten på den første viste uge-del.
-            if current == self.period_start or current.weekday() == 0:
+            if total_days > 180:
+                if current == self.period_start or (current.day == 1 and (current.month - 1) % 3 == 0):
+                    month_name = MONTH_NAMES.get(current.month, str(current.month))[:3]
+                    markers.append((current, f"{month_name} {str(current.year)[-2:]}"))
+            elif total_days > 70:
+                if current == self.period_start or current.day == 1:
+                    month_name = MONTH_NAMES.get(current.month, str(current.month))[:3]
+                    label = f"{month_name} {str(current.year)[-2:]}" if current.month == 1 or current == self.period_start else month_name
+                    markers.append((current, label))
+            elif current == self.period_start or current.weekday() == 0:
                 week_number = current.isocalendar().week
                 markers.append((current, f"Uge {week_number}"))
             current += timedelta(days=1)
@@ -4255,7 +4435,7 @@ class PeriodProgressWidget(QWidget):
 
         track_left, track_right, track_width, track_y, track_height = self._track_geometry(rect)
 
-        # Ugemarkører
+        # Datomarkører
         week_markers = []
         painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
         for week_date, week_label in self._week_markers():
@@ -4286,7 +4466,7 @@ class PeriodProgressWidget(QWidget):
         painter.drawRoundedRect(QRectF(track_left, track_y, track_width * self.progress_ratio, track_height), 9, 9)
 
         # I dag-markør
-        if self.today:
+        if self.today and self.today_marker_label:
             today_x = self._x_for_date(self.today, track_left, track_width, total_days)
 
             overlaps_week_label = any(abs(today_x - week_x) < 44 for week_x, _ in week_markers)
@@ -4305,7 +4485,7 @@ class PeriodProgressWidget(QWidget):
             painter.drawText(
                 QRectF(today_x - 30, today_label_y, 60, 18),
                 Qt.AlignCenter,
-                "I dag",
+                self.today_marker_label,
             )
 
         self.marker_rects = self._marker_data(rect)
@@ -4635,7 +4815,7 @@ class DashboardHolidayPayWidget(QWidget):
         layout.addWidget(value_label)
         return chip
 
-    def update_calculation(self, calculation):
+    def update_calculation(self, calculation, scope=DASHBOARD_SCOPE_PERIOD):
         self.calculation = calculation
         configured = bool(calculation and calculation.get("configured"))
 
@@ -4652,9 +4832,18 @@ class DashboardHolidayPayWidget(QWidget):
             return
 
         request_text = f"Ferie kan holdes frem til {format_long_date(calculation['request_end'])}.\n"
-        self.amount_label.setText(f"Optjent denne lønperiode: {format_money(calculation.get('period_holiday_pay', 0))}")
+        if scope == DASHBOARD_SCOPE_TOTAL:
+            self.amount_label.setText(f"Feriepenge i alt: {format_money(calculation.get('all_time_holiday_pay', 0))}")
+        else:
+            self.amount_label.setText(f"Optjent denne lønperiode: {format_money(calculation.get('period_holiday_pay', 0))}")
         forecast_total = calculation.get("forecast_total_holiday_pay")
-        if forecast_total is None:
+        if scope == DASHBOARD_SCOPE_TOTAL:
+            self.total_amount_label.setText(
+                f"Ferieberettiget løn i alt: {format_money(calculation.get('all_time_eligible_salary', 0))}"
+            )
+            self.details_button.hide()
+            self.forecast_days_chip.hide()
+        elif forecast_total is None:
             self.total_amount_label.setText(f"Total optjent: {format_money(calculation['holiday_pay'])}")
         else:
             self.total_amount_label.setText(
@@ -4666,7 +4855,8 @@ class DashboardHolidayPayWidget(QWidget):
             "• Udbetaling: tidligst 1 måned før første feriedag.\n\n"
             f"• Beregnet fra {format_long_date(calculation['calculation_start'])} til {format_long_date(calculation['calculation_end'])}."
         )
-        self.days_chip.value_label.setText(f"{format_number(calculation['holiday_days'])} dage")
+        days_value = calculation.get("all_time_holiday_days", 0) if scope == DASHBOARD_SCOPE_TOTAL else calculation["holiday_days"]
+        self.days_chip.value_label.setText(f"{format_number(days_value)} dage")
         forecast_days = calculation.get("forecast_holiday_days")
         self.forecast_days_chip.value_label.setText(
             f"{format_number(forecast_days)} dage" if forecast_days is not None else "N/A"
@@ -5053,7 +5243,7 @@ class DashboardPensionWidget(QWidget):
 
         return chip
 
-    def update_calculation(self, calculation):
+    def update_calculation(self, calculation, scope=DASHBOARD_SCOPE_PERIOD):
         self.calculation = calculation or {}
         configured = bool(self.calculation.get("configured"))
 
@@ -5080,15 +5270,19 @@ class DashboardPensionWidget(QWidget):
         employee_rate = self.calculation.get("employee_rate", 0.0) * 100
         employer_rate = self.calculation.get("employer_rate", 0.0) * 100
 
-        self.amount_label.setText(f"Optjent denne lønperiode: {format_money(period_total)}")
-
-        self.employee_chip.value_label.setText(format_money(period_employee))
-        self.employer_chip.value_label.setText(format_money(period_employer))
-
-        self.total_amount_label.setText(
-            f"Total pension: {format_money(total_pension)}\n"
-            f"Medarbejder: {format_money(total_employee)} · Arbejdsgiver: {format_money(total_employer)}"
-        )
+        if scope == DASHBOARD_SCOPE_TOTAL:
+            self.amount_label.setText(f"Total pension: {format_money(total_pension)}")
+            self.employee_chip.value_label.setText(format_money(total_employee))
+            self.employer_chip.value_label.setText(format_money(total_employer))
+            self.total_amount_label.setText(f"Denne lønperiode: {format_money(period_total)}")
+        else:
+            self.amount_label.setText(f"Optjent denne lønperiode: {format_money(period_total)}")
+            self.employee_chip.value_label.setText(format_money(period_employee))
+            self.employer_chip.value_label.setText(format_money(period_employer))
+            self.total_amount_label.setText(
+                f"Total pension: {format_money(total_pension)}\n"
+                f"Medarbejder: {format_money(total_employee)} · Arbejdsgiver: {format_money(total_employer)}"
+            )
 
         period_start = self.calculation.get("period_start")
         period_end = self.calculation.get("period_end")
@@ -5294,13 +5488,13 @@ class BasePage(QWidget):
         self.root.setContentsMargins(28, 24, 28, 24)
         self.root.setSpacing(16)
 
-        title_label = QLabel(title)
-        title_label.setObjectName("PageTitle")
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("PageTitle")
         subtitle_label = QLabel(subtitle)
         subtitle_label.setObjectName("PageSubtitle")
         subtitle_label.setWordWrap(True)
 
-        self.root.addWidget(title_label)
+        self.root.addWidget(self.title_label)
         if subtitle:
             self.root.addWidget(subtitle_label)
 
@@ -5367,6 +5561,7 @@ class DashboardPage(CompactScrollPage):
         self.drag_ghost = None
         self.drag_ghost_offset = None
         self.drag_scroll_delta = 0
+        self.dashboard_scope = DASHBOARD_SCOPE_PERIOD
         self.dashboard_layout_animation = None
         self.drag_autoscroll_timer = QTimer(self)
         self.drag_autoscroll_timer.setInterval(16)
@@ -5377,6 +5572,8 @@ class DashboardPage(CompactScrollPage):
         reorder_toolbar.setSpacing(8)
         self.root.addLayout(reorder_toolbar)
 
+        self.scope_switch = DashboardScopeSwitch(self._set_dashboard_scope, self)
+        reorder_toolbar.addWidget(self.scope_switch, 0, Qt.AlignLeft | Qt.AlignVCenter)
         reorder_toolbar.addStretch()
 
         self.add_widget_button = DashboardIconButton("add", "Tilføj widget", parent=self, label_text="Tilføj")
@@ -5540,6 +5737,50 @@ class DashboardPage(CompactScrollPage):
             parent=self.page_body,
         )
 
+    def _set_dashboard_scope(self, scope):
+        scope = DASHBOARD_SCOPE_TOTAL if scope == DASHBOARD_SCOPE_TOTAL else DASHBOARD_SCOPE_PERIOD
+        if self.dashboard_scope == scope:
+            return
+        self.dashboard_scope = scope
+        self.refresh()
+
+    def _hidden_widget_keys_for_scope(self):
+        if self.dashboard_scope == DASHBOARD_SCOPE_TOTAL:
+            return set(DASHBOARD_TOTAL_HIDDEN_WIDGETS)
+        return set()
+
+    def _available_widget_keys_for_scope(self):
+        hidden = self._hidden_widget_keys_for_scope()
+        return [key for key in DASHBOARD_AVAILABLE_WIDGET_ORDER if key not in hidden]
+
+    def _visible_widget_order(self):
+        hidden = self._hidden_widget_keys_for_scope()
+        return [
+            key
+            for key in self.widget_order
+            if key in self.dashboard_widgets and key not in hidden
+        ]
+
+    def _sync_scope_titles(self):
+        if hasattr(self, "scope_switch"):
+            self.scope_switch.set_scope(self.dashboard_scope)
+        total_mode = self.dashboard_scope == DASHBOARD_SCOPE_TOTAL
+        if hasattr(self, "title_label"):
+            self.title_label.setText("Overblik - Total" if total_mode else "Overblik - Nuværende lønperiode")
+        title_pairs = {
+            "process": "Løn i alt" if total_mode else "Løn indtil videre",
+            "progress": "Tidslinje i alt" if total_mode else "Tidslinje",
+            "breakdown": "Skatteopdeling i alt" if total_mode else "Skatteopdeling",
+            "recent": "Seneste vagter" if total_mode else "Vagter i perioden",
+            "stats": "Statistik i alt" if total_mode else "Statistik",
+            "holiday_pay": "Feriepenge i alt" if total_mode else "Feriepenge",
+            "pension": "Pension i alt" if total_mode else "Pension",
+        }
+        for key, title in title_pairs.items():
+            widget = self.dashboard_widgets.get(key)
+            if widget is not None and hasattr(widget, "set_title"):
+                widget.set_title(title)
+
     def _setup_guide_was_added_by_user(self):
         return bool(
             isinstance(self.settings, dict)
@@ -5595,14 +5836,16 @@ class DashboardPage(CompactScrollPage):
             for key in dashboard_widget_order(self.settings)
             if key in self.dashboard_widgets
         ]
+        self._sync_scope_titles()
         self._render_widget_order()
 
     def _render_widget_order(self, animate=False, extra_start_geometries=None):
         scroll_value = self.scroll_area.verticalScrollBar().value()
         edit_mode = self.reorder_button.isChecked()
         dragged_key = self.dragged_widget_key
-        visible_order = [key for key in self.widget_order if key != dragged_key]
-        drop_index = self.widget_order.index(dragged_key) if dragged_key in self.widget_order else None
+        scope_order = self._visible_widget_order()
+        visible_order = [key for key in scope_order if key != dragged_key]
+        drop_index = scope_order.index(dragged_key) if dragged_key in scope_order else None
         start_geometries = self._capture_dashboard_geometries() if animate else {}
         if extra_start_geometries:
             start_geometries.update(extra_start_geometries)
@@ -5737,9 +5980,10 @@ class DashboardPage(CompactScrollPage):
         self._update_add_widget_button()
 
     def _hidden_widget_options(self):
+        available_keys = self._available_widget_keys_for_scope()
         return [
             (key, DASHBOARD_WIDGET_TITLES[key])
-            for key in DASHBOARD_AVAILABLE_WIDGET_ORDER
+            for key in available_keys
             if key not in self.widget_order
         ]
 
@@ -5891,17 +6135,25 @@ class DashboardPage(CompactScrollPage):
 
     def _update_drag_order(self, global_pos):
         key = self.dragged_widget_key
-        if key not in self.widget_order:
+        visible_keys = self._visible_widget_order()
+        if key not in visible_keys:
             return
 
         target_index = self._drag_target_index(global_pos)
-        reordered = [widget_key for widget_key in self.widget_order if widget_key != key]
+        reordered = [widget_key for widget_key in visible_keys if widget_key != key]
         target_index = max(0, min(target_index, len(reordered)))
         reordered.insert(target_index, key)
-        if reordered == self.widget_order:
+        if reordered == visible_keys:
             return
 
-        self.widget_order = reordered
+        reordered_iter = iter(reordered)
+        new_order = []
+        for widget_key in self.widget_order:
+            if widget_key in visible_keys:
+                new_order.append(next(reordered_iter))
+            else:
+                new_order.append(widget_key)
+        self.widget_order = new_order
         self._render_widget_order(animate=True)
 
     def _drag_finish_start_geometries(self, key):
@@ -5960,7 +6212,7 @@ class DashboardPage(CompactScrollPage):
         cursor_y = self.dashboard_container.mapFromGlobal(global_pos).y()
         target_index = 0
 
-        for key in self.widget_order:
+        for key in self._visible_widget_order():
             if key == self.dragged_widget_key:
                 continue
 
@@ -6068,6 +6320,9 @@ class DashboardPage(CompactScrollPage):
         if not has_required_settings(self.settings):
             self._show_missing_settings()
             return
+        if self.dashboard_scope == DASHBOARD_SCOPE_TOTAL:
+            self._refresh_total_dashboard()
+            return
 
         summary = current_period_summary(self.data, self.settings)
         forecast = ft.calculate_salary_forecast(self.data, self.settings, use_entry_settings=False)
@@ -6103,6 +6358,7 @@ class DashboardPage(CompactScrollPage):
         day_off_count = len(summary.get("day_off_rows", []))
         day_off_suffix = f" · {day_off_count} fridage" if day_off_count else ""
         self.hours_card.set_values(f"{format_number(summary['timer'])} t.", f"{work_count} vagter i perioden{day_off_suffix}")
+        self.period_card.set_title("Lønperiode")
         self.period_card.set_values(
             ft.get_pay_period_description(self.settings),
             format_period(summary),
@@ -6157,6 +6413,78 @@ class DashboardPage(CompactScrollPage):
         self.dashboard_container.updateGeometry()
         self._sync_compact_body_size()
 
+    def _refresh_total_dashboard(self):
+        summary = total_overview_summary(self.data, self.settings)
+        if summary is None:
+            self._show_missing_settings()
+            return
+
+        other_income = summary.get("other_income", 0)
+        budget_expenses = summary.get("budget_expenses", 0)
+        total_income = summary["netto"] + other_income
+        available_total = total_income - budget_expenses
+        show_other_income = other_income > 0
+        self._arrange_cards(show_other_income)
+
+        work_count = len(summary.get("work_rows", []))
+        day_off_count = len(summary.get("day_off_rows", []))
+        period_count = int(summary.get("period_count", 0) or 0)
+        day_off_suffix = f" · {day_off_count} fridage" if day_off_count else ""
+
+        self.gross_card.set_values(format_money(summary["brutto"]), "Før skat samlet")
+        self.net_card.set_values(format_money(summary["netto"]), "Efter skat samlet")
+        if show_other_income:
+            self.total_card.set_values(format_money(total_income), "Netto + anden indkomst samlet")
+        self.available_card.set_values(format_money(available_total), f"Efter alle perioders udgifter: {format_money(budget_expenses)}")
+        self.hours_card.set_values(f"{format_number(summary['timer'])} t.", f"{work_count} vagter i alt{day_off_suffix}")
+        self.period_card.set_title("Datospænd")
+        if summary["periode_start"] and summary["periode_slut"]:
+            period_word = "lønperiode" if period_count == 1 else "lønperioder"
+            self.period_card.set_values(
+                f"{format_date(summary['periode_start'])} - {format_date(summary['periode_slut'])}",
+                f"{period_count} {period_word}",
+            )
+        else:
+            self.period_card.set_values("Ingen registreringer", "Tilføj vagter for at se totaler")
+
+        today = datetime.now().date()
+        self.holiday_pay_widget.update_calculation(
+            holiday_pay_calculation(self.data, self.settings, today),
+            DASHBOARD_SCOPE_TOTAL,
+        )
+        self.pension_widget.update_calculation(
+            pension_calculation(self.data, self.settings, today),
+            DASHBOARD_SCOPE_TOTAL,
+        )
+
+        if summary["rows"] and summary["periode_start"] and summary["periode_slut"]:
+            total_days = max(1, (summary["periode_slut"] - summary["periode_start"]).days + 1)
+            self.period_progress.set_period(
+                summary["periode_start"],
+                summary["periode_slut"],
+                summary["periode_slut"],
+                summary["rows"],
+                1,
+                today_marker_label=None,
+            )
+            registration_text = f"{work_count} vagter"
+            if day_off_count:
+                registration_text += f" og {day_off_count} fridage"
+            self.progress_detail.setText(
+                f"{total_days} dage i alt. {registration_text} registreret. "
+                f"Netto løn samlet: {format_money(summary['netto'])}."
+            )
+        else:
+            self.period_progress.clear("Ingen registreringer endnu.")
+            self.progress_detail.setText("Ingen vagter registreret endnu.")
+
+        self._update_stats(summary, total_mode=True)
+        self._fill_breakdown(summary["breakdown"])
+        self._fill_recent(summary["rows"], total_mode=True)
+
+        self.dashboard_container.updateGeometry()
+        self._sync_compact_body_size()
+
     def _arrange_cards(self, show_other_income):
         summary_cards = [
             self.gross_card,
@@ -6183,9 +6511,16 @@ class DashboardPage(CompactScrollPage):
         self.setup_guide_widget.update_status(self._setup_guide_status())
         self.budget_widget.update_budget(ft.get_budget_categories(self.settings))
         self.salary_calculator_widget.set_settings(self.settings)
-        self.holiday_pay_widget.update_calculation(holiday_pay_calculation(self.data, self.settings))
-        self.pension_widget.update_calculation(pension_calculation(self.data, self.settings))
+        self.holiday_pay_widget.update_calculation(
+            holiday_pay_calculation(self.data, self.settings),
+            self.dashboard_scope,
+        )
+        self.pension_widget.update_calculation(
+            pension_calculation(self.data, self.settings),
+            self.dashboard_scope,
+        )
         self._arrange_cards(True)
+        self.period_card.set_title("Datospænd" if self.dashboard_scope == DASHBOARD_SCOPE_TOTAL else "Lønperiode")
         for card in [
             self.net_card,
             self.total_card,
@@ -6217,22 +6552,29 @@ class DashboardPage(CompactScrollPage):
     def _last_complete_period_info(self):
         return last_complete_period_info(self.data, self.settings)
 
-    def _update_stats(self, summary):
+    def _update_stats(self, summary, total_mode=False):
         rows = summary.get("work_rows", summary["rows"])
         if not rows:
-            self.stat_average_card.set_values("N/A", "Ingen vagter i perioden")
-            self.stat_week_card.set_values("N/A", "Ingen vagter i perioden")
-            self.stat_total_net_card.set_values("N/A", "Ingen vagter i perioden")
+            empty_text = "Ingen vagter registreret" if total_mode else "Ingen vagter i perioden"
+            self.stat_average_card.set_values("N/A", empty_text)
+            self.stat_week_card.set_values("N/A", empty_text)
+            self.stat_total_net_card.set_values("N/A", empty_text)
             return
 
         avg_netto = summary["netto"] / len(rows)
         avg_hours = average_or_none(row["timer"] for row in rows)
-        total_weeks = max(1 / 7, ((summary["periode_slut"] - summary["periode_start"]).days + 1) / 7)
+        period_start = summary.get("periode_start")
+        period_end = summary.get("periode_slut")
+        if period_start and period_end:
+            total_weeks = max(1 / 7, ((period_end - period_start).days + 1) / 7)
+        else:
+            total_weeks = 1
         weekly_netto = summary["netto"] / total_weeks
         weekly_hours = summary["timer"] / total_weeks
         best_shift = max(rows, key=lambda row: (row.get("netto", 0), row.get("brutto", 0), row["dato"]))
-        self.stat_average_card.set_values(format_money(avg_netto), f"{format_number(avg_hours)} timer · denne periode")
-        self.stat_week_card.set_values(format_money(weekly_netto), f"{format_number(weekly_hours)} timer/uge · denne periode")
+        scope_text = "samlet" if total_mode else "denne periode"
+        self.stat_average_card.set_values(format_money(avg_netto), f"{format_number(avg_hours)} timer · {scope_text}")
+        self.stat_week_card.set_values(format_money(weekly_netto), f"{format_number(weekly_hours)} timer/uge · {scope_text}")
         self.stat_total_net_card.set_values(
             format_money(best_shift.get("netto", 0)),
             f"{format_date(best_shift['dato'])} · {format_number(best_shift['timer'])} t.",
@@ -6341,9 +6683,14 @@ class DashboardPage(CompactScrollPage):
             self.breakdown_table.setItem(row_index, 1, table_item(value, Qt.AlignRight | Qt.AlignVCenter))
         fit_table_height(self.breakdown_table, len(rows), max_rows=len(rows), min_rows=len(rows))
 
-    def _fill_recent(self, rows):
-        self.recent_table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
+    def _fill_recent(self, rows, total_mode=False):
+        visible_rows = (
+            sorted(rows, key=lambda row: (row["dato"], row.get("brutto", 0), row.get("timer", 0)), reverse=True)[:20]
+            if total_mode
+            else rows
+        )
+        self.recent_table.setRowCount(len(visible_rows))
+        for row_index, row in enumerate(visible_rows):
             if row.get("is_day_off"):
                 self.recent_table.setItem(row_index, 0, day_off_table_item(format_shift_table_date(row["dato"])))
                 self.recent_table.setItem(row_index, 1, day_off_table_item("Fridag", Qt.AlignRight | Qt.AlignVCenter))
@@ -6357,7 +6704,13 @@ class DashboardPage(CompactScrollPage):
                 self.recent_table.setItem(row_index, 3, table_item(format_money(row["netto"]), Qt.AlignRight | Qt.AlignVCenter))
                 set_note_table_cell(self.recent_table, row_index, 4, row.get("note", ""), self, "Vagtnote")
         setup_shift_table_columns(self.recent_table, 1, note_column=4)
-        fit_table_height(self.recent_table, len(rows), max_rows=20, min_rows=min(3, max(1, len(rows))), bottom_padding=0)
+        fit_table_height(
+            self.recent_table,
+            len(visible_rows),
+            max_rows=20,
+            min_rows=min(3, max(1, len(visible_rows))),
+            bottom_padding=0,
+        )
 
 
 class ShiftEntryDialog(QDialog):
