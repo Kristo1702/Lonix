@@ -1,4 +1,5 @@
 # Python
+database_converter.py
 __pycache__/
 *.py[cod]
 *.pyo

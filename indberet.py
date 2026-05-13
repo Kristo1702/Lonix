@@ -27,7 +27,7 @@ def _format_cli_number(value):
     except (TypeError, ValueError):
         return str(value)
 
-def shift_entry_header(hours, rate, pause=0):
+def shift_entry_header(hours, rate, pause=0, note=""):
         if hours is None:
             hours = "-"
         if rate is None:
@@ -49,6 +49,9 @@ def shift_entry_header(hours, rate, pause=0):
         print("    ┃" + Fore.WHITE + f" Timeløn: {rate} " + Fore.LIGHTBLACK_EX + " "*rate_padding + "┃")
         print("    ┃" + Fore.WHITE + f" Pause:   {pause} min" + Fore.LIGHTBLACK_EX + " " * max(0, longest_str - len(str(pause)) - 14) + "┃")
         print("    ┗" + "━"*longest_str + "┛" + Style.RESET_ALL)
+        clean_note = ft.normalize_note(note)
+        if clean_note:
+            print(Fore.WHITE + f"    Note: {clean_note[:70]}" + Style.RESET_ALL)
 
 def _format_overwrite_entry(index, dato, løn_info):
     duration = ft.get_shift_duration_hours(løn_info)
@@ -88,7 +91,7 @@ def _choose_entry_to_overwrite(dato, entries):
         )
 
 
-def save_shift(hours, rate, pause=0, start_time=None, end_time=None, entry_date=None):
+def save_shift(hours, rate, pause=0, start_time=None, end_time=None, entry_date=None, note=""):
     try:
         if entry_date is None:
             nu = datetime.now()
@@ -114,6 +117,9 @@ def save_shift(hours, rate, pause=0, start_time=None, end_time=None, entry_date=
             "timer": hours,
             "timeløn": rate
         }
+        clean_note = ft.normalize_note(note)
+        if clean_note:
+            shift_info[ft.ENTRY_NOTE_KEY] = clean_note
         normalized_start = ft.normalize_clock_text(start_time)
         normalized_end = ft.normalize_clock_text(end_time)
         if normalized_start and normalized_end:
@@ -171,27 +177,29 @@ def main():
     pause = 0
     start_time = None
     end_time = None
+    note = ""
     while True:
         ft.header("Hovedmenu > Vagter > Tilføj vagt")
-        shift_entry_header(hours, rate, pause)
+        shift_entry_header(hours, rate, pause, note)
         
         print(Fore.LIGHTBLACK_EX + "──────────────────────" + Fore.LIGHTBLUE_EX)
         print("(1) Timer")
         print("(2) Timeløn")
-        print("(3) Pause" + Fore.GREEN)
-        print("\n(4) Gem vagt" + Fore.YELLOW)
+        print("(3) Pause")
+        print("(4) Note" + Fore.GREEN)
+        print("\n(5) Gem vagt" + Fore.YELLOW)
         print("\n(0) Tilbage")
         print(Fore.LIGHTBLACK_EX + "──────────────────────")
         choice_main = input(Fore.WHITE + "\n\nVælg: " + Style.RESET_ALL).strip().lower()
 
-        if choice_main not in ["1", "2", "3", "4", "0"]:
+        if choice_main not in ["1", "2", "3", "4", "5", "0"]:
             ft.error_message(sti="Hovedmenu > Vagter > Tilføj vagt", besked=None, ugyldigt_valg=True, sov=False, get_input=True)
             continue
 
         elif choice_main == "1":
             while True:
                 ft.header("Hovedmenu > Vagter > Tilføj vagt > Timer")
-                shift_entry_header(hours, rate, pause)
+                shift_entry_header(hours, rate, pause, note)
                 hours_str = input(Fore.WHITE + "Timer eller starttid (fx 5.25 eller 14:00, 0 for at afslutte): ").strip().lower()
 
                 if hours_str == "0":
@@ -235,7 +243,7 @@ def main():
         elif choice_main == "2":
             while True:
                 ft.header("Hovedmenu > Vagter > Tilføj vagt > Timeløn")
-                shift_entry_header(hours, rate, pause)
+                shift_entry_header(hours, rate, pause, note)
                 rate_str = input(Fore.WHITE + "Timeløn (0 for at afslutte): ").strip().lower()
 
                 if rate_str == "0":
@@ -254,7 +262,7 @@ def main():
         elif choice_main == "3":
             while True:
                 ft.header("Hovedmenu > Vagter > Tilføj vagt > Pause")
-                shift_entry_header(hours, rate, pause)
+                shift_entry_header(hours, rate, pause, note)
                 pause_str = input(Fore.WHITE + "Pause i minutter (0 for ingen pause): ").strip().lower()
 
                 try:
@@ -268,6 +276,11 @@ def main():
                         ft.error_message(sti="Hovedmenu > Vagter > Tilføj vagt > Pause", besked="Pause skal være et tal.", ugyldigt_valg=False, sov=False, get_input=True)
         
         elif choice_main == "4":
+            ft.header("Hovedmenu > Vagter > Tilføj vagt > Note")
+            shift_entry_header(hours, rate, pause, note)
+            note = ft.normalize_note(input(Fore.WHITE + "Note (tom for ingen note): " + Style.RESET_ALL))
+
+        elif choice_main == "5":
             if hours is None or rate is None:
                 ft.error_message(
                     sti="Hovedmenu > Vagter > Tilføj vagt > Gem",
@@ -285,12 +298,13 @@ def main():
                     get_input=True
                 )
                 continue
-            success, dato = save_shift(hours, rate, pause, start_time=start_time, end_time=end_time)
+            success, dato = save_shift(hours, rate, pause, start_time=start_time, end_time=end_time, note=note)
             if success:
                 ft.header("Hovedmenu > Vagter > Tilføj vagt > Gem")
                 brutto = paid_hours * rate
                 netto = ft.calculate_netto_salary_from_brutto(brutto)
-                print(Fore.GREEN + f"Data gemt:\n\n- Dato: {dato}\n- Timer før pause: {hours}\n- Pause: {pause} min\n- Betalte timer: {paid_hours}\n- Timeløn: {rate}\n\n= Brutto indtjening: {brutto:.1f} kr\n= Netto indtjening: {netto:.1f} kr")
+                note_line = f"\n- Note: {note}" if note else ""
+                print(Fore.GREEN + f"Data gemt:\n\n- Dato: {dato}\n- Timer før pause: {hours}\n- Pause: {pause} min\n- Betalte timer: {paid_hours}\n- Timeløn: {rate}{note_line}\n\n= Brutto indtjening: {brutto:.1f} kr\n= Netto indtjening: {netto:.1f} kr")
                 input(Fore.WHITE + "\n\nTryk enter for at fortsætte...")
                 return
             

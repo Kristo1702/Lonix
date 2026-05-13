@@ -435,6 +435,7 @@ def _parse_shifts(data):
                 "skat": 0.0,
                 "settings": entry_settings,
                 "is_day_off": is_day_off,
+                "note": ft.get_entry_note(løn_info),
             }
         )
 

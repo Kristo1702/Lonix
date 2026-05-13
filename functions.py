@@ -40,6 +40,9 @@ DAY_OFF_ENTRY_TYPE = "fridag"
 ENTRY_ID_KEY = "id"
 ENTRY_SETTINGS_KEY = "indstillinger"
 ENTRY_CREATED_KEY = "registreret"
+ENTRY_NOTE_KEY = "note"
+PAYROLL_NOTES_KEY = "lønseddel noter"
+NOTE_MAX_LENGTH = 1000
 DATA_DIR = "data"
 DATA_FILE = os.path.join(DATA_DIR, "løn.txt")
 SETTINGS_FILE = os.path.join(DATA_DIR, "oplysninger.txt")
@@ -219,6 +222,7 @@ def _default_settings():
         PAY_PERIOD_TYPE_KEY: PAY_PERIOD_TYPE_MONTH,
         PAY_PERIOD_WEEKS_KEY: DEFAULT_PAY_PERIOD_WEEKS,
         PAY_PERIOD_ANCHOR_KEY: DEFAULT_PAY_PERIOD_ANCHOR,
+        PAYROLL_NOTES_KEY: {},
     }
 
 
@@ -476,6 +480,61 @@ def get_entry_id(løn_info):
     return str(entry_id) if entry_id else None
 
 
+def normalize_note(value, max_length=NOTE_MAX_LENGTH):
+    if value is None:
+        return ""
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if max_length and len(text) > max_length:
+        text = text[:max_length].rstrip()
+    return text
+
+
+def get_entry_note(løn_info):
+    if not isinstance(løn_info, dict):
+        return ""
+    return normalize_note(løn_info.get(ENTRY_NOTE_KEY, ""))
+
+
+def _payroll_note_date_key(value):
+    if isinstance(value, datetime):
+        value = value.date()
+    if isinstance(value, date):
+        return value.isoformat()
+    parsed = _parse_settings_date(value)
+    if parsed is not None:
+        return parsed.isoformat()
+    return str(value or "").strip()
+
+
+def payroll_period_key(period_start, period_end):
+    return f"{_payroll_note_date_key(period_start)}:{_payroll_note_date_key(period_end)}"
+
+
+def get_payroll_notes(settings=None):
+    settings = normalize_settings(settings if settings is not None else load_settings())
+    notes = settings.get(PAYROLL_NOTES_KEY, {})
+    return dict(notes) if isinstance(notes, dict) else {}
+
+
+def get_payroll_note(settings=None, period_start=None, period_end=None):
+    if period_start is None or period_end is None:
+        return ""
+    return get_payroll_notes(settings).get(payroll_period_key(period_start, period_end), "")
+
+
+def set_payroll_note(settings, period_start, period_end, note):
+    updated = normalize_settings(settings if isinstance(settings, dict) else {})
+    notes = get_payroll_notes(updated)
+    key = payroll_period_key(period_start, period_end)
+    clean_note = normalize_note(note)
+    if clean_note:
+        notes[key] = clean_note
+    else:
+        notes.pop(key, None)
+    updated[PAYROLL_NOTES_KEY] = notes
+    return updated
+
+
 def get_entry_settings(løn_info, fallback_settings=None):
     if isinstance(fallback_settings, dict):
         base_settings = settings_snapshot(fallback_settings)
@@ -499,6 +558,12 @@ def normalize_entry_info(løn_info, settings=None, date_key=None, entry_id=None)
     else:
         clean_info[ENTRY_SETTINGS_KEY] = settings_snapshot(settings)
 
+    note = normalize_note(clean_info.get(ENTRY_NOTE_KEY, ""))
+    if note:
+        clean_info[ENTRY_NOTE_KEY] = note
+    else:
+        clean_info.pop(ENTRY_NOTE_KEY, None)
+
     if is_day_off(clean_info):
         clean_info[ENTRY_TYPE_KEY] = DAY_OFF_ENTRY_TYPE
         clean_info["timer"] = 0
@@ -518,10 +583,6 @@ def get_period_amount_factor(period_start=None, period_end=None, settings=None):
         period_start = period_start.date()
     if isinstance(period_end, datetime):
         period_end = period_end.date()
-
-    normalized = normalize_settings(settings if isinstance(settings, dict) else {})
-    if normalized.get(PAY_PERIOD_TYPE_KEY) == PAY_PERIOD_TYPE_MONTH:
-        return 1.0
 
     period_days = max(1, (period_end - period_start).days + 1)
     return period_days / AVERAGE_DAYS_PER_MONTH
@@ -844,6 +905,14 @@ def normalize_settings(settings):
         normalized.get(PAY_PERIOD_ANCHOR_KEY, DEFAULT_PAY_PERIOD_ANCHOR),
         DEFAULT_PAY_PERIOD_ANCHOR,
     )
+    raw_payroll_notes = normalized.get(PAYROLL_NOTES_KEY, {})
+    clean_payroll_notes = {}
+    if isinstance(raw_payroll_notes, dict):
+        for key, value in raw_payroll_notes.items():
+            clean_note = normalize_note(value)
+            if clean_note:
+                clean_payroll_notes[str(key)] = clean_note
+    normalized[PAYROLL_NOTES_KEY] = clean_payroll_notes
 
     return normalized
 
@@ -1029,8 +1098,9 @@ def get_tax_allowance_for_period(settings, period_start=None, period_end=None, c
         return allowance
 
     if unit == AMOUNT_UNIT_MONTH:
-        if settings.get(PAY_PERIOD_TYPE_KEY) != PAY_PERIOD_TYPE_MONTH:
-            add_note("Månedsfradrag er estimeret til lønperioden efter antal dage.")
+        if settings.get(PAY_PERIOD_TYPE_KEY) == PAY_PERIOD_TYPE_MONTH:
+            return allowance
+        add_note("Månedsfradrag er estimeret til lønperioden efter antal dage.")
         return scale_monthly_amount_for_period(allowance, period_start, period_end, settings)
 
     if unit == AMOUNT_UNIT_TWO_WEEKS:
